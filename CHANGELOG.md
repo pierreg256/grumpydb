@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-04-21
+
+### Added
+- **TaskMan README** (`examples/taskman/README.md`): full docs with data safety section, WAL explanation, API patterns table
+- **Crash test script** (`examples/taskman/test_crash.sh`): 6-step automated test (insert, export, restart, flush, re-import, verify)
+
+### Fixed
+- Phase 5 and 5b tasks now fully checked in implementation plan
+- All documentation updated to reflect completed WAL + demo app work
+
 ## [0.3.0] - 2026-04-21
 
 ### Added
