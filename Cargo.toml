@@ -1,0 +1,24 @@
+[package]
+name = "grumpydb"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A disk-based object storage engine with B+Tree indexing and page-based storage"
+license = "MIT"
+repository = "https://github.com/pierregilot/grumpydb"
+homepage = "https://github.com/pierregilot/grumpydb"
+documentation = "https://docs.rs/grumpydb"
+readme = "README.md"
+keywords = ["database", "storage-engine", "btree", "embedded", "key-value"]
+categories = ["database-implementations", "data-structures"]
+exclude = [".claude/", "docs/", "tests/"]
+
+[dependencies]
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+crc32fast = "1"
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+rand = "0.8"
