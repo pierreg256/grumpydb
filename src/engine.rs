@@ -10,7 +10,8 @@ use crate::error::{GrumpyError, Result};
 use crate::page::manager::PageManager;
 use crate::page::overflow;
 use crate::page::slotted::SlottedPage;
-use crate::page::{PageHeader, PageType, PAGE_USABLE_SPACE, SLOT_SIZE};
+use crate::page::{PageHeader, PageType, PAGE_SIZE, PAGE_USABLE_SPACE, SLOT_SIZE};
+use crate::wal::writer::WalWriter;
 
 /// Maximum document size that fits in a single slotted page (without overflow).
 const INLINE_MAX: usize = PAGE_USABLE_SPACE - SLOT_SIZE;
@@ -35,9 +36,15 @@ const INLINE_MAX: usize = PAGE_USABLE_SPACE - SLOT_SIZE;
 pub struct GrumpyDb {
     data_pm: PageManager,
     btree: BTree,
+    wal: WalWriter,
     /// Page ID of the current data page being filled.
     current_data_page: u32,
+    /// Write counter for periodic checkpointing.
+    writes_since_checkpoint: u32,
 }
+
+/// Number of writes between automatic checkpoints.
+const CHECKPOINT_INTERVAL: u32 = 100;
 
 impl GrumpyDb {
     /// Opens or creates a database at the given directory path.
@@ -49,24 +56,35 @@ impl GrumpyDb {
 
         let data_path = path.join("data.db");
         let index_path = path.join("index.db");
+        let wal_path = path.join("wal.log");
 
         let data_exists = data_path.exists() && data_path.metadata()?.len() > 0;
         let index_exists = index_path.exists() && index_path.metadata()?.len() > 0;
 
         let mut data_pm = PageManager::new(&data_path)?;
 
-        let btree = if index_exists {
+        let mut btree = if index_exists {
             BTree::open(&index_path)?
         } else {
             BTree::create(&index_path)?
         };
 
+        // WAL recovery: replay committed transactions, undo uncommitted ones
+        let mut wal = WalWriter::new(&wal_path)?;
+        let records = wal.read_all_records()?;
+        if !records.is_empty() {
+            crate::wal::recovery::recover(&records, &mut data_pm, &mut btree.pm)?;
+            // Checkpoint after recovery to clean the WAL
+            data_pm.sync()?;
+            btree.sync()?;
+            wal.log_checkpoint()?;
+            wal.truncate()?;
+        }
+
         // Find or allocate the current data page
         let current_data_page = if data_exists {
-            // Find the last data page (scan backwards for a Data-type page)
             Self::find_or_alloc_data_page(&mut data_pm)?
         } else {
-            // Allocate the first data page
             let page_id = data_pm.allocate_page()?;
             let page = SlottedPage::new(page_id);
             data_pm.write_page(page_id, &page.data)?;
@@ -76,7 +94,9 @@ impl GrumpyDb {
         Ok(Self {
             data_pm,
             btree,
+            wal,
             current_data_page,
+            writes_since_checkpoint: 0,
         })
     }
 
@@ -92,16 +112,21 @@ impl GrumpyDb {
         let doc = Document::new(key, value);
         let encoded = doc.encode();
 
+        // Begin WAL transaction
+        let tx_id = self.wal.begin_tx();
+
         let (page_id, slot_id) = if encoded.len() > INLINE_MAX {
-            // Large document → overflow pages
-            self.store_overflow(&encoded)?
+            self.store_overflow_wal(tx_id, &encoded)?
         } else {
-            // Normal document → slotted page
-            self.store_inline(&encoded)?
+            self.store_inline_wal(tx_id, &encoded)?
         };
 
         // Index in B+Tree
         self.btree.insert(key, page_id, slot_id)?;
+
+        // Commit the transaction (fsync WAL)
+        self.wal.log_commit(tx_id)?;
+        self.maybe_checkpoint()?;
         Ok(())
     }
 
@@ -141,6 +166,8 @@ impl GrumpyDb {
             return Err(GrumpyError::KeyNotFound(*key));
         };
 
+        let tx_id = self.wal.begin_tx();
+
         // Read the slot to check for overflow
         let buf = self.data_pm.read_page(page_id)?;
         let page = SlottedPage::from_bytes(buf);
@@ -151,13 +178,18 @@ impl GrumpyDb {
             overflow::free_overflow(&mut self.data_pm, overflow_page_id)?;
         }
 
-        // Delete from slotted page
-        let mut page = page;
+        // WAL: log before deleting from slotted page
+        let before = self.data_pm.read_page(page_id)?;
+        let mut page = SlottedPage::from_bytes(before);
         page.delete(slot_id)?;
+        self.wal.log_page_write(tx_id, page_id, &before, &page.data)?;
         self.data_pm.write_page(page_id, &page.data)?;
 
         // Remove from B+Tree
         self.btree.delete(key)?;
+
+        self.wal.log_commit(tx_id)?;
+        self.maybe_checkpoint()?;
         Ok(())
     }
 
@@ -216,10 +248,13 @@ impl GrumpyDb {
         Ok(results)
     }
 
-    /// Flushes all data to disk.
+    /// Flushes all data to disk and writes a WAL checkpoint.
     pub fn flush(&mut self) -> Result<()> {
         self.data_pm.sync()?;
         self.btree.sync()?;
+        self.wal.log_checkpoint()?;
+        self.wal.truncate()?;
+        self.writes_since_checkpoint = 0;
         Ok(())
     }
 
@@ -230,22 +265,23 @@ impl GrumpyDb {
 
     // ── Internal helpers ────────────────────────────────────────────────
 
-    /// Stores an encoded document inline in a slotted page.
-    fn store_inline(&mut self, encoded: &[u8]) -> Result<(u32, u16)> {
-        // Try inserting into the current data page
-        let buf = self.data_pm.read_page(self.current_data_page)?;
-        let mut page = SlottedPage::from_bytes(buf);
+    /// Stores inline with WAL logging.
+    fn store_inline_wal(&mut self, tx_id: u64, encoded: &[u8]) -> Result<(u32, u16)> {
+        let before = self.data_pm.read_page(self.current_data_page)?;
+        let mut page = SlottedPage::from_bytes(before);
 
         match page.insert(encoded) {
             Ok(slot_id) => {
+                self.wal.log_page_write(tx_id, self.current_data_page, &before, &page.data)?;
                 self.data_pm.write_page(self.current_data_page, &page.data)?;
                 Ok((self.current_data_page, slot_id))
             }
             Err(GrumpyError::PageFull(_)) => {
-                // Allocate a new data page
                 let new_page_id = self.data_pm.allocate_page()?;
+                let before_new = [0u8; PAGE_SIZE];
                 let mut new_page = SlottedPage::new(new_page_id);
                 let slot_id = new_page.insert(encoded)?;
+                self.wal.log_page_write(tx_id, new_page_id, &before_new, &new_page.data)?;
                 self.data_pm.write_page(new_page_id, &new_page.data)?;
                 self.current_data_page = new_page_id;
                 Ok((new_page_id, slot_id))
@@ -254,11 +290,20 @@ impl GrumpyDb {
         }
     }
 
-    /// Stores an encoded document as overflow pages + a reference in a slotted page.
-    fn store_overflow(&mut self, encoded: &[u8]) -> Result<(u32, u16)> {
+    /// Stores overflow with WAL logging (for the reference slot only).
+    fn store_overflow_wal(&mut self, tx_id: u64, encoded: &[u8]) -> Result<(u32, u16)> {
         let overflow_page_id = overflow::write_overflow(&mut self.data_pm, encoded)?;
         let ref_data = overflow::encode_overflow_ref(overflow_page_id, encoded.len() as u32);
-        self.store_inline(&ref_data)
+        self.store_inline_wal(tx_id, &ref_data)
+    }
+
+    /// Periodic checkpoint: flush + truncate WAL every N writes.
+    fn maybe_checkpoint(&mut self) -> Result<()> {
+        self.writes_since_checkpoint += 1;
+        if self.writes_since_checkpoint >= CHECKPOINT_INTERVAL {
+            self.flush()?;
+        }
+        Ok(())
     }
 
     /// Reads a tuple from a slotted page, following overflow chains if needed.

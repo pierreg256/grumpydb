@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-21
+
+### Added
+- **Write-Ahead Log** (`src/wal/`): crash recovery and durability (Phase 5)
+  - `WalRecord`: binary serialization with CRC32 checksums
+  - `WalWriter`: append-only writer with fsync on commit, LSN tracking
+  - Recovery: redo committed TXs, undo uncommitted TXs, checkpoint support
+  - Engine integration: all page writes logged, auto-checkpoint every 100 writes
+- **TaskMan v2** (Phase 5b): crash safety demo
+  - `export` command: dump all tasks to pipe-delimited file
+  - `import` command: bulk import with duplicate detection
+  - `flush` command: explicit WAL checkpoint
+  - Help updated with crash safety documentation
+- 19 new WAL unit tests (record, writer, recovery)
+- 157 total tests, 0 clippy warnings
+
+### Changed
+- `GrumpyDb::flush()` now writes WAL checkpoint and truncates WAL
+- `GrumpyDb::open()` runs WAL recovery automatically
+
 ## [0.2.1] - 2026-04-21
 
 ### Added

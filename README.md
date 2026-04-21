@@ -14,7 +14,7 @@ A disk-based object storage engine written in Rust. GrumpyDB stores schema-less 
 | B+Tree index (search, insert, delete, range scan) | ✅ Implemented |
 | Document model (JSON-like Value type, binary codec) | ✅ Implemented |
 | Storage engine (CRUD API) | ✅ Implemented |
-| Write-Ahead Log (crash recovery) | 🔲 Phase 5 |
+| Write-Ahead Log (crash recovery) | ✅ Implemented |
 | Buffer pool (LRU cache) | 🔲 Phase 6 |
 | SWMR concurrency | 🔲 Phase 7 |
 

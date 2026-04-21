@@ -263,7 +263,14 @@ impl TaskStore {
     ///
     /// Call this to ensure all data is written to disk before exiting.
     /// Without flush, data may be buffered in memory.
-    #[allow(dead_code)] // Will be used in Phase 5b (crash safety demo)
+    ///
+    /// ## What flush does (with WAL)
+    ///
+    /// 1. Syncs `data.db` and `index.db` to disk (fsync)
+    /// 2. Writes a WAL checkpoint record
+    /// 3. Truncates the WAL file (no longer needed after checkpoint)
+    ///
+    /// After flush(), even a power failure won't lose data.
     pub fn flush(&mut self) -> Result<(), String> {
         self.db
             .flush()
@@ -277,5 +284,98 @@ impl TaskStore {
         self.db
             .close()
             .map_err(|e| format!("Failed to close database: {e}"))
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // BATCH OPERATIONS (Phase 5b)
+    //
+    // These demonstrate bulk insert/export patterns with GrumpyDB.
+    // In a real application, you'd use these for data migration, backup, etc.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Exports all tasks as a simple text format (one JSON-like line per task).
+    ///
+    /// Demonstrates: `scan(..)` for full data export.
+    ///
+    /// ## Format
+    ///
+    /// Each line: `UUID|title|description|done|created_at|tag1,tag2,...`
+    /// This is a simple pipe-delimited format for portability.
+    pub fn export_tasks(&mut self) -> Result<String, String> {
+        let tasks = self.list_all_tasks()?;
+        let mut output = String::new();
+        for task in &tasks {
+            let desc = task.description.as_deref().unwrap_or("");
+            let tags = task.tags.join(",");
+            output.push_str(&format!(
+                "{}|{}|{}|{}|{}|{}\n",
+                task.id, task.title, desc, task.done, task.created_at, tags
+            ));
+        }
+        Ok(output)
+    }
+
+    /// Imports tasks from the pipe-delimited export format.
+    ///
+    /// Demonstrates: batch `insert()` — each task is inserted individually.
+    ///
+    /// ## Crash safety
+    ///
+    /// Each insert is a separate WAL transaction. If the process crashes mid-import:
+    /// - Tasks already committed are safe (WAL guarantees durability)
+    /// - The partially-written last task is rolled back on recovery
+    /// - You can re-run the import for remaining tasks (duplicates are rejected)
+    ///
+    /// Returns the number of tasks successfully imported.
+    pub fn import_tasks(&mut self, data: &str) -> Result<usize, String> {
+        let mut count = 0;
+        for line in data.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.splitn(6, '|').collect();
+            if parts.len() < 5 {
+                continue; // Skip malformed lines
+            }
+
+            let id = uuid::Uuid::parse_str(parts[0])
+                .map_err(|e| format!("Invalid UUID: {e}"))?;
+            let title = parts[1].to_string();
+            let description = if parts[2].is_empty() {
+                None
+            } else {
+                Some(parts[2].to_string())
+            };
+            let done = parts[3] == "true";
+            let created_at: i64 = parts[4].parse().unwrap_or(0);
+            let tags: Vec<String> = if parts.len() > 5 && !parts[5].is_empty() {
+                parts[5].split(',').map(String::from).collect()
+            } else {
+                Vec::new()
+            };
+
+            let task = super::task::Task {
+                id,
+                title,
+                description,
+                done,
+                created_at,
+                tags,
+            };
+
+            let value = task.to_value();
+
+            // Insert using the original UUID as key.
+            // If the key already exists (duplicate import), skip it.
+            match self.db.insert(id, value) {
+                Ok(()) => count += 1,
+                Err(grumpydb::GrumpyError::DuplicateKey(_)) => {
+                    // Already imported — skip silently
+                }
+                Err(e) => return Err(format!("Import failed: {e}")),
+            }
+        }
+        Ok(count)
     }
 }

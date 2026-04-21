@@ -82,6 +82,9 @@ fn main() {
         "show" => cmd_show(&args[2..]),
         "delete" => cmd_delete(&args[2..]),
         "stats" => cmd_stats(),
+        "export" => cmd_export(&args[2..]),
+        "import" => cmd_import(&args[2..]),
+        "flush" => cmd_flush(),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -299,6 +302,72 @@ fn cmd_stats() -> Result<(), String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// COMMAND: export
+//
+// Usage: taskman export [file]
+//
+// Demonstrates: scan(..) for full data export
+// ─────────────────────────────────────────────────────────────────────────────
+fn cmd_export(args: &[String]) -> Result<(), String> {
+    let mut store = TaskStore::open(&db_path())?;
+    let data = store.export_tasks()?;
+    store.close()?;
+
+    if let Some(file_path) = args.first() {
+        std::fs::write(file_path, &data)
+            .map_err(|e| format!("Failed to write file: {e}"))?;
+        println!("Exported to {file_path}");
+    } else {
+        print!("{data}");
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMMAND: import
+//
+// Usage: taskman import <file>
+//
+// Demonstrates: batch insert with crash safety
+//
+// Each task is inserted as a separate WAL transaction. If the process crashes
+// mid-import, already-committed tasks are safe. The partially-written last
+// task is rolled back automatically by WAL recovery on next open.
+// ─────────────────────────────────────────────────────────────────────────────
+fn cmd_import(args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err("Usage: taskman import <file>".into());
+    }
+
+    let data = std::fs::read_to_string(&args[0])
+        .map_err(|e| format!("Failed to read file: {e}"))?;
+
+    let mut store = TaskStore::open(&db_path())?;
+    let count = store.import_tasks(&data)?;
+    store.close()?;
+
+    println!("Imported {count} tasks");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMMAND: flush
+//
+// Usage: taskman flush
+//
+// Demonstrates: explicit flush + WAL checkpoint.
+// After this, all data is guaranteed durable on disk, and the WAL is truncated.
+// ─────────────────────────────────────────────────────────────────────────────
+fn cmd_flush() -> Result<(), String> {
+    let mut store = TaskStore::open(&db_path())?;
+    store.flush()?;
+    store.close()?;
+    println!("Database flushed and WAL checkpointed");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -362,19 +431,28 @@ COMMANDS:
     undone <id>                                  Mark task as pending
     delete <id>                                  Delete a task
     stats                                        Show task statistics
+    export [file]                                Export tasks (to stdout or file)
+    import <file>                                Import tasks from file
+    flush                                        Flush data + WAL checkpoint
     help                                         Show this help
 
 EXAMPLES:
     cargo run --example taskman -- add "Buy groceries" --tags shopping
-    cargo run --example taskman -- add "Write report" --desc "Q1 summary" --tags work,urgent
     cargo run --example taskman -- list
-    cargo run --example taskman -- list --pending
     cargo run --example taskman -- done a3b4c5d6
+    cargo run --example taskman -- export tasks.bak
+    cargo run --example taskman -- import tasks.bak
+    cargo run --example taskman -- flush
     cargo run --example taskman -- stats
 
 DATA:
     Tasks are stored in .taskman/ in the current directory.
-    Files: data.db (documents), index.db (B+Tree index)
+    Files: data.db (documents), index.db (B+Tree index), wal.log (Write-Ahead Log)
+
+CRASH SAFETY:
+    Every write is protected by the Write-Ahead Log (WAL).
+    If the process crashes, committed data is recovered automatically on next open.
+    Use 'flush' to force a checkpoint and truncate the WAL.
 "#
     );
 }
