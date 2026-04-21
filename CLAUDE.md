@@ -128,7 +128,8 @@ See `docs/ARCHITECTURE.md` for in-depth technical details.
 | WAL Agent | `.claude/agents/wal-agent.md` | Develop WAL and recovery |
 | Integration Agent | `.claude/agents/integration-agent.md` | Assemble modules and integration testing |
 | Docs Agent | `.claude/agents/docs-agent.md` | Verify and update all documentation after each agent |
+| Release Agent | `.claude/agents/release-agent.md` | Version bump, git commit/tag, crates.io package after each phase |
 
 ### Inter-agent workflow
 
-After each execution of a development agent (page, btree, wal, integration), **always run the Docs Agent** to synchronize documentation with the code.
+After each execution of a development agent (page, btree, wal, integration), **always run the Docs Agent** to synchronize documentation with the code, then **run the Release Agent** at each phase completion to bump version and commit.

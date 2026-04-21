@@ -10,7 +10,7 @@
 //! use uuid::Uuid;
 //! use std::collections::BTreeMap;
 //!
-//! let db = GrumpyDb::open(std::path::Path::new("./my_database")).unwrap();
+//! let mut db = GrumpyDb::open(std::path::Path::new("./my_database")).unwrap();
 //!
 //! let key = Uuid::new_v4();
 //! let value = Value::Object(BTreeMap::from([
@@ -22,6 +22,7 @@
 //!
 //! let doc = db.get(&key).unwrap();
 //! assert!(doc.is_some());
+//! db.close().unwrap();
 //! ```
 
 pub mod buffer;

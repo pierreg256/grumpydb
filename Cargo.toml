@@ -1,12 +1,12 @@
 [package]
 name = "grumpydb"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 description = "A disk-based object storage engine with B+Tree indexing and page-based storage"
 license = "MIT"
-repository = "https://github.com/pierregilot/grumpydb"
-homepage = "https://github.com/pierregilot/grumpydb"
+repository = "https://github.com/pierreg256/grumpydb"
+homepage = "https://github.com/pierreg256/grumpydb"
 documentation = "https://docs.rs/grumpydb"
 readme = "README.md"
 keywords = ["database", "storage-engine", "btree", "embedded", "key-value"]

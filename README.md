@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/grumpy-logo.png" alt="GrumpyDB logo" width="200">
+</p>
+
 # GrumpyDB
 
 A disk-based object storage engine written in Rust. GrumpyDB stores schema-less documents (JSON-like) with B+Tree indexing, page-based storage, WAL for durability, and SWMR concurrency.
@@ -9,7 +13,7 @@ A disk-based object storage engine written in Rust. GrumpyDB stores schema-less 
 | Page-based storage (8 KiB pages, slotted layout, overflow) | ✅ Implemented |
 | B+Tree index (search, insert, delete, range scan) | ✅ Implemented |
 | Document model (JSON-like Value type, binary codec) | ✅ Implemented |
-| Storage engine (CRUD API) | 🔲 Phase 4 |
+| Storage engine (CRUD API) | ✅ Implemented |
 | Write-Ahead Log (crash recovery) | 🔲 Phase 5 |
 | Buffer pool (LRU cache) | 🔲 Phase 6 |
 | SWMR concurrency | 🔲 Phase 7 |
@@ -45,7 +49,7 @@ use grumpydb::{GrumpyDb, Value};
 use uuid::Uuid;
 use std::collections::BTreeMap;
 
-let db = GrumpyDb::open(std::path::Path::new("./my_database")).unwrap();
+let mut db = GrumpyDb::open(std::path::Path::new("./my_database")).unwrap();
 
 let key = Uuid::new_v4();
 let value = Value::Object(BTreeMap::from([
@@ -57,9 +61,11 @@ db.insert(key, value).unwrap();
 
 let doc = db.get(&key).unwrap();
 assert!(doc.is_some());
+
+db.close().unwrap();
 ```
 
-> **Note** : L'API CRUD complète (`insert`, `get`, `update`, `delete`, `scan`) n'est pas encore câblée dans l'engine (Phase 4). L'exemple ci-dessus montre l'API cible.
+> **Note**: The full CRUD API (`insert`, `get`, `update`, `delete`, `scan`) is now wired and functional. WAL durability is coming in Phase 5.
 
 ## Architecture
 

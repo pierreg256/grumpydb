@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-21
+
+### Added
+- **Storage engine** (`src/engine.rs`): full CRUD wiring connecting pages + B+Tree + documents (Phase 4)
+  - `GrumpyDb::open()`: creates/opens `data.db` + `index.db` in a directory
+  - `insert(key, value)`: encode document → slotted page (or overflow) → B+Tree index
+  - `get(key)`: B+Tree search → read page/slot → decode document
+  - `update(key, value)`: delete + re-insert
+  - `delete(key)`: remove from slotted page + free overflow + remove from B+Tree
+  - `scan(range)`: B+Tree range cursor → read each document
+  - `flush()` / `close()`: sync all data to disk
+  - Overflow page support for large documents (>8 KiB)
+  - Auto-allocation of new data pages when current is full
+- **Integration tests** (`tests/crud_test.rs`): 10 cross-module tests
+- **Release agent** (`.claude/agents/release-agent.md`): automated versioning workflow
+- 138 total tests (126 unit + 10 integration + 2 doctests)
+
+### Changed
+- `GrumpyDb` methods now take `&mut self` (was `&self` stubs)
+- Public API re-exports updated in `lib.rs`
+
 ## [0.1.0] - 2026-04-21
 
 ### Added
