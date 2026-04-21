@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn test_float_round_trip() {
         round_trip(&Value::Float(0.0));
-        round_trip(&Value::Float(3.14));
+        round_trip(&Value::Float(std::f64::consts::PI));
         round_trip(&Value::Float(-1.0e100));
         round_trip(&Value::Float(f64::INFINITY));
         round_trip(&Value::Float(f64::NEG_INFINITY));
@@ -374,7 +374,7 @@ mod tests {
             Value::Null,
             Value::Bool(true),
             Value::Integer(42),
-            Value::Float(3.14),
+            Value::Float(std::f64::consts::PI),
             Value::String("test".into()),
             Value::Bytes(vec![1, 2, 3]),
             Value::Array(vec![Value::Integer(1), Value::Integer(2)]),

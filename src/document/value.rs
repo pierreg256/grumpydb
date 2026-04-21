@@ -113,8 +113,8 @@ mod tests {
 
     #[test]
     fn test_value_float() {
-        let v = Value::Float(3.14);
-        assert_eq!(v.as_f64(), Some(3.14));
+        let v = Value::Float(std::f64::consts::PI);
+        assert_eq!(v.as_f64(), Some(std::f64::consts::PI));
     }
 
     #[test]

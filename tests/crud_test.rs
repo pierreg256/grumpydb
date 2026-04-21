@@ -97,7 +97,7 @@ fn test_scan_range_ordered() {
     // Verify range
     for (key, _) in &results {
         let v = key.as_u128();
-        assert!(v >= 10 && v < 20);
+        assert!((10..20).contains(&v));
     }
 }
 

@@ -549,9 +549,14 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert!(INTERNAL_MAX_KEYS > 100, "fan-out should be large");
-        assert!(LEAF_MAX_ENTRIES > 100, "leaf capacity should be large");
-        assert!(INTERNAL_MIN_KEYS > 0);
-        assert!(LEAF_MIN_ENTRIES > 0);
+        // These values are compile-time constants, but we verify them
+        // as a sanity check for the page layout calculations.
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(INTERNAL_MAX_KEYS > 100, "fan-out should be large: {INTERNAL_MAX_KEYS}");
+            assert!(LEAF_MAX_ENTRIES > 100, "leaf capacity should be large: {LEAF_MAX_ENTRIES}");
+            assert!(INTERNAL_MIN_KEYS > 0, "internal min keys: {INTERNAL_MIN_KEYS}");
+            assert!(LEAF_MIN_ENTRIES > 0, "leaf min entries: {LEAF_MIN_ENTRIES}");
+        }
     }
 }

@@ -191,9 +191,9 @@ mod tests {
         // No new pages should have been added to the file
         assert_eq!(pm.num_pages(), pages_after_write);
         // Reused page IDs should be from the freed chain
-        let mut reused = vec![r1, r2, r3];
+        let mut reused = [r1, r2, r3];
         reused.sort();
-        assert!(reused.iter().all(|&id| id >= first_id && id < first_id + 3));
+        assert!(reused.iter().all(|&id| (first_id..first_id + 3).contains(&id)));
     }
 
     #[test]

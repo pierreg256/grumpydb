@@ -7,10 +7,15 @@ Phase 1: Foundations        █████████████████�
 Phase 2: B+Tree Index      ████████████████████  ✅ Done
 Phase 3: Document Model    ████████████████████  ✅ Done
 Phase 4: Storage Engine    ████████████████████  ✅ Done
+Phase 4b: Demo App v1      ████████████████████  ✅ Done
 Phase 5: WAL & Recovery    ░░░░░░░░░░░░░░░░░░░░  Pending
+Phase 5b: Demo App v2      ░░░░░░░░░░░░░░░░░░░░  Pending — Add crash-safety demo
 Phase 6: Buffer Pool       ░░░░░░░░░░░░░░░░░░░░  Pending
+Phase 6b: Demo App v3      ░░░░░░░░░░░░░░░░░░░░  Pending — Add performance benchmarks
 Phase 7: SWMR Concurrency  ░░░░░░░░░░░░░░░░░░░░  Pending
+Phase 7b: Demo App v4      ░░░░░░░░░░░░░░░░░░░░  Pending — Add multi-threaded access
 Phase 8: Polish & Hardening░░░░░░░░░░░░░░░░░░░░  Pending
+Phase 8b: Demo App Final   ░░░░░░░░░░░░░░░░░░░░  Pending — Polished example + tutorial
 ```
 
 ---
@@ -216,6 +221,67 @@ Connect Pages + B+Tree + Documents for a functional CRUD (without WAL or cache).
 
 ---
 
+## Phase 4b: Demo App v1 — Task Manager CLI (basic CRUD) ✅
+
+### Objective
+Build a simple task management CLI app (`examples/taskman/`) that uses GrumpyDB as its storage engine.
+This serves as a **living usage example** and **documentation** — every line of code must be thoroughly
+commented to explain how to use the GrumpyDB API.
+
+### Principles
+- **Documentation-first**: every function, struct, and block has explanatory comments
+- **Progressive complexity**: starts simple (CRUD), grows with each engine phase
+- **Standalone**: the example is a separate binary in `examples/`, not a workspace member
+- **Real-world patterns**: shows idiomatic Rust usage of the GrumpyDB API
+
+### Tasks
+
+#### 4b.1 Data model (`examples/taskman/task.rs`) ✅
+- [x] `Task` struct: id (UUID), title, description (Option), done, created_at (i64), tags (Vec<String>)
+- [x] `Task::to_value()` → serialize Task as `Value::Object` with BTreeMap
+- [x] `Task::from_value(id, &Value)` → deserialize from `Value::Object`
+- [x] `Task::new()` with auto UUID + timestamp
+- [x] `Display` impl for pretty CLI output with status indicators (✓/○)
+- [x] Thorough doc-comments explaining each conversion step and data flow
+
+#### 4b.2 Storage layer (`examples/taskman/store.rs`) ✅
+- [x] `TaskStore` wrapping `GrumpyDb` — documented constructor pattern
+- [x] `add_task(task) → Uuid` — demonstrates `insert()` with doc-comments
+- [x] `get_task(id) → Option<Task>` — demonstrates `get()` + Value→Task
+- [x] `update_task(task)` — demonstrates `update()` (full replacement)
+- [x] `set_task_done(id, done)` — demonstrates read-modify-write pattern
+- [x] `delete_task(id)` — demonstrates `delete()`
+- [x] `list_all_tasks() → Vec<Task>` — demonstrates `scan(..)`
+- [x] `list_by_status(done) → Vec<Task>` — demonstrates scan + filter
+- [x] `stats() → (total, done, pending)` — demonstrates scan + aggregation
+- [x] Error handling: GrumpyError mapped to user-friendly String messages
+
+#### 4b.3 CLI interface (`examples/taskman/main.rs`) ✅
+- [x] Subcommands: `add`, `list`, `done`, `undone`, `show`, `delete`, `stats`, `help`
+- [x] Args parsed with `std::env::args()` (no external crate dependency)
+- [x] `--desc` and `--tags` flags for `add` command
+- [x] `--done` / `--pending` filters for `list` command
+- [x] Short UUID prefix matching for task IDs (8-char prefix scan)
+- [x] Pretty-print with status indicators and tag display
+- [x] Full help message with usage examples
+
+#### 4b.4 Documentation quality ✅
+- [x] Module-level `//!` docs in all 3 files explaining purpose, data flow, architecture
+- [x] Every public function has `///` doc with argument descriptions
+- [x] Inline comments explaining every GrumpyDB API call
+- [x] Code architecture diagram in comments (Task ↔ Value ↔ Disk)
+- [x] Pattern explanations: typed wrapper, read-modify-write, scan+filter
+
+### Validation criteria Phase 4b ✅
+- [x] `cargo run --example taskman -- add "Task"` works end-to-end
+- [x] `cargo run --example taskman -- list` shows tasks
+- [x] Persistence: tasks survive process restart
+- [x] `done`/`undone` toggle works
+- [x] 138 total tests, 0 clippy warnings (all-targets)
+- [x] Every GrumpyDB API call has an inline comment
+
+---
+
 ## Phase 5: WAL & Crash Recovery
 
 ### Objective
@@ -257,6 +323,38 @@ Add durability with a Write-Ahead Log.
 
 ---
 
+## Phase 5b: Demo App v2 — Crash Safety Demo
+
+### Objective
+Update the task manager to demonstrate WAL durability. Show users how GrumpyDB
+protects their data against crashes.
+
+### Tasks
+
+#### 5b.1 Crash safety documentation
+- [ ] Add `examples/taskman/README.md` section: "Data Safety"
+- [ ] Explain WAL protocol in user-friendly terms (with diagrams in comments)
+- [ ] Document `flush()` usage: when to call it, what it guarantees
+
+#### 5b.2 Batch operations
+- [ ] `import_tasks(path)` — bulk import from a JSON file, demonstrates batch insert
+- [ ] `export_tasks(path)` — export all tasks to JSON, demonstrates `scan(..)`
+- [ ] Document transactional semantics: "if import crashes mid-way, what happens?"
+
+#### 5b.3 Reliability test script
+- [ ] `examples/taskman/test_crash.sh` — script that:
+  1. Inserts 100 tasks
+  2. Kills the process mid-write (SIGKILL)
+  3. Restarts and verifies data integrity
+- [ ] Inline comments explaining what GrumpyDB guarantees at each step
+
+### Validation criteria Phase 5b
+- Import/export round-trip works
+- Crash test script passes
+- Documentation explains WAL in accessible terms
+
+---
+
 ## Phase 6: Buffer Pool
 
 ### Objective
@@ -292,6 +390,37 @@ LRU cache to avoid redundant disk I/O.
 
 ---
 
+## Phase 6b: Demo App v3 — Performance Benchmarks
+
+### Objective
+Add performance-oriented features to the task manager and benchmark GrumpyDB
+with and without the buffer pool. Demonstrate caching benefits to users.
+
+### Tasks
+
+#### 6b.1 Benchmark subcommand
+- [ ] `taskman bench --count 10000` — insert N tasks, measure time, report ops/sec
+- [ ] `taskman bench --read 10000` — random reads, measure latency
+- [ ] Document buffer pool impact with inline comments comparing before/after
+- [ ] Show how page cache hits reduce disk I/O (add metrics reporting)
+
+#### 6b.2 Large dataset demo
+- [ ] `taskman generate --count 50000` — generate synthetic tasks for testing
+- [ ] `taskman search --tag "urgent"` — scan + filter, show scan performance
+- [ ] Document: "How GrumpyDB handles 50K+ documents efficiently"
+
+#### 6b.3 Performance documentation
+- [ ] `examples/taskman/PERFORMANCE.md` — benchmark results, graphs explanation
+- [ ] Inline comments explaining: page cache hit ratio, LRU eviction, buffer pool sizing
+- [ ] Code comments: "Why this operation is O(log n) and not O(n)"
+
+### Validation criteria Phase 6b
+- Benchmark subcommand runs without error
+- Performance numbers documented
+- Buffer pool impact clearly explained in comments
+
+---
+
 ## Phase 7: SWMR Concurrency
 
 ### Objective
@@ -318,6 +447,38 @@ Allow concurrent reads with an exclusive writer.
 - Test with 8 reader threads + 1 writer thread for 5 seconds
 - No deadlocks, no corruption
 - All existing tests still pass
+
+---
+
+## Phase 7b: Demo App v4 — Multi-threaded Access
+
+### Objective
+Demonstrate concurrent access to GrumpyDB from multiple threads. Show the SWMR
+model in action with a real application.
+
+### Tasks
+
+#### 7b.1 Concurrent task operations
+- [ ] `taskman serve --port 8080` — simple HTTP server (using std TcpListener, no external crate)
+- [ ] Multiple clients can read tasks concurrently
+- [ ] Single writer at a time (SWMR model demonstrated)
+- [ ] Document: Arc<GrumpyDb> usage pattern with inline comments
+- [ ] Document: why reads don't block each other
+
+#### 7b.2 Shared state demo
+- [ ] `taskman watch` — poll for changes from another thread (demonstrates concurrent reads)
+- [ ] `taskman worker` — background task processor (demonstrates writer pattern)
+- [ ] Document thread-safety guarantees with comments at each critical section
+
+#### 7b.3 Concurrency documentation
+- [ ] Inline comments: "Why we use RwLock, not Mutex, for readers"
+- [ ] Inline comments: "How SWMR prevents data corruption"
+- [ ] Code tour: "From HTTP request to disk write — the full lock sequence"
+
+### Validation criteria Phase 7b
+- Two concurrent readers get consistent results
+- Writer + readers work without deadlocks
+- Every lock acquisition has an explanatory comment
 
 ---
 
@@ -352,3 +513,51 @@ Finalize, harden, document.
 - `cargo doc` with no warnings
 - Stress test passes
 - README with working examples
+
+---
+
+## Phase 8b: Demo App Final — Polished Example & Tutorial
+
+### Objective
+Finalize the task manager as a **production-quality example** and **tutorial**.
+It should serve as the primary onboarding resource for new GrumpyDB users.
+
+### Tasks
+
+#### 8b.1 Code polish
+- [ ] Refactor all example code for clarity and idiomaticness
+- [ ] Every file starts with a `//!` module doc explaining its role in the example
+- [ ] Every public function has a `/// # Examples` block with runnable code
+- [ ] Error handling uses custom error type wrapping `GrumpyError` (demonstrates integration)
+- [ ] No `unwrap()` in non-test code — all errors handled with `?` or user messages
+
+#### 8b.2 Tutorial documentation (`examples/taskman/TUTORIAL.md`)
+- [ ] **Chapter 1: Getting Started** — opening a database, inserting your first document
+- [ ] **Chapter 2: Data Modeling** — converting Rust structs to/from `Value`
+- [ ] **Chapter 3: Querying** — get, scan, range queries
+- [ ] **Chapter 4: Updates & Deletes** — mutation patterns
+- [ ] **Chapter 5: Durability** — flush, WAL, crash recovery
+- [ ] **Chapter 6: Performance** — buffer pool, page cache, benchmarking
+- [ ] **Chapter 7: Concurrency** — multi-threaded access, SWMR model
+- [ ] Each chapter references specific functions in the example code
+
+#### 8b.3 API cookbook (`examples/taskman/COOKBOOK.md`)
+- [ ] Recipe: "Store a Rust struct in GrumpyDB"
+- [ ] Recipe: "Iterate over all documents"
+- [ ] Recipe: "Filter documents by field value"
+- [ ] Recipe: "Handle a missing key gracefully"
+- [ ] Recipe: "Bulk import from JSON"
+- [ ] Recipe: "Use GrumpyDB from multiple threads"
+- [ ] Each recipe is a self-contained code snippet with inline comments
+
+#### 8b.4 Integration with main docs
+- [ ] Link tutorial from main `README.md`
+- [ ] Link cookbook from `cargo doc` landing page
+- [ ] `examples/` section in `CONTRIBUTING.md`
+- [ ] Verify all code snippets compile: `cargo test --doc`
+
+### Validation criteria Phase 8b
+- Tutorial covers all 7 chapters with working code
+- Cookbook has 6+ recipes
+- All code snippets in docs compile
+- A new user can build a CRUD app by following the tutorial alone

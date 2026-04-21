@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-04-21
+
+### Added
+- **TaskMan example app** (`examples/taskman/`): fully documented task manager CLI (Phase 4b)
+  - `task.rs`: Task struct with `to_value()`/`from_value()` conversions, Display impl
+  - `store.rs`: TaskStore wrapper around GrumpyDb (add, get, update, delete, list, stats)
+  - `main.rs`: CLI with subcommands (add, list, done, undone, show, delete, stats, help)
+  - Every GrumpyDB API call has inline documentation comments
+  - Demonstrates: CRUD, scan+filter, read-modify-write pattern, error handling
+- **Release agent** (`.claude/agents/release-agent.md`): automated versioning workflow
+- Demo app phases (4b-8b) added to implementation plan
+
+### Fixed
+- Clippy warnings fixed across all targets (useless-vec, Range::contains, approx PI, constant assertions)
+
 ## [0.2.0] - 2026-04-21
 
 ### Added

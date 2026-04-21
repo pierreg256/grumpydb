@@ -454,7 +454,7 @@ mod tests {
         assert_eq!(results.len(), 5);
         for (key, val) in &results {
             let i = key.as_u128();
-            assert!(i >= 5 && i < 10);
+            assert!((5..10).contains(&i));
             assert_eq!(*val, Value::Integer(i as i64));
         }
     }
