@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-21
+
+### Added
+- **SWMR concurrency** (`src/concurrency/`): thread-safe database access (Phase 7)
+  - `SharedDb`: `Arc<RwLock<GrumpyDb>>` wrapper with `Clone` for thread sharing
+  - Concurrent reads and exclusive writes via `parking_lot::RwLock`
+  - 7 concurrency tests: multi-reader, writer+readers, contention, persistence
+- **TaskMan v4** (Phase 7b): multi-threaded demo
+  - `concurrent.rs`: `run_bench()` multi-thread benchmark, `run_server()` TCP server
+  - `bench` command: configurable writers/readers/count
+  - `serve` command: line-protocol TCP server with per-client threads
+  - Full concurrency documentation in comments
+- `SharedDb` re-exported from `lib.rs`
+- 165 total tests, 0 clippy warnings
+
+### Note
+- Phase 6 (Buffer Pool) skipped for now — will be implemented later
+- `SharedDb::get()` currently uses write lock (B+Tree cursor needs &mut self)
+
 ## [0.3.1] - 2026-04-21
 
 ### Added

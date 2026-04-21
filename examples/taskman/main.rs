@@ -39,10 +39,12 @@
 //!
 //! ```text
 //! main.rs     → CLI parsing + command dispatch
-//! task.rs     → Task struct + Value conversions
-//! store.rs    → TaskStore wrapper around GrumpyDb
+//! task.rs        → Task struct + Value conversions
+//! store.rs       → TaskStore wrapper around GrumpyDb
+//! concurrent.rs  → SharedDb wrapper for multi-threaded access (Phase 7b)
 //! ```
 
+mod concurrent;
 mod store;
 mod task;
 
@@ -85,6 +87,8 @@ fn main() {
         "export" => cmd_export(&args[2..]),
         "import" => cmd_import(&args[2..]),
         "flush" => cmd_flush(),
+        "bench" => cmd_bench(&args[2..]),
+        "serve" => cmd_serve(&args[2..]),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -303,6 +307,62 @@ fn cmd_stats() -> Result<(), String> {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
+// COMMAND: bench
+//
+// Usage: taskman bench [--writers N] [--readers N] [--count N]
+//
+// Demonstrates: SharedDb concurrent access from multiple threads.
+// Uses a temporary database to avoid polluting the main task store.
+// ─────────────────────────────────────────────────────────────────────────────
+fn cmd_bench(args: &[String]) -> Result<(), String> {
+    let mut writers = 2;
+    let mut readers = 4;
+    let mut count = 1000;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--writers" | "-w" => { i += 1; if i < args.len() { writers = args[i].parse().unwrap_or(2); } }
+            "--readers" | "-r" => { i += 1; if i < args.len() { readers = args[i].parse().unwrap_or(4); } }
+            "--count" | "-n" => { i += 1; if i < args.len() { count = args[i].parse().unwrap_or(1000); } }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // Use a temporary directory for benchmarks (don't pollute the real task store).
+    let bench_dir = std::env::temp_dir().join("taskman_bench");
+    let _ = std::fs::remove_dir_all(&bench_dir);
+    let result = concurrent::run_bench(&bench_dir, writers, readers, count);
+    let _ = std::fs::remove_dir_all(&bench_dir);
+    result
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMMAND: serve
+//
+// Usage: taskman serve [--port PORT]
+//
+// Demonstrates: SharedDb shared across client connection threads.
+// Each TCP client gets its own thread with a cloned SharedDb handle.
+// ─────────────────────────────────────────────────────────────────────────────
+fn cmd_serve(args: &[String]) -> Result<(), String> {
+    let mut port = "8080";
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--port" || args[i] == "-p" {
+            i += 1;
+            if i < args.len() {
+                port = &args[i];
+            }
+        }
+        i += 1;
+    }
+    let addr = format!("127.0.0.1:{port}");
+    concurrent::run_server(&db_path(), &addr)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // COMMAND: export
 //
 // Usage: taskman export [file]
@@ -434,6 +494,8 @@ COMMANDS:
     export [file]                                Export tasks (to stdout or file)
     import <file>                                Import tasks from file
     flush                                        Flush data + WAL checkpoint
+    bench [--writers N] [--readers N] [--count N] Concurrent benchmark
+    serve [--port PORT]                          Start TCP server (multi-client)
     help                                         Show this help
 
 EXAMPLES:
@@ -442,6 +504,8 @@ EXAMPLES:
     cargo run --example taskman -- done a3b4c5d6
     cargo run --example taskman -- export tasks.bak
     cargo run --example taskman -- import tasks.bak
+    cargo run --example taskman -- bench --writers 4 --count 5000
+    cargo run --example taskman -- serve --port 9090
     cargo run --example taskman -- flush
     cargo run --example taskman -- stats
 

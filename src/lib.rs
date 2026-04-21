@@ -37,3 +37,4 @@ pub mod wal;
 pub use document::value::Value;
 pub use error::{GrumpyError, Result};
 pub use engine::GrumpyDb;
+pub use concurrency::lock_manager::SharedDb;
