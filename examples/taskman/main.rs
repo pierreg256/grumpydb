@@ -89,6 +89,8 @@ fn main() {
         "flush" => cmd_flush(),
         "bench" => cmd_bench(&args[2..]),
         "serve" => cmd_serve(&args[2..]),
+        "generate" => cmd_generate(&args[2..]),
+        "search" => cmd_search(&args[2..]),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -363,6 +365,135 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// COMMAND: generate
+//
+// Usage: taskman generate --count N
+//
+// Demonstrates: bulk insert performance.
+// Generates N synthetic tasks with predictable data for benchmarking.
+// Shows ops/sec throughput — useful for measuring buffer pool impact.
+// ─────────────────────────────────────────────────────────────────────────────
+fn cmd_generate(args: &[String]) -> Result<(), String> {
+    let mut count = 1000usize;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--count" || args[i] == "-n" {
+            i += 1;
+            if i < args.len() {
+                count = args[i].parse().unwrap_or(1000);
+            }
+        }
+        i += 1;
+    }
+
+    let mut store = TaskStore::open(&db_path())?;
+
+    // Measure insert throughput.
+    // Each insert: encode document → store in slotted page → index in B+Tree → WAL commit.
+    // With a buffer pool, repeated page access is served from cache → fewer disk reads.
+    let start = std::time::Instant::now();
+    let tags_pool = ["work", "personal", "urgent", "low-priority", "meeting", "errand"];
+
+    for i in 0..count {
+        let tag_idx = i % tags_pool.len();
+        let task = Task::new(
+            format!("Generated task #{i}"),
+            Some(&format!("Auto-generated task for benchmarking (batch {i})")),
+            vec![tags_pool[tag_idx]],
+        );
+        store.add_task(task).map_err(|e| format!("Insert {i} failed: {e}"))?;
+
+        // Progress indicator every 1000 tasks
+        if (i + 1) % 1000 == 0 {
+            print!("\r  Generated {}/{count}...", i + 1);
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let ops_sec = count as f64 / elapsed.as_secs_f64();
+
+    // Show buffer pool stats — demonstrates how the LRU cache reduces disk I/O.
+    // With a buffer pool, the current data page stays cached between inserts,
+    // so only the first insert (or a new page allocation) triggers a disk read.
+    let (reads, writes, cached, capacity) = store.pool_stats();
+
+    store.close()?;
+
+    println!("\r  Generated {count} tasks in {elapsed:.2?} ({ops_sec:.0} ops/sec)");
+    println!("  Buffer pool: {reads} reads, {writes} writes, {cached}/{capacity} pages cached");
+    println!("  Use 'taskman search --tag urgent' to test scan+filter performance.");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMMAND: search
+//
+// Usage: taskman search --tag <tag>
+//
+// Demonstrates: scan(..) + filter performance.
+// Scans ALL documents (O(n)) and filters by tag.
+// With a buffer pool, the B+Tree traversal and page reads hit the cache
+// on repeated scans → significantly faster than hitting disk every time.
+// ─────────────────────────────────────────────────────────────────────────────
+fn cmd_search(args: &[String]) -> Result<(), String> {
+    let mut tag_filter: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--tag" || args[i] == "-t" {
+            i += 1;
+            if i < args.len() {
+                tag_filter = Some(&args[i]);
+            }
+        }
+        i += 1;
+    }
+
+    let Some(tag) = tag_filter else {
+        return Err("Usage: taskman search --tag <tag>".into());
+    };
+
+    let mut store = TaskStore::open(&db_path())?;
+
+    // Measure scan + filter time.
+    // This is a full table scan — O(n) — because GrumpyDB is a key-value store.
+    // The buffer pool helps by caching B+Tree pages and data pages during the scan.
+    let start = std::time::Instant::now();
+    let all_tasks = store.list_all_tasks()?;
+    let scan_time = start.elapsed();
+
+    let start_filter = std::time::Instant::now();
+    let matching: Vec<&Task> = all_tasks
+        .iter()
+        .filter(|t| t.tags.iter().any(|t_tag| t_tag == tag))
+        .collect();
+    let filter_time = start_filter.elapsed();
+
+    // Buffer pool stats — shows how many pages were read from disk vs cache.
+    // On repeated scans, most page reads come from cache → faster scans.
+    let (reads, writes, cached, capacity) = store.pool_stats();
+
+    store.close()?;
+
+    println!("Search results for tag '{tag}':");
+    println!("{}", "-".repeat(50));
+    if matching.is_empty() {
+        println!("  No tasks found with tag '{tag}'");
+    } else {
+        for task in &matching {
+            println!("  {task}");
+        }
+    }
+    println!();
+    println!("Performance:");
+    println!("  Scanned:  {} documents in {scan_time:.2?}", all_tasks.len());
+    println!("  Filtered: {} matches in {filter_time:.2?}", matching.len());
+    println!("  Total:    {:.2?}", scan_time + filter_time);
+    println!("  Buffer pool: {reads} reads, {writes} writes, {cached}/{capacity} cached");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // COMMAND: export
 //
 // Usage: taskman export [file]
@@ -494,6 +625,8 @@ COMMANDS:
     export [file]                                Export tasks (to stdout or file)
     import <file>                                Import tasks from file
     flush                                        Flush data + WAL checkpoint
+    generate [--count N]                         Generate N synthetic tasks (with perf stats)
+    search --tag <tag>                           Search tasks by tag (with perf stats)
     bench [--writers N] [--readers N] [--count N] Concurrent benchmark
     serve [--port PORT]                          Start TCP server (multi-client)
     help                                         Show this help
@@ -502,16 +635,23 @@ EXAMPLES:
     cargo run --example taskman -- add "Buy groceries" --tags shopping
     cargo run --example taskman -- list
     cargo run --example taskman -- done a3b4c5d6
-    cargo run --example taskman -- export tasks.bak
-    cargo run --example taskman -- import tasks.bak
+    cargo run --example taskman -- generate --count 5000
+    cargo run --example taskman -- search --tag urgent
     cargo run --example taskman -- bench --writers 4 --count 5000
-    cargo run --example taskman -- serve --port 9090
     cargo run --example taskman -- flush
     cargo run --example taskman -- stats
 
 DATA:
     Tasks are stored in .taskman/ in the current directory.
     Files: data.db (documents), index.db (B+Tree index), wal.log (Write-Ahead Log)
+
+PERFORMANCE:
+    GrumpyDB uses a buffer pool (LRU page cache, 256 frames = 2 MiB) to reduce
+    disk I/O. The 'generate' and 'search' commands show buffer pool stats:
+    - reads:  disk reads (cache misses)
+    - writes: disk writes (dirty page flushes)
+    - cached: pages currently in the pool
+    Use 'generate --count 50000' then 'search --tag urgent' to see the cache in action.
 
 CRASH SAFETY:
     Every write is protected by the Write-Ahead Log (WAL).

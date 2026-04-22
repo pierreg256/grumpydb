@@ -36,10 +36,19 @@ src/
 │   ├── mod.rs          # Document struct (UUID + Value)
 │   ├── value.rs        # Value enum — schema-less JSON-like type
 │   └── codec.rs        # Binary codec — encode/decode/encoded_size
-├── wal/                # Write-Ahead Log (not yet implemented)
-├── buffer/             # Buffer pool LRU (not yet implemented)
-├── concurrency/        # SWMR lock manager (not yet implemented)
-├── engine.rs           # GrumpyDb — CRUD orchestrator (stub)
+├── wal/                # Write-Ahead Log
+│   ├── mod.rs          # WAL module
+│   ├── record.rs       # WalRecord binary format with CRC32
+│   ├── writer.rs       # WalWriter (append, commit, checkpoint, truncate)
+│   └── recovery.rs     # Redo/undo recovery from WAL records
+├── buffer/             # Buffer pool LRU cache
+│   ├── mod.rs          # Buffer module
+│   ├── frame.rs        # BufferFrame (pin/unpin, dirty tracking)
+│   └── pool.rs         # BufferPool (LRU eviction, I/O counters)
+├── concurrency/        # SWMR lock manager
+│   ├── mod.rs          # Concurrency module
+│   └── lock_manager.rs # SharedDb (Arc<RwLock<GrumpyDb>>)
+├── engine.rs           # GrumpyDb — CRUD orchestrator with buffer pool
 └── lib.rs              # Public API, re-exports
 ```
 

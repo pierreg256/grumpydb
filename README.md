@@ -15,7 +15,7 @@ A disk-based object storage engine written in Rust. GrumpyDB stores schema-less 
 | Document model (JSON-like Value type, binary codec) | ✅ Implemented |
 | Storage engine (CRUD API) | ✅ Implemented |
 | Write-Ahead Log (crash recovery) | ✅ Implemented |
-| Buffer pool (LRU cache) | 🔲 Phase 6 |
+| Buffer pool (LRU cache) | ✅ Implemented |
 | SWMR concurrency | ✅ Implemented |
 
 ## Getting started
@@ -65,13 +65,13 @@ assert!(doc.is_some());
 db.close().unwrap();
 ```
 
-> **Note**: The full CRUD API (`insert`, `get`, `update`, `delete`, `scan`) is now wired and functional. WAL durability is coming in Phase 5.
+> **Note**: The full CRUD API (`insert`, `get`, `update`, `delete`, `scan`) is functional with WAL durability, LRU buffer pool caching, and SWMR concurrency.
 
 ## Architecture
 
 ```
 ┌──────────────────────────────────────┐
-│         API publique (lib.rs)        │
+│         Public API (lib.rs)          │
 ├──────────────────────────────────────┤
 │         Engine (engine.rs)           │
 ├────────────┬─────────────┬───────────┤
@@ -84,7 +84,7 @@ db.close().unwrap();
 └────────────┴─────────────┴───────────┘
 ```
 
-Voir [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) pour les détails techniques.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for technical details.
 
 ## Project structure
 
@@ -107,9 +107,9 @@ src/
 │   ├── mod.rs          # Document struct
 │   ├── value.rs        # Value enum (JSON-like)
 │   └── codec.rs        # Binary encode/decode
-├── wal/                # Write-Ahead Log (Phase 5)
-├── buffer/             # Buffer pool LRU (Phase 6)
-└── concurrency/        # SWMR locks (Phase 7)
+├── wal/                # Write-Ahead Log
+├── buffer/             # Buffer pool LRU cache
+└── concurrency/        # SWMR locks
 ```
 
 ## License

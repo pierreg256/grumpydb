@@ -21,10 +21,11 @@ The buffer pool is an **in-memory page cache** between the engine and disk:
 ```
 Engine ──→ BufferPool ──→ PageManager (disk)
               │
-              ├── page_table: HashMap<PageId, FrameId>
+              ├── page_table: HashMap<u32, usize>   // page_id → frame index
               ├── frames: Vec<BufferFrame>
-              ├── free_list: VecDeque<FrameId>
-              └── clock/lru for eviction
+              ├── clock: u64                       // monotonic LRU counter
+              ├── read_count: u64                  // disk read counter
+              └── write_count: u64                 // disk write counter
 ```
 
 ### BufferFrame
@@ -51,23 +52,36 @@ pub struct BufferFrame {
 ```rust
 impl BufferPool {
     /// Creates a pool with `capacity` frames
-    pub fn new(capacity: usize, page_manager: PageManager) -> Self;
+    pub fn new(capacity: usize, pm: PageManager) -> Self;
 
-    /// Fetches a page. Loads it from disk if not present.
-    /// Increments pin_count. The caller MUST call unpin afterwards.
-    pub fn fetch_page(&mut self, page_id: PageId) -> Result<&mut BufferFrame>;
+    /// Fetches a page. Loads it from disk if not cached.
+    /// The frame is pinned — caller MUST call unpin afterwards.
+    /// Returns the frame index.
+    pub fn fetch_page(&mut self, page_id: u32) -> Result<usize>;
 
-    /// Allocates a new page via the PageManager and loads it into the pool.
-    pub fn new_page(&mut self) -> Result<(PageId, &mut BufferFrame)>;
+    /// Allocates a new page on disk and loads it into the pool (pinned, dirty).
+    /// Returns (page_id, frame_index).
+    pub fn new_page(&mut self) -> Result<(u32, usize)>;
 
     /// Decrements pin_count. Marks dirty if `dirty=true`.
-    pub fn unpin(&mut self, page_id: PageId, dirty: bool) -> Result<()>;
+    pub fn unpin(&mut self, page_id: u32, dirty: bool) -> Result<()>;
 
     /// Flushes a dirty page to disk.
-    pub fn flush_page(&mut self, page_id: PageId) -> Result<()>;
+    pub fn flush_page(&mut self, page_id: u32) -> Result<()>;
 
-    /// Flushes all dirty pages.
+    /// Flushes all dirty pages + syncs.
     pub fn flush_all(&mut self) -> Result<()>;
+
+    /// Direct access to frame data (by index).
+    pub fn get_frame(&self, frame_idx: usize) -> &BufferFrame;
+    pub fn get_frame_mut(&mut self, frame_idx: usize) -> &mut BufferFrame;
+
+    /// Access the underlying PageManager (for overflow bypass).
+    pub fn page_manager(&mut self) -> &mut PageManager;
+
+    /// Pool stats.
+    pub fn capacity(&self) -> usize;
+    pub fn cached_count(&self) -> usize;
 }
 ```
 
@@ -100,31 +114,32 @@ fn fetch_page(page_id):
 ### LRU eviction algorithm
 
 ```
-fn find_free_frame() -> Result<FrameId>:
-    // 1. Look in the free_list
-    if let Some(frame_id) = free_list.pop_front():
-        return Ok(frame_id)
+fn find_free_frame() -> Result<usize>:
+    // 1. Scan for a free frame (page_id == None)
+    for (i, frame) in frames.iter().enumerate():
+        if frame.is_free():
+            return Ok(i)
     
-    // 2. Eviction: find the unpinned frame with the oldest last_accessed
-    candidate = frames.iter()
-        .filter(|f| f.pin_count == 0)
-        .min_by_key(|f| f.last_accessed)
+    // 2. Eviction: find the unpinned frame with the lowest last_accessed
+    candidate = frames.iter().enumerate()
+        .filter(|(_, f)| !f.is_pinned() && !f.is_free())
+        .min_by_key(|(_, f)| f.last_accessed)
     
     if candidate.is_none():
         return Err(BufferPoolExhausted)
     
-    let frame = candidate.unwrap()
+    let (victim_idx, _) = candidate.unwrap()
     
     // 3. If dirty, flush before eviction
-    if frame.dirty:
-        page_manager.write_page(frame.page_id.unwrap(), &frame.data)?
-        frame.dirty = false
+    if frames[victim_idx].dirty:
+        pm.write_page(frame.page_id.unwrap(), &frame.data)?
+        write_count += 1
     
-    // 4. Remove from page_table
-    page_table.remove(&frame.page_id.unwrap())
-    frame.page_id = None
+    // 4. Remove from page_table and reset
+    page_table.remove(&frames[victim_idx].page_id.unwrap())
+    frames[victim_idx].reset()
     
-    return Ok(frame.id)
+    return Ok(victim_idx)
 ```
 
 ## Interaction with the WAL

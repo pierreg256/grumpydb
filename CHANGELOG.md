@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-04-22
+
+### Added
+- **Buffer Pool** (`src/buffer/`): LRU page cache for reduced disk I/O (Phase 6)
+  - `BufferFrame`: page caching with pin/unpin and dirty tracking
+  - `BufferPool`: LRU eviction, `fetch_page()`, `new_page()`, `flush_all()`, I/O counters
+  - Engine integration: data page access goes through the pool (256 frames = 2 MiB default)
+  - `GrumpyDb::open_with_pool_capacity()` for custom pool sizing
+  - `GrumpyDb::pool_stats()` for read/write/cache monitoring
+  - Overflow pages bypass the pool (sequential, not revisited)
+  - 11 buffer pool unit tests + 3 engine integration tests
+- **TaskMan v3** (Phase 6b): performance benchmarks
+  - `generate --count N` command: bulk-insert synthetic tasks with pool stats output
+  - `search --tag TAG` command: scan + filter with pool stats output
+  - `store.rs`: `pool_stats()` method
+  - `PERFORMANCE.md`: buffer pool guide (architecture, impact table, capacity tuning)
+- 181 total tests, 0 clippy warnings
+
+### Changed
+- `GrumpyDb` engine now uses `BufferPool` for all data page access instead of direct `PageManager`
+- `flush()` now flushes buffer pool dirty pages before WAL checkpoint
+
 ## [0.4.0] - 2026-04-21
 
 ### Added

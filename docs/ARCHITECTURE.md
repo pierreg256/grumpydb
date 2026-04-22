@@ -220,34 +220,44 @@ At startup:
 
 ### 6.1 Structure
 
-```
-BufferPool {
-    frames: Vec<BufferFrame>,     // pages in memory
-    page_table: HashMap<PageId, FrameId>,  // page → frame mapping
-    free_list: Vec<FrameId>,      // available frames
-    capacity: usize,              // max number of frames
+```rust
+pub struct BufferPool {
+    frames: Vec<BufferFrame>,          // fixed-size page cache
+    page_table: HashMap<u32, usize>,   // page_id → frame index
+    pm: PageManager,                   // underlying disk I/O
+    clock: u64,                        // monotonic LRU counter
+    pub read_count: u64,               // disk reads (cache misses)
+    pub write_count: u64,              // disk writes (dirty evictions + flushes)
 }
 
-BufferFrame {
-    page: Page,                   // page content
-    page_id: Option<PageId>,      // which page is loaded
-    pin_count: u32,               // number of active references
-    dirty: bool,                  // modified since load?
-    last_accessed: Instant,       // for LRU
+pub struct BufferFrame {
+    pub data: [u8; PAGE_SIZE],         // raw page content (8 KiB)
+    pub page_id: Option<u32>,          // which page is loaded (None = free)
+    pub pin_count: u32,                // active references (>0 = cannot evict)
+    pub dirty: bool,                   // modified since load?
+    pub last_accessed: u64,            // monotonic counter for LRU ordering
 }
 ```
+
+Default pool: 256 frames × 8 KiB = 2 MiB (`DEFAULT_POOL_CAPACITY`).
+Overflow pages bypass the pool (sequential I/O, not revisited).
 
 ### 6.2 LRU Eviction Policy
 
 1. When the pool is full and a frame is needed:
-2. Find the unpinned frame with the oldest `last_accessed`
-3. If dirty → flush to disk (after WAL)
-4. Load the new page into the frame
+2. Scan all frames for a free frame (no page loaded)
+3. If none free, find the unpinned frame with the lowest `last_accessed` counter
+4. If dirty → flush to disk first
+5. Remove from page table, reset the frame, load the new page
+6. If all frames are pinned → return `BufferPoolExhausted` error
 
 ### 6.3 Pin/Unpin
 
-- `pin(page_id)`: load page if absent, increment `pin_count`, return reference
-- `unpin(page_id, dirty)`: decrement `pin_count`, mark dirty if modified
+- `fetch_page(page_id)`: load page if absent (or cache hit), pin, return frame index
+- `new_page()`: allocate on disk, load into pool (pinned, dirty), return (page_id, frame_idx)
+- `unpin(page_id, dirty)`: decrement `pin_count`, optionally mark dirty
+- `flush_page(page_id)`: write dirty page to disk, clear dirty flag
+- `flush_all()`: flush all dirty pages + sync
 - A page with `pin_count > 0` CANNOT be evicted
 
 ## 7. SWMR Concurrency
@@ -279,8 +289,12 @@ LockManager {
 pub struct GrumpyDb { /* ... */ }
 
 impl GrumpyDb {
-    /// Opens or creates a database in the specified directory
+    /// Opens or creates a database in the specified directory.
+    /// Data pages are cached in a 256-frame buffer pool (2 MiB) by default.
     pub fn open(path: &Path) -> Result<Self>;
+
+    /// Opens a database with a custom buffer pool capacity (number of frames).
+    pub fn open_with_pool_capacity(path: &Path, pool_capacity: usize) -> Result<Self>;
 
     /// Inserts a document with a UUID key, returns error if key exists
     pub fn insert(&self, key: Uuid, value: Value) -> Result<()>;
@@ -299,6 +313,9 @@ impl GrumpyDb {
 
     /// Forces flush of all dirty pages + WAL checkpoint
     pub fn flush(&self) -> Result<()>;
+
+    /// Returns buffer pool stats: (read_count, write_count, cached_count, capacity)
+    pub fn pool_stats(&self) -> (u64, u64, usize, usize);
 
     /// Closes the database cleanly (flush + close files)
     pub fn close(self) -> Result<()>;

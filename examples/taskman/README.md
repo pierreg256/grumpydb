@@ -26,6 +26,14 @@ cargo run --example taskman -- export tasks.bak   # Export to file
 cargo run --example taskman -- import tasks.bak   # Import from file
 cargo run --example taskman -- flush              # Force WAL checkpoint
 cargo run --example taskman -- stats              # Show statistics
+
+# Performance & benchmarking
+cargo run --example taskman -- generate --count 5000  # Generate synthetic tasks
+cargo run --example taskman -- search --tag urgent    # Search by tag (shows pool stats)
+
+# Concurrency
+cargo run --example taskman -- bench              # Multi-threaded benchmark
+cargo run --example taskman -- serve              # TCP server
 ```
 
 Task IDs can be shortened — just use the first 4+ characters (e.g., `a3b4`).
@@ -34,9 +42,12 @@ Task IDs can be shortened — just use the first 4+ characters (e.g., `a3b4`).
 
 ```
 examples/taskman/
-├── main.rs     CLI parsing + command dispatch
-├── task.rs     Task struct + Value conversions (data model)
-└── store.rs    TaskStore wrapper around GrumpyDb (storage layer)
+├── main.rs          CLI parsing + command dispatch
+├── task.rs          Task struct + Value conversions (data model)
+├── store.rs         TaskStore wrapper around GrumpyDb (storage layer)
+├── concurrent.rs    SharedDb wrapper for multi-threaded access
+├── PERFORMANCE.md   Buffer pool performance guide
+└── README.md        This file
 ```
 
 ### Data Flow
@@ -100,6 +111,7 @@ When importing tasks from a file:
 | Scan + aggregation | `store.rs: stats()` | `scan(..)` + `count()` |
 | Batch insert | `store.rs: import_tasks()` | Loop of `insert()` |
 | Flush + checkpoint | `store.rs: flush()` | `db.flush()` |
+| Buffer pool stats | `store.rs: pool_stats()` | `db.pool_stats()` |
 | Close database | `store.rs: close()` | `db.close()` |
 
 ## Files on Disk

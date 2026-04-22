@@ -286,6 +286,19 @@ impl TaskStore {
             .map_err(|e| format!("Failed to close database: {e}"))
     }
 
+    /// Returns buffer pool statistics: `(reads, writes, cached_pages, capacity)`.
+    ///
+    /// Demonstrates: [`GrumpyDb::pool_stats()`]
+    ///
+    /// Useful for understanding caching behavior:
+    /// - `reads`: number of disk reads (cache misses)
+    /// - `writes`: number of disk writes (dirty page flushes)
+    /// - `cached_pages`: pages currently in the buffer pool
+    /// - `capacity`: maximum number of pages the pool can hold
+    pub fn pool_stats(&self) -> (u64, u64, usize, usize) {
+        self.db.pool_stats()
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // BATCH OPERATIONS (Phase 5b)
     //
