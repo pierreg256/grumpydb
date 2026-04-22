@@ -11,7 +11,7 @@ use std::path::Path;
 
 use crate::error::Result;
 use crate::page::manager::PageManager;
-use crate::page::{PageHeader, PageType, PAGE_SIZE};
+use crate::page::{PAGE_SIZE, PageHeader, PageType};
 
 use self::node::LeafNode;
 

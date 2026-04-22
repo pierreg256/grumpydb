@@ -77,10 +77,7 @@ impl SharedDb {
     }
 
     /// Scans documents in a key range. Acquires write lock (see `get()` note).
-    pub fn scan(
-        &self,
-        range: impl std::ops::RangeBounds<Uuid>,
-    ) -> Result<Vec<(Uuid, Value)>> {
+    pub fn scan(&self, range: impl std::ops::RangeBounds<Uuid>) -> Result<Vec<(Uuid, Value)>> {
         let mut db = self.inner.write();
         db.scan(range)
     }
@@ -109,6 +106,24 @@ impl SharedDb {
     pub fn flush(&self) -> Result<()> {
         let mut db = self.inner.write();
         db.flush()
+    }
+
+    /// Compacts the database. Acquires exclusive lock.
+    pub fn compact(&self) -> Result<crate::engine::CompactResult> {
+        let mut db = self.inner.write();
+        db.compact()
+    }
+
+    /// Returns the number of documents in the database.
+    pub fn document_count(&self) -> u64 {
+        let db = self.inner.read();
+        db.document_count()
+    }
+
+    /// Returns buffer pool statistics.
+    pub fn pool_stats(&self) -> (u64, u64, usize, usize) {
+        let db = self.inner.read();
+        db.pool_stats()
     }
 
     /// Closes the database. Consumes the handle.
@@ -166,7 +181,8 @@ mod tests {
 
         // Insert some data
         for i in 0u128..50 {
-            db.insert(Uuid::from_u128(i), Value::Integer(i as i64)).unwrap();
+            db.insert(Uuid::from_u128(i), Value::Integer(i as i64))
+                .unwrap();
         }
 
         // Spawn 8 reader threads
@@ -196,7 +212,8 @@ mod tests {
 
         // Pre-insert some data
         for i in 0u128..100 {
-            db.insert(Uuid::from_u128(i), Value::Integer(i as i64)).unwrap();
+            db.insert(Uuid::from_u128(i), Value::Integer(i as i64))
+                .unwrap();
         }
 
         let barrier = Arc::new(Barrier::new(5)); // 1 writer + 4 readers
@@ -297,10 +314,7 @@ mod tests {
 
         {
             let db = SharedDb::open(&path).unwrap();
-            assert_eq!(
-                db.get(&key).unwrap(),
-                Some(Value::String("shared".into()))
-            );
+            assert_eq!(db.get(&key).unwrap(), Some(Value::String("shared".into())));
         }
     }
 
@@ -309,7 +323,8 @@ mod tests {
         let (_dir, db) = setup();
 
         for i in 0u128..30 {
-            db.insert(Uuid::from_u128(i), Value::Integer(i as i64)).unwrap();
+            db.insert(Uuid::from_u128(i), Value::Integer(i as i64))
+                .unwrap();
         }
 
         let db2 = db.clone();

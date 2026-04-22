@@ -196,9 +196,7 @@ fn decode_recursive(cursor: &mut &[u8], depth: usize) -> Result<Value> {
             }
             Ok(Value::Object(map))
         }
-        _ => Err(GrumpyError::Codec(format!(
-            "unknown type tag: 0x{tag:02x}"
-        ))),
+        _ => Err(GrumpyError::Codec(format!("unknown type tag: 0x{tag:02x}"))),
     }
 }
 
@@ -215,7 +213,9 @@ fn read_u8(cursor: &mut &[u8]) -> Result<u8> {
 
 fn read_u32_le(cursor: &mut &[u8]) -> Result<u32> {
     if cursor.len() < 4 {
-        return Err(GrumpyError::Codec("unexpected end of data reading u32".into()));
+        return Err(GrumpyError::Codec(
+            "unexpected end of data reading u32".into(),
+        ));
     }
     let val = u32::from_le_bytes(cursor[..4].try_into().unwrap());
     *cursor = &cursor[4..];
@@ -224,7 +224,9 @@ fn read_u32_le(cursor: &mut &[u8]) -> Result<u32> {
 
 fn read_i64_le(cursor: &mut &[u8]) -> Result<i64> {
     if cursor.len() < 8 {
-        return Err(GrumpyError::Codec("unexpected end of data reading i64".into()));
+        return Err(GrumpyError::Codec(
+            "unexpected end of data reading i64".into(),
+        ));
     }
     let val = i64::from_le_bytes(cursor[..8].try_into().unwrap());
     *cursor = &cursor[8..];
@@ -233,7 +235,9 @@ fn read_i64_le(cursor: &mut &[u8]) -> Result<i64> {
 
 fn read_f64_le(cursor: &mut &[u8]) -> Result<f64> {
     if cursor.len() < 8 {
-        return Err(GrumpyError::Codec("unexpected end of data reading f64".into()));
+        return Err(GrumpyError::Codec(
+            "unexpected end of data reading f64".into(),
+        ));
     }
     let val = f64::from_le_bytes(cursor[..8].try_into().unwrap());
     *cursor = &cursor[8..];
@@ -357,10 +361,7 @@ mod tests {
                     ("created".into(), Value::Integer(1234567890)),
                     (
                         "nested".into(),
-                        Value::Object(BTreeMap::from([(
-                            "deep".into(),
-                            Value::Bool(true),
-                        )])),
+                        Value::Object(BTreeMap::from([("deep".into(), Value::Bool(true))])),
                     ),
                 ])),
             ),

@@ -25,8 +25,8 @@
 //! db.close().unwrap();
 //! ```
 
-pub mod buffer;
 pub mod btree;
+pub mod buffer;
 pub mod concurrency;
 pub mod document;
 pub mod engine;
@@ -34,7 +34,7 @@ pub mod error;
 pub mod page;
 pub mod wal;
 
-pub use document::value::Value;
-pub use error::{GrumpyError, Result};
-pub use engine::GrumpyDb;
 pub use concurrency::lock_manager::SharedDb;
+pub use document::value::Value;
+pub use engine::{CompactResult, GrumpyDb};
+pub use error::{GrumpyError, Result};

@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use crate::error::{GrumpyError, Result};
-use crate::page::manager::PageManager;
 use crate::page::PAGE_SIZE;
+use crate::page::manager::PageManager;
 
 use super::frame::BufferFrame;
 
@@ -295,7 +295,10 @@ mod tests {
         let (p3, _) = pool.new_page().unwrap();
         pool.unpin(p3, false).unwrap();
 
-        assert!(pool.write_count > writes_before, "dirty page should have been flushed");
+        assert!(
+            pool.write_count > writes_before,
+            "dirty page should have been flushed"
+        );
 
         // Reload p1 from disk — should have the written data
         let fidx = pool.fetch_page(p1).unwrap();

@@ -129,6 +129,41 @@ impl PageHeader {
     }
 }
 
+/// Computes a CRC32 checksum over a page buffer (excluding the checksum field at bytes 28-31).
+pub fn compute_checksum(buf: &[u8; PAGE_SIZE]) -> u32 {
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&buf[0..28]); // header up to checksum
+    hasher.update(&buf[32..]); // everything after header
+    hasher.finalize()
+}
+
+/// Writes the CRC32 checksum into the page buffer's checksum field (bytes 28-31).
+pub fn stamp_checksum(buf: &mut [u8; PAGE_SIZE]) {
+    let csum = compute_checksum(buf);
+    buf[28..32].copy_from_slice(&csum.to_le_bytes());
+}
+
+/// Verifies the CRC32 checksum of a page buffer.
+///
+/// Returns `Ok(())` if valid, or `ChecksumMismatch` if corrupted.
+/// Pages with a zero checksum (never stamped) are considered valid.
+pub fn verify_checksum(buf: &[u8; PAGE_SIZE], page_id: u32) -> crate::error::Result<()> {
+    let stored = u32::from_le_bytes(buf[28..32].try_into().unwrap());
+    if stored == 0 {
+        // Legacy page (never stamped) — skip verification
+        return Ok(());
+    }
+    let computed = compute_checksum(buf);
+    if stored != computed {
+        return Err(crate::error::GrumpyError::ChecksumMismatch {
+            page_id,
+            expected: stored,
+            actual: computed,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +214,45 @@ mod tests {
         assert_eq!(PAGE_HEADER_SIZE, 32);
         assert_eq!(PAGE_USABLE_SPACE, 8160);
         assert_eq!(SLOT_SIZE, 4);
+    }
+
+    #[test]
+    fn test_checksum_round_trip() {
+        let mut buf = [0u8; PAGE_SIZE];
+        let header = PageHeader::new(1, PageType::Data);
+        header.write_to(&mut buf);
+        buf[100] = 0xAB; // some data
+
+        stamp_checksum(&mut buf);
+        let stored = u32::from_le_bytes(buf[28..32].try_into().unwrap());
+        assert_ne!(stored, 0);
+
+        // Verify should pass
+        assert!(verify_checksum(&buf, 1).is_ok());
+    }
+
+    #[test]
+    fn test_checksum_detects_corruption() {
+        let mut buf = [0u8; PAGE_SIZE];
+        let header = PageHeader::new(1, PageType::Data);
+        header.write_to(&mut buf);
+        stamp_checksum(&mut buf);
+
+        // Corrupt a byte
+        buf[100] ^= 0xFF;
+
+        let result = verify_checksum(&buf, 1);
+        assert!(matches!(
+            result,
+            Err(crate::error::GrumpyError::ChecksumMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_checksum_zero_skips_verification() {
+        // A page with checksum == 0 (legacy/never stamped) should pass
+        let mut buf = [0u8; PAGE_SIZE];
+        buf[28..32].copy_from_slice(&0u32.to_le_bytes());
+        assert!(verify_checksum(&buf, 0).is_ok());
     }
 }

@@ -17,6 +17,8 @@ A disk-based object storage engine written in Rust. GrumpyDB stores schema-less 
 | Write-Ahead Log (crash recovery) | ✅ Implemented |
 | Buffer pool (LRU cache) | ✅ Implemented |
 | SWMR concurrency | ✅ Implemented |
+| Page checksums (CRC32 integrity) | ✅ Implemented |
+| Compaction (defrag + index rebuild) | ✅ Implemented |
 
 ## Getting started
 
@@ -65,7 +67,19 @@ assert!(doc.is_some());
 db.close().unwrap();
 ```
 
-> **Note**: The full CRUD API (`insert`, `get`, `update`, `delete`, `scan`) is functional with WAL durability, LRU buffer pool caching, and SWMR concurrency.
+> **Note**: The full CRUD API (`insert`, `get`, `update`, `delete`, `scan`) is functional with WAL durability, LRU buffer pool caching, SWMR concurrency, page checksums, and compaction.
+
+## Demo App & Tutorial
+
+The `examples/taskman/` directory contains a fully documented task manager CLI that demonstrates every GrumpyDB feature:
+
+- **[Tutorial](examples/taskman/TUTORIAL.md)** — 7-chapter guide: getting started, data modeling, querying, updates, durability, performance, concurrency
+- **[Cookbook](examples/taskman/COOKBOOK.md)** — 7 self-contained recipes for common tasks (struct storage, iteration, filtering, bulk import, threading, compaction)
+- **[Performance Guide](examples/taskman/PERFORMANCE.md)** — buffer pool architecture, tuning, and benchmarking
+
+```bash
+cargo run --example taskman -- help
+```
 
 ## Architecture
 

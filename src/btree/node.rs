@@ -3,7 +3,7 @@
 //! Internal nodes store keys and child page pointers. Leaf nodes store keys
 //! and data pointers (page_id + slot_id), linked as a doubly-linked list.
 
-use crate::page::{PageHeader, PageType, PAGE_HEADER_SIZE, PAGE_SIZE};
+use crate::page::{PAGE_HEADER_SIZE, PAGE_SIZE, PageHeader, PageType};
 
 /// Size of a UUID key in bytes.
 pub const KEY_SIZE: usize = 16;
@@ -90,8 +90,11 @@ impl InternalNode {
             let base = 38 + i * INTERNAL_ENTRY_SIZE;
             let mut key = [0u8; KEY_SIZE];
             key.copy_from_slice(&buf[base..base + KEY_SIZE]);
-            let child_page_id =
-                u32::from_le_bytes(buf[base + KEY_SIZE..base + KEY_SIZE + 4].try_into().unwrap());
+            let child_page_id = u32::from_le_bytes(
+                buf[base + KEY_SIZE..base + KEY_SIZE + 4]
+                    .try_into()
+                    .unwrap(),
+            );
             entries.push(InternalEntry { key, child_page_id });
         }
 
@@ -198,7 +201,7 @@ impl InternalNode {
         // So the fix: insert the new entry, then swap the child_page_id.
         // New entry goes at `pos` with child_page_id = the OLD left pointer at pos,
         // and the old pointer at pos becomes right_child_page_id.
-        
+
         if pos < self.entries.len() {
             // Inserting before an existing entry.
             // The pointer at entries[pos].child_page_id is the existing left child.
@@ -281,8 +284,11 @@ impl LeafNode {
             let base = 42 + i * LEAF_ENTRY_SIZE;
             let mut key = [0u8; KEY_SIZE];
             key.copy_from_slice(&buf[base..base + KEY_SIZE]);
-            let page_id =
-                u32::from_le_bytes(buf[base + KEY_SIZE..base + KEY_SIZE + 4].try_into().unwrap());
+            let page_id = u32::from_le_bytes(
+                buf[base + KEY_SIZE..base + KEY_SIZE + 4]
+                    .try_into()
+                    .unwrap(),
+            );
             let slot_id = u16::from_le_bytes(
                 buf[base + KEY_SIZE + 4..base + KEY_SIZE + 6]
                     .try_into()
@@ -317,8 +323,7 @@ impl LeafNode {
         for (i, entry) in self.entries.iter().enumerate() {
             let base = 42 + i * LEAF_ENTRY_SIZE;
             buf[base..base + KEY_SIZE].copy_from_slice(&entry.key);
-            buf[base + KEY_SIZE..base + KEY_SIZE + 4]
-                .copy_from_slice(&entry.page_id.to_le_bytes());
+            buf[base + KEY_SIZE..base + KEY_SIZE + 4].copy_from_slice(&entry.page_id.to_le_bytes());
             buf[base + KEY_SIZE + 4..base + KEY_SIZE + 6]
                 .copy_from_slice(&entry.slot_id.to_le_bytes());
         }
@@ -328,9 +333,7 @@ impl LeafNode {
 
     /// Searches for a key in the leaf. Returns the entry index if found.
     pub fn search(&self, key: &[u8; KEY_SIZE]) -> Option<usize> {
-        self.entries
-            .binary_search_by(|e| e.key.cmp(key))
-            .ok()
+        self.entries.binary_search_by(|e| e.key.cmp(key)).ok()
     }
 
     /// Inserts an entry in sorted order. Does NOT check for overflow.
@@ -478,20 +481,29 @@ mod tests {
         // c0 = keys < 10, c1 = keys in [10,20), c2 = keys in [20,30), right = keys >= 30
         let mut node = InternalNode::new(1);
         node.entries = vec![
-            InternalEntry { key: make_key(10), child_page_id: 100 },
-            InternalEntry { key: make_key(20), child_page_id: 101 },
-            InternalEntry { key: make_key(30), child_page_id: 102 },
+            InternalEntry {
+                key: make_key(10),
+                child_page_id: 100,
+            },
+            InternalEntry {
+                key: make_key(20),
+                child_page_id: 101,
+            },
+            InternalEntry {
+                key: make_key(30),
+                child_page_id: 102,
+            },
         ];
         node.num_keys = 3;
         node.right_child = 103;
 
-        assert_eq!(node.find_child(&make_key(5)), 100);   // < 10 → c0
-        assert_eq!(node.find_child(&make_key(10)), 101);  // >= 10, < 20 → c1
-        assert_eq!(node.find_child(&make_key(15)), 101);  // >= 10, < 20 → c1
-        assert_eq!(node.find_child(&make_key(20)), 102);  // >= 20, < 30 → c2
-        assert_eq!(node.find_child(&make_key(25)), 102);  // >= 20, < 30 → c2
-        assert_eq!(node.find_child(&make_key(30)), 103);  // >= 30 → right_child
-        assert_eq!(node.find_child(&make_key(99)), 103);  // >= 30 → right_child
+        assert_eq!(node.find_child(&make_key(5)), 100); // < 10 → c0
+        assert_eq!(node.find_child(&make_key(10)), 101); // >= 10, < 20 → c1
+        assert_eq!(node.find_child(&make_key(15)), 101); // >= 10, < 20 → c1
+        assert_eq!(node.find_child(&make_key(20)), 102); // >= 20, < 30 → c2
+        assert_eq!(node.find_child(&make_key(25)), 102); // >= 20, < 30 → c2
+        assert_eq!(node.find_child(&make_key(30)), 103); // >= 30 → right_child
+        assert_eq!(node.find_child(&make_key(99)), 103); // >= 30 → right_child
     }
 
     #[test]
@@ -521,9 +533,21 @@ mod tests {
     #[test]
     fn test_leaf_insert_sorted() {
         let mut node = LeafNode::new(1);
-        node.insert_entry(LeafEntry { key: make_key(30), page_id: 1, slot_id: 0 });
-        node.insert_entry(LeafEntry { key: make_key(10), page_id: 2, slot_id: 0 });
-        node.insert_entry(LeafEntry { key: make_key(20), page_id: 3, slot_id: 0 });
+        node.insert_entry(LeafEntry {
+            key: make_key(30),
+            page_id: 1,
+            slot_id: 0,
+        });
+        node.insert_entry(LeafEntry {
+            key: make_key(10),
+            page_id: 2,
+            slot_id: 0,
+        });
+        node.insert_entry(LeafEntry {
+            key: make_key(20),
+            page_id: 3,
+            slot_id: 0,
+        });
 
         assert_eq!(node.entries[0].key, make_key(10));
         assert_eq!(node.entries[1].key, make_key(20));
@@ -534,9 +558,21 @@ mod tests {
     #[test]
     fn test_leaf_remove_entry() {
         let mut node = LeafNode::new(1);
-        node.insert_entry(LeafEntry { key: make_key(10), page_id: 1, slot_id: 0 });
-        node.insert_entry(LeafEntry { key: make_key(20), page_id: 2, slot_id: 0 });
-        node.insert_entry(LeafEntry { key: make_key(30), page_id: 3, slot_id: 0 });
+        node.insert_entry(LeafEntry {
+            key: make_key(10),
+            page_id: 1,
+            slot_id: 0,
+        });
+        node.insert_entry(LeafEntry {
+            key: make_key(20),
+            page_id: 2,
+            slot_id: 0,
+        });
+        node.insert_entry(LeafEntry {
+            key: make_key(30),
+            page_id: 3,
+            slot_id: 0,
+        });
 
         let removed = node.remove_entry(&make_key(20));
         assert!(removed.is_some());
@@ -553,9 +589,18 @@ mod tests {
         // as a sanity check for the page layout calculations.
         #[allow(clippy::assertions_on_constants)]
         {
-            assert!(INTERNAL_MAX_KEYS > 100, "fan-out should be large: {INTERNAL_MAX_KEYS}");
-            assert!(LEAF_MAX_ENTRIES > 100, "leaf capacity should be large: {LEAF_MAX_ENTRIES}");
-            assert!(INTERNAL_MIN_KEYS > 0, "internal min keys: {INTERNAL_MIN_KEYS}");
+            assert!(
+                INTERNAL_MAX_KEYS > 100,
+                "fan-out should be large: {INTERNAL_MAX_KEYS}"
+            );
+            assert!(
+                LEAF_MAX_ENTRIES > 100,
+                "leaf capacity should be large: {LEAF_MAX_ENTRIES}"
+            );
+            assert!(
+                INTERNAL_MIN_KEYS > 0,
+                "internal min keys: {INTERNAL_MIN_KEYS}"
+            );
             assert!(LEAF_MIN_ENTRIES > 0, "leaf min entries: {LEAF_MIN_ENTRIES}");
         }
     }

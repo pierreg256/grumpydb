@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-04-22
+
+### Added
+- **Compaction** (Phase 8.1): defragment data pages and rebuild B+Tree index
+  - `GrumpyDb::compact()` → rewrite all live documents into tightly-packed pages
+  - `CompactResult` struct with preserved document count
+  - `GrumpyDb::document_count()` → O(1) count via B+Tree metadata
+  - `SharedDb::compact()`, `SharedDb::document_count()`, `SharedDb::pool_stats()`
+  - `CompactResult` exported from `lib.rs`
+  - 4 engine tests: compact after deletes, compact with overflow, compact empty, document count
+- **Page checksums** (Phase 8.2): CRC32 integrity check on every page read/write
+  - `page::compute_checksum()`, `page::stamp_checksum()`, `page::verify_checksum()`
+  - Legacy pages (checksum==0) skip verification for backwards compatibility
+  - `ChecksumMismatch` error variant on corruption detection
+  - `PageManager::path()` accessor (needed for compaction)
+  - 3 new checksum tests in `page/mod.rs`
+- **Stress test** (Phase 8.2): `test_stress_random_operations` — 10,000 random operations
+- **Compact integration test**: `test_compact_integration` — compact + reopen + verify
+- **TaskMan Final** (Phase 8b): polished demo app with tutorial and cookbook
+  - `compact` and `count` CLI commands
+  - `TaskStore::compact()` and `TaskStore::document_count()` methods
+  - `examples/taskman/TUTORIAL.md` — 7-chapter tutorial covering all GrumpyDB features
+  - `examples/taskman/COOKBOOK.md` — 7 self-contained recipes for common tasks
+- 190 total tests (175 unit + 12 integration + 3 doctests), 0 clippy warnings, 0 doc warnings
+
+### Changed
+- `PageManager::write_page()` now stamps CRC32 checksum before writing
+- `PageManager::read_page()` now verifies CRC32 checksum after reading
+
 ## [0.5.0] - 2026-04-22
 
 ### Added

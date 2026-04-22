@@ -317,12 +317,75 @@ impl GrumpyDb {
     /// Returns buffer pool stats: (read_count, write_count, cached_count, capacity)
     pub fn pool_stats(&self) -> (u64, u64, usize, usize);
 
+    /// Returns the number of documents in the database (O(1) via B+Tree metadata).
+    pub fn document_count(&self) -> u64;
+
+    /// Compacts the database: defragments data pages and rebuilds the B+Tree index.
+    /// Returns a `CompactResult` with the number of preserved documents.
+    pub fn compact(&mut self) -> Result<CompactResult>;
+
     /// Closes the database cleanly (flush + close files)
     pub fn close(self) -> Result<()>;
 }
 ```
 
-## 9. Error Handling
+## 9. Page Checksums
+
+Every page written to disk is stamped with a CRC32 checksum covering all bytes
+except the 4-byte checksum field itself (bytes 28–31).
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| `compute_checksum(buf)` | CRC32 over bytes 0–27 + bytes 32–8191 |
+| `stamp_checksum(buf)` | Compute and write the checksum into bytes 28–31 |
+| `verify_checksum(buf, page_id)` | Verify on read; returns `ChecksumMismatch` on mismatch |
+
+### Backwards compatibility
+
+Pages with a stored checksum of `0` (never stamped, e.g. legacy data) skip
+verification. This allows databases created before checksums were introduced
+to remain readable.
+
+### Integration
+
+- `PageManager::write_page()` calls `stamp_checksum()` before writing.
+- `PageManager::read_page()` calls `verify_checksum()` after reading.
+- The B+Tree page manager follows the same protocol.
+
+## 10. Compaction
+
+The `compact()` method defragments the database by rewriting all live documents
+into fresh, tightly-packed data pages and rebuilding the B+Tree index from scratch.
+
+### Algorithm
+
+1. **Flush** all dirty pages from the buffer pool and sync the B+Tree.
+2. **Scan** all live entries from the B+Tree (sorted by key).
+3. **Read** each document's raw bytes (inline or overflow).
+4. **Create** temporary files (`data.db.compact`, `index.db.compact`).
+5. **Reinsert** all documents into the fresh files, packing pages tightly.
+6. **Swap** the compacted files over the originals (`rename`).
+7. **Reopen** the engine with fresh file handles and buffer pool.
+
+### Characteristics
+
+- Requires `&mut self` — the database is unavailable during compaction.
+- Space from deleted documents and fragmented pages is reclaimed.
+- Overflow documents are preserved (rewritten into new overflow chains).
+- The WAL is not used during compaction (atomic file swap).
+
+### `CompactResult`
+
+```rust
+pub struct CompactResult {
+    pub documents: u64,  // number of documents preserved
+}
+```
+```
+
+## 11. Error Handling
 
 ```rust
 #[derive(Debug, thiserror::Error)]

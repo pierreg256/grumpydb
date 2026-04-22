@@ -49,7 +49,12 @@ use super::task::Task;
 /// - `SharedDb::clone()` is cheap (Arc clone) — pass to any thread
 /// - Writers get exclusive access automatically
 /// - Readers can run concurrently (though current impl uses write lock internally)
-pub fn run_bench(db_path: &Path, writers: usize, readers: usize, count: usize) -> Result<(), String> {
+pub fn run_bench(
+    db_path: &Path,
+    writers: usize,
+    readers: usize,
+    count: usize,
+) -> Result<(), String> {
     // SharedDb::open() creates a thread-safe database handle.
     // Unlike GrumpyDb, it can be cloned and shared across threads.
     let db = SharedDb::open(db_path).map_err(|e| format!("Failed to open: {e}"))?;
@@ -109,7 +114,9 @@ pub fn run_bench(db_path: &Path, writers: usize, readers: usize, count: usize) -
     let read_elapsed = start.elapsed();
     let total_reads = total_keys.load(std::sync::atomic::Ordering::Relaxed);
     let read_ops_sec = total_reads as f64 / read_elapsed.as_secs_f64();
-    println!("  Reads:  {total_reads} docs across {readers} threads in {read_elapsed:.2?} ({read_ops_sec:.0} docs/sec)");
+    println!(
+        "  Reads:  {total_reads} docs across {readers} threads in {read_elapsed:.2?} ({read_ops_sec:.0} docs/sec)"
+    );
 
     // ── Cleanup ─────────────────────────────────────────────────────────
     db.flush().map_err(|e| format!("Flush failed: {e}"))?;
@@ -151,11 +158,16 @@ pub fn run_server(db_path: &Path, addr: &str) -> Result<(), String> {
     let listener = TcpListener::bind(addr).map_err(|e| format!("Bind failed: {e}"))?;
     println!("TaskMan server listening on {addr}");
     println!("Connect with: nc {addr}");
-    println!("Commands: ADD <title> | GET <uuid> | LIST | DONE <uuid> | DELETE <uuid> | STATS | QUIT");
+    println!(
+        "Commands: ADD <title> | GET <uuid> | LIST | DONE <uuid> | DELETE <uuid> | STATS | QUIT"
+    );
 
     for stream in listener.incoming() {
         let stream = stream.map_err(|e| format!("Accept failed: {e}"))?;
-        let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+        let peer = stream
+            .peer_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_default();
         println!("Client connected: {peer}");
 
         // Clone the SharedDb handle for this connection's thread.
@@ -174,10 +186,7 @@ pub fn run_server(db_path: &Path, addr: &str) -> Result<(), String> {
 }
 
 /// Handles a single client connection.
-fn handle_client(
-    stream: std::net::TcpStream,
-    db: &SharedDb,
-) -> Result<(), String> {
+fn handle_client(stream: std::net::TcpStream, db: &SharedDb) -> Result<(), String> {
     let reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
     let mut writer = stream;
 
@@ -206,7 +215,9 @@ fn handle_client(
             _ => format!("ERR unknown command: {cmd}\n"),
         };
 
-        writer.write_all(response.as_bytes()).map_err(|e| e.to_string())?;
+        writer
+            .write_all(response.as_bytes())
+            .map_err(|e| e.to_string())?;
     }
 
     Ok(())

@@ -5,10 +5,10 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{GrumpyError, Result};
-use crate::page::{PageHeader, PageType, PAGE_HEADER_SIZE, PAGE_SIZE};
+use crate::page::{PAGE_HEADER_SIZE, PAGE_SIZE, PageHeader, PageType};
 
 /// Manages page-level I/O for a single database file.
 ///
@@ -18,6 +18,8 @@ pub struct PageManager {
     file: File,
     /// Total number of pages in the file (including page 0).
     num_pages: u32,
+    /// Path to the managed file.
+    file_path: PathBuf,
 }
 
 impl PageManager {
@@ -43,18 +45,22 @@ impl PageManager {
             let header = PageHeader::new(0, PageType::FreeList);
             header.write_to(&mut buf);
             // num_free = 0 at offset PAGE_HEADER_SIZE
-            buf[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + 4]
-                .copy_from_slice(&0u32.to_le_bytes());
+            buf[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + 4].copy_from_slice(&0u32.to_le_bytes());
             file.write_all(&buf)?;
             file.sync_all()?;
             Ok(Self {
                 file,
                 num_pages: 1,
+                file_path: path.to_path_buf(),
             })
         } else {
             let file_len = file.metadata()?.len();
             let num_pages = (file_len / PAGE_SIZE as u64) as u32;
-            Ok(Self { file, num_pages })
+            Ok(Self {
+                file,
+                num_pages,
+                file_path: path.to_path_buf(),
+            })
         }
     }
 
@@ -84,7 +90,7 @@ impl PageManager {
     /// Reads a full page from disk.
     ///
     /// Returns the raw page bytes. Returns `PageNotFound` if the page ID
-    /// is out of range.
+    /// is out of range. Verifies CRC32 checksum if one is present.
     pub fn read_page(&mut self, page_id: u32) -> Result<[u8; PAGE_SIZE]> {
         if page_id >= self.num_pages {
             return Err(GrumpyError::PageNotFound(page_id));
@@ -93,19 +99,23 @@ impl PageManager {
         self.file
             .seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
         self.file.read_exact(&mut buf)?;
+        super::verify_checksum(&buf, page_id)?;
         Ok(buf)
     }
 
     /// Writes a full page to disk.
     ///
+    /// Stamps a CRC32 checksum before writing.
     /// Returns `PageNotFound` if the page ID is out of range.
     pub fn write_page(&mut self, page_id: u32, data: &[u8; PAGE_SIZE]) -> Result<()> {
         if page_id >= self.num_pages {
             return Err(GrumpyError::PageNotFound(page_id));
         }
+        let mut buf = *data;
+        super::stamp_checksum(&mut buf);
         self.file
             .seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
-        self.file.write_all(data)?;
+        self.file.write_all(&buf)?;
         Ok(())
     }
 
@@ -136,6 +146,11 @@ impl PageManager {
         self.num_pages
     }
 
+    /// Returns the path to the managed file.
+    pub fn path(&self) -> &Path {
+        &self.file_path
+    }
+
     /// Syncs all pending writes to disk.
     pub fn sync(&self) -> Result<()> {
         self.file.sync_all()?;
@@ -147,8 +162,11 @@ impl PageManager {
     /// Reads the free-list from page 0. Returns the list of free page IDs.
     fn read_free_list(&mut self) -> Result<Vec<u32>> {
         let buf = self.read_page(0)?;
-        let num_free =
-            u32::from_le_bytes(buf[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + 4].try_into().unwrap());
+        let num_free = u32::from_le_bytes(
+            buf[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + 4]
+                .try_into()
+                .unwrap(),
+        );
         let mut free_pages = Vec::with_capacity(num_free as usize);
         let start = PAGE_HEADER_SIZE + 4;
         for i in 0..num_free as usize {
@@ -169,8 +187,7 @@ impl PageManager {
         header.write_to(&mut buf);
 
         let num_free = free_pages.len() as u32;
-        buf[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + 4]
-            .copy_from_slice(&num_free.to_le_bytes());
+        buf[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + 4].copy_from_slice(&num_free.to_le_bytes());
 
         let start = PAGE_HEADER_SIZE + 4;
         for (i, &pid) in free_pages.iter().enumerate() {
@@ -252,7 +269,12 @@ mod tests {
         pm.write_page(page_id, &data).unwrap();
 
         let read_back = pm.read_page(page_id).unwrap();
-        assert_eq!(data, read_back);
+        // Data matches except bytes 28-31 (checksum stamped by write_page)
+        assert_eq!(data[..28], read_back[..28]);
+        assert_eq!(data[32..], read_back[32..]);
+        // Checksum should be non-zero (was stamped)
+        let checksum = u32::from_le_bytes(read_back[28..32].try_into().unwrap());
+        assert_ne!(checksum, 0);
     }
 
     #[test]

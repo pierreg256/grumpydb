@@ -87,6 +87,8 @@ fn main() {
         "export" => cmd_export(&args[2..]),
         "import" => cmd_import(&args[2..]),
         "flush" => cmd_flush(),
+        "compact" => cmd_compact(),
+        "count" => cmd_count(),
         "bench" => cmd_bench(&args[2..]),
         "serve" => cmd_serve(&args[2..]),
         "generate" => cmd_generate(&args[2..]),
@@ -245,7 +247,10 @@ fn cmd_show(args: &[String]) -> Result<(), String> {
                 "  Description: {}",
                 task.description.as_deref().unwrap_or("(none)")
             );
-            println!("  Status:      {}", if task.done { "Done" } else { "Pending" });
+            println!(
+                "  Status:      {}",
+                if task.done { "Done" } else { "Pending" }
+            );
             println!("  Created:     {}", format_timestamp(task.created_at));
             if !task.tags.is_empty() {
                 println!("  Tags:        {}", task.tags.join(", "));
@@ -308,6 +313,44 @@ fn cmd_stats() -> Result<(), String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// COMMAND: compact
+//
+// Usage: taskman compact
+//
+// Demonstrates: GrumpyDb::compact()
+// Defragments data pages and rebuilds the B+Tree index to reclaim space.
+// ─────────────────────────────────────────────────────────────────────────────
+fn cmd_compact() -> Result<(), String> {
+    let mut store = TaskStore::open(&db_path())?;
+
+    let start = std::time::Instant::now();
+    let result = store.compact()?;
+    let elapsed = start.elapsed();
+
+    store.close()?;
+
+    println!("Compaction complete in {elapsed:.2?}");
+    println!("  Documents preserved: {}", result.documents);
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// COMMAND: count
+//
+// Usage: taskman count
+//
+// Demonstrates: GrumpyDb::document_count()
+// Returns the number of documents via B+Tree metadata (O(1), no scan needed).
+// ─────────────────────────────────────────────────────────────────────────────
+fn cmd_count() -> Result<(), String> {
+    let store = TaskStore::open(&db_path())?;
+    let count = store.document_count();
+    store.close()?;
+    println!("{count} documents");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
 // COMMAND: bench
 //
@@ -324,9 +367,24 @@ fn cmd_bench(args: &[String]) -> Result<(), String> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--writers" | "-w" => { i += 1; if i < args.len() { writers = args[i].parse().unwrap_or(2); } }
-            "--readers" | "-r" => { i += 1; if i < args.len() { readers = args[i].parse().unwrap_or(4); } }
-            "--count" | "-n" => { i += 1; if i < args.len() { count = args[i].parse().unwrap_or(1000); } }
+            "--writers" | "-w" => {
+                i += 1;
+                if i < args.len() {
+                    writers = args[i].parse().unwrap_or(2);
+                }
+            }
+            "--readers" | "-r" => {
+                i += 1;
+                if i < args.len() {
+                    readers = args[i].parse().unwrap_or(4);
+                }
+            }
+            "--count" | "-n" => {
+                i += 1;
+                if i < args.len() {
+                    count = args[i].parse().unwrap_or(1000);
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -392,7 +450,14 @@ fn cmd_generate(args: &[String]) -> Result<(), String> {
     // Each insert: encode document → store in slotted page → index in B+Tree → WAL commit.
     // With a buffer pool, repeated page access is served from cache → fewer disk reads.
     let start = std::time::Instant::now();
-    let tags_pool = ["work", "personal", "urgent", "low-priority", "meeting", "errand"];
+    let tags_pool = [
+        "work",
+        "personal",
+        "urgent",
+        "low-priority",
+        "meeting",
+        "errand",
+    ];
 
     for i in 0..count {
         let tag_idx = i % tags_pool.len();
@@ -401,7 +466,9 @@ fn cmd_generate(args: &[String]) -> Result<(), String> {
             Some(&format!("Auto-generated task for benchmarking (batch {i})")),
             vec![tags_pool[tag_idx]],
         );
-        store.add_task(task).map_err(|e| format!("Insert {i} failed: {e}"))?;
+        store
+            .add_task(task)
+            .map_err(|e| format!("Insert {i} failed: {e}"))?;
 
         // Progress indicator every 1000 tasks
         if (i + 1) % 1000 == 0 {
@@ -486,8 +553,14 @@ fn cmd_search(args: &[String]) -> Result<(), String> {
     }
     println!();
     println!("Performance:");
-    println!("  Scanned:  {} documents in {scan_time:.2?}", all_tasks.len());
-    println!("  Filtered: {} matches in {filter_time:.2?}", matching.len());
+    println!(
+        "  Scanned:  {} documents in {scan_time:.2?}",
+        all_tasks.len()
+    );
+    println!(
+        "  Filtered: {} matches in {filter_time:.2?}",
+        matching.len()
+    );
     println!("  Total:    {:.2?}", scan_time + filter_time);
     println!("  Buffer pool: {reads} reads, {writes} writes, {cached}/{capacity} cached");
     Ok(())
@@ -506,8 +579,7 @@ fn cmd_export(args: &[String]) -> Result<(), String> {
     store.close()?;
 
     if let Some(file_path) = args.first() {
-        std::fs::write(file_path, &data)
-            .map_err(|e| format!("Failed to write file: {e}"))?;
+        std::fs::write(file_path, &data).map_err(|e| format!("Failed to write file: {e}"))?;
         println!("Exported to {file_path}");
     } else {
         print!("{data}");
@@ -531,8 +603,8 @@ fn cmd_import(args: &[String]) -> Result<(), String> {
         return Err("Usage: taskman import <file>".into());
     }
 
-    let data = std::fs::read_to_string(&args[0])
-        .map_err(|e| format!("Failed to read file: {e}"))?;
+    let data =
+        std::fs::read_to_string(&args[0]).map_err(|e| format!("Failed to read file: {e}"))?;
 
     let mut store = TaskStore::open(&db_path())?;
     let count = store.import_tasks(&data)?;
@@ -625,6 +697,8 @@ COMMANDS:
     export [file]                                Export tasks (to stdout or file)
     import <file>                                Import tasks from file
     flush                                        Flush data + WAL checkpoint
+    compact                                      Defragment data + rebuild index
+    count                                        Document count (O(1), no scan)
     generate [--count N]                         Generate N synthetic tasks (with perf stats)
     search --tag <tag>                           Search tasks by tag (with perf stats)
     bench [--writers N] [--readers N] [--count N] Concurrent benchmark

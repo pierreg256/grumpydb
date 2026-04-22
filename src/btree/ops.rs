@@ -5,10 +5,8 @@ use uuid::Uuid;
 use crate::error::{GrumpyError, Result};
 use crate::page::{PageHeader, PageType};
 
-use super::node::{
-    InternalEntry, InternalNode, LeafEntry, LeafNode, KEY_SIZE,
-};
 use super::BTree;
+use super::node::{InternalEntry, InternalNode, KEY_SIZE, LeafEntry, LeafNode};
 
 /// Identifies the type of node loaded from a page.
 enum NodeRef {
@@ -153,7 +151,10 @@ impl BTree {
     ///
     /// The left node keeps the original page_id. A new page is allocated for the right.
     /// Returns (left, right, promoted_key) where promoted_key = first key of right.
-    fn split_leaf(&mut self, mut full_leaf: LeafNode) -> Result<(LeafNode, LeafNode, [u8; KEY_SIZE])> {
+    fn split_leaf(
+        &mut self,
+        mut full_leaf: LeafNode,
+    ) -> Result<(LeafNode, LeafNode, [u8; KEY_SIZE])> {
         let mid = full_leaf.entries.len() / 2;
         let right_entries: Vec<LeafEntry> = full_leaf.entries.drain(mid..).collect();
         full_leaf.num_entries = full_leaf.entries.len() as u16;
@@ -510,13 +511,7 @@ impl BTree {
                 );
             }
 
-            return self.merge_internal_nodes(
-                left_sib,
-                node,
-                &mut grandparent,
-                child_idx,
-                path,
-            );
+            return self.merge_internal_nodes(left_sib, node, &mut grandparent, child_idx, path);
         }
 
         // Try right sibling
@@ -779,7 +774,9 @@ mod tests {
         let count = count.min(5000); // cap for test speed
 
         for i in 0..count {
-            btree.insert(make_uuid(i), i as u32, (i % 100) as u16).unwrap();
+            btree
+                .insert(make_uuid(i), i as u32, (i % 100) as u16)
+                .unwrap();
         }
 
         assert!(btree.height() >= 2);

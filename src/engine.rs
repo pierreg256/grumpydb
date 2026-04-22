@@ -8,13 +8,13 @@ use uuid::Uuid;
 
 use crate::btree::BTree;
 use crate::buffer::pool::BufferPool;
-use crate::document::value::Value;
 use crate::document::Document;
+use crate::document::value::Value;
 use crate::error::{GrumpyError, Result};
 use crate::page::manager::PageManager;
 use crate::page::overflow;
 use crate::page::slotted::SlottedPage;
-use crate::page::{PageHeader, PageType, PAGE_SIZE, PAGE_USABLE_SPACE, SLOT_SIZE};
+use crate::page::{PAGE_SIZE, PAGE_USABLE_SPACE, PageHeader, PageType, SLOT_SIZE};
 use crate::wal::writer::WalWriter;
 
 /// Maximum document size that fits in a single slotted page (without overflow).
@@ -54,6 +54,13 @@ pub struct GrumpyDb {
 
 /// Number of writes between automatic checkpoints.
 const CHECKPOINT_INTERVAL: u32 = 100;
+
+/// Result of a compaction operation.
+#[derive(Debug)]
+pub struct CompactResult {
+    /// Number of documents preserved.
+    pub documents: u64,
+}
 
 impl GrumpyDb {
     /// Opens or creates a database at the given directory path.
@@ -204,7 +211,8 @@ impl GrumpyDb {
         let before = self.data_pool.get_frame(frame_idx).data;
         let mut page = SlottedPage::from_bytes(before);
         page.delete(slot_id)?;
-        self.wal.log_page_write(tx_id, page_id, &before, &page.data)?;
+        self.wal
+            .log_page_write(tx_id, page_id, &before, &page.data)?;
 
         // Write the modified data into the frame and unpin as dirty
         self.data_pool.get_frame_mut(frame_idx).data = page.data;
@@ -221,10 +229,7 @@ impl GrumpyDb {
     /// Scans documents in a UUID key range.
     ///
     /// Returns all documents whose keys fall within the given range, sorted by key.
-    pub fn scan(
-        &mut self,
-        range: impl std::ops::RangeBounds<Uuid>,
-    ) -> Result<Vec<(Uuid, Value)>> {
+    pub fn scan(&mut self, range: impl std::ops::RangeBounds<Uuid>) -> Result<Vec<(Uuid, Value)>> {
         use std::ops::Bound;
 
         let start = match range.start_bound() {
@@ -291,6 +296,120 @@ impl GrumpyDb {
         self.flush()
     }
 
+    /// Returns the number of documents in the database.
+    pub fn document_count(&self) -> u64 {
+        self.btree.len()
+    }
+
+    /// Compacts the database: defragments data pages and rebuilds the B+Tree index.
+    ///
+    /// This reclaims space from deleted documents by:
+    /// 1. Scanning all live documents via the B+Tree
+    /// 2. Writing them into fresh, tightly-packed data pages
+    /// 3. Rebuilding the B+Tree index from scratch
+    /// 4. Replacing the old files with the compacted ones
+    ///
+    /// The database is unavailable during compaction (requires `&mut self`).
+    pub fn compact(&mut self) -> Result<CompactResult> {
+        // Flush everything first to ensure data is consistent on disk
+        self.data_pool.flush_all()?;
+        self.btree.sync()?;
+
+        // Step 1: Collect all live documents via B+Tree scan
+        let entries = self.btree.scan_all()?;
+        let mut docs: Vec<(Uuid, Vec<u8>)> = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            let raw = self.read_tuple(entry.page_id, entry.slot_id)?;
+            docs.push((entry.key, raw));
+        }
+
+        let docs_count = docs.len();
+
+        // Step 2: Get the paths from the page manager, create temp files
+        let data_path = self.data_pool.page_manager().path().to_path_buf();
+        let index_path = self.btree.pm.path().to_path_buf();
+
+        let data_tmp = data_path.with_extension("db.compact");
+        let index_tmp = index_path.with_extension("db.compact");
+
+        // Step 3: Create fresh data file + index, reinsert all documents
+        {
+            let mut new_data_pm = PageManager::new(&data_tmp)?;
+            let mut new_btree = BTree::create(&index_tmp)?;
+
+            let mut current_page_id = new_data_pm.allocate_page()?;
+            let mut current_page = SlottedPage::new(current_page_id);
+
+            for (key, encoded) in &docs {
+                if encoded.len() > INLINE_MAX {
+                    // Overflow document: write overflow chain + reference
+                    let overflow_page_id = overflow::write_overflow(&mut new_data_pm, encoded)?;
+                    let ref_data =
+                        overflow::encode_overflow_ref(overflow_page_id, encoded.len() as u32);
+
+                    match current_page.insert(&ref_data) {
+                        Ok(slot_id) => {
+                            new_btree.insert(*key, current_page_id, slot_id)?;
+                        }
+                        Err(GrumpyError::PageFull(_)) => {
+                            new_data_pm.write_page(current_page_id, &current_page.data)?;
+                            current_page_id = new_data_pm.allocate_page()?;
+                            current_page = SlottedPage::new(current_page_id);
+                            let slot_id = current_page.insert(&ref_data)?;
+                            new_btree.insert(*key, current_page_id, slot_id)?;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                } else {
+                    match current_page.insert(encoded) {
+                        Ok(slot_id) => {
+                            new_btree.insert(*key, current_page_id, slot_id)?;
+                        }
+                        Err(GrumpyError::PageFull(_)) => {
+                            new_data_pm.write_page(current_page_id, &current_page.data)?;
+                            current_page_id = new_data_pm.allocate_page()?;
+                            current_page = SlottedPage::new(current_page_id);
+                            let slot_id = current_page.insert(encoded)?;
+                            new_btree.insert(*key, current_page_id, slot_id)?;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+
+            // Write the last page
+            new_data_pm.write_page(current_page_id, &current_page.data)?;
+            new_data_pm.sync()?;
+            new_btree.flush_meta()?;
+            new_btree.sync()?;
+        }
+
+        // Step 4: Swap the files
+        // Close current file handles by replacing with the new ones
+        std::fs::rename(&data_tmp, &data_path)?;
+        std::fs::rename(&index_tmp, &index_path)?;
+
+        // Step 5: Reopen with fresh handles
+        let new_data_pm = PageManager::new(&data_path)?;
+        let new_btree = BTree::open(&index_path)?;
+
+        let pool_capacity = self.data_pool.capacity();
+        self.data_pool = BufferPool::new(pool_capacity, new_data_pm);
+        self.btree = new_btree;
+
+        // Find the current data page in the compacted file
+        self.current_data_page = Self::find_or_alloc_data_page(self.data_pool.page_manager())?;
+
+        // Truncate WAL (compaction is a checkpoint)
+        self.wal.log_checkpoint()?;
+        self.wal.truncate()?;
+        self.writes_since_checkpoint = 0;
+
+        Ok(CompactResult {
+            documents: docs_count as u64,
+        })
+    }
+
     // ── Internal helpers ────────────────────────────────────────────────
 
     /// Stores inline with WAL logging, using the buffer pool.
@@ -301,7 +420,8 @@ impl GrumpyDb {
 
         match page.insert(encoded) {
             Ok(slot_id) => {
-                self.wal.log_page_write(tx_id, self.current_data_page, &before, &page.data)?;
+                self.wal
+                    .log_page_write(tx_id, self.current_data_page, &before, &page.data)?;
                 self.data_pool.get_frame_mut(frame_idx).data = page.data;
                 self.data_pool.unpin(self.current_data_page, true)?;
                 Ok((self.current_data_page, slot_id))
@@ -314,7 +434,8 @@ impl GrumpyDb {
                 let before_new = [0u8; PAGE_SIZE];
                 let mut new_page = SlottedPage::new(new_page_id);
                 let slot_id = new_page.insert(encoded)?;
-                self.wal.log_page_write(tx_id, new_page_id, &before_new, &new_page.data)?;
+                self.wal
+                    .log_page_write(tx_id, new_page_id, &before_new, &new_page.data)?;
                 self.data_pool.get_frame_mut(new_fidx).data = new_page.data;
                 self.data_pool.unpin(new_page_id, true)?;
                 self.current_data_page = new_page_id;
@@ -476,10 +597,13 @@ mod tests {
         let value = Value::Object(BTreeMap::from([
             ("name".into(), Value::String("GrumpyDB".into())),
             ("version".into(), Value::Integer(1)),
-            ("tags".into(), Value::Array(vec![
-                Value::String("db".into()),
-                Value::String("rust".into()),
-            ])),
+            (
+                "tags".into(),
+                Value::Array(vec![
+                    Value::String("db".into()),
+                    Value::String("rust".into()),
+                ]),
+            ),
         ]));
         db.insert(key, value.clone()).unwrap();
         assert_eq!(db.get(&key).unwrap(), Some(value));
@@ -540,7 +664,8 @@ mod tests {
     fn test_scan_range() {
         let (_dir, mut db) = setup();
         for i in 0u128..20 {
-            db.insert(Uuid::from_u128(i), Value::Integer(i as i64)).unwrap();
+            db.insert(Uuid::from_u128(i), Value::Integer(i as i64))
+                .unwrap();
         }
 
         let start = Uuid::from_u128(5);
@@ -559,7 +684,8 @@ mod tests {
     fn test_scan_all() {
         let (_dir, mut db) = setup();
         for i in 0u128..10 {
-            db.insert(Uuid::from_u128(i), Value::Integer(i as i64)).unwrap();
+            db.insert(Uuid::from_u128(i), Value::Integer(i as i64))
+                .unwrap();
         }
 
         let results = db.scan(..).unwrap();
@@ -598,7 +724,8 @@ mod tests {
     fn test_buffer_pool_cache_hits() {
         let dir = TempDir::new().unwrap();
         // Small pool (4 frames) to exercise caching
-        let mut db = GrumpyDb::open_with_pool_capacity(dir.path().join("testdb").as_path(), 4).unwrap();
+        let mut db =
+            GrumpyDb::open_with_pool_capacity(dir.path().join("testdb").as_path(), 4).unwrap();
 
         // Insert 10 documents — they'll share the current data page (cache hit)
         let mut keys = Vec::new();
@@ -619,7 +746,11 @@ mod tests {
         // With a pool, most reads should come from cache
         assert!(cached <= capacity);
         // There should be far fewer disk reads than total get() calls
-        assert!(reads_after - reads_before <= 2, "expected mostly cache hits, got {} disk reads", reads_after - reads_before);
+        assert!(
+            reads_after - reads_before <= 2,
+            "expected mostly cache hits, got {} disk reads",
+            reads_after - reads_before
+        );
     }
 
     #[test]
@@ -649,5 +780,77 @@ mod tests {
         assert_eq!(writes, 0);
         assert!(cached <= capacity);
         assert_eq!(capacity, DEFAULT_POOL_CAPACITY);
+    }
+
+    #[test]
+    fn test_compact_after_deletes() {
+        let (_dir, mut db) = setup();
+
+        // Insert 200 documents
+        let mut keys = Vec::new();
+        for i in 0u128..200 {
+            let key = Uuid::from_u128(i);
+            db.insert(key, Value::Integer(i as i64)).unwrap();
+            keys.push(key);
+        }
+        assert_eq!(db.document_count(), 200);
+
+        // Delete 100 of them
+        for key in &keys[..100] {
+            db.delete(key).unwrap();
+        }
+        assert_eq!(db.document_count(), 100);
+
+        // Compact
+        let result = db.compact().unwrap();
+        assert_eq!(result.documents, 100);
+        assert_eq!(db.document_count(), 100);
+
+        // Verify surviving documents
+        for key in &keys[100..] {
+            let val = db.get(key).unwrap();
+            assert!(val.is_some(), "key should survive compaction");
+        }
+
+        // Verify deleted documents stay deleted
+        for key in &keys[..100] {
+            assert_eq!(db.get(key).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn test_compact_with_overflow() {
+        let (_dir, mut db) = setup();
+
+        let key1 = Uuid::from_u128(1);
+        let key2 = Uuid::from_u128(2);
+
+        db.insert(key1, Value::String("x".repeat(10_000))).unwrap();
+        db.insert(key2, Value::Integer(42)).unwrap();
+        db.delete(&key2).unwrap();
+
+        let result = db.compact().unwrap();
+        assert_eq!(result.documents, 1);
+
+        let val = db.get(&key1).unwrap().unwrap();
+        assert_eq!(val, Value::String("x".repeat(10_000)));
+    }
+
+    #[test]
+    fn test_compact_empty_db() {
+        let (_dir, mut db) = setup();
+        let result = db.compact().unwrap();
+        assert_eq!(result.documents, 0);
+    }
+
+    #[test]
+    fn test_document_count() {
+        let (_dir, mut db) = setup();
+        assert_eq!(db.document_count(), 0);
+        let key = Uuid::new_v4();
+        db.insert(key, Value::Integer(1)).unwrap();
+        assert_eq!(db.document_count(), 1);
+        db.delete(&key).unwrap();
+        assert_eq!(db.document_count(), 0);
     }
 }

@@ -70,7 +70,10 @@ mod tests {
             Uuid::new_v4(),
             Value::Object(BTreeMap::from([
                 ("name".into(), Value::String("test".into())),
-                ("tags".into(), Value::Array(vec![Value::Integer(1), Value::Null])),
+                (
+                    "tags".into(),
+                    Value::Array(vec![Value::Integer(1), Value::Null]),
+                ),
             ])),
         );
         let encoded = doc.encode();

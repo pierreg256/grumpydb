@@ -137,18 +137,20 @@ mod tests {
 
     #[test]
     fn test_value_object() {
-        let v = Value::Object(BTreeMap::from([
-            ("key".into(), Value::String("value".into())),
-        ]));
+        let v = Value::Object(BTreeMap::from([(
+            "key".into(),
+            Value::String("value".into()),
+        )]));
         let obj = v.as_object().unwrap();
         assert_eq!(obj.get("key"), Some(&Value::String("value".into())));
     }
 
     #[test]
     fn test_value_clone_and_eq() {
-        let v = Value::Object(BTreeMap::from([
-            ("nested".into(), Value::Array(vec![Value::Null, Value::Bool(false)])),
-        ]));
+        let v = Value::Object(BTreeMap::from([(
+            "nested".into(),
+            Value::Array(vec![Value::Null, Value::Bool(false)]),
+        )]));
         let cloned = v.clone();
         assert_eq!(v, cloned);
     }

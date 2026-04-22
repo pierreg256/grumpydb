@@ -4,7 +4,7 @@
 //! end of the page, with free space in between.
 
 use crate::error::{GrumpyError, Result};
-use crate::page::{PageHeader, PageType, PAGE_HEADER_SIZE, PAGE_SIZE, SLOT_SIZE};
+use crate::page::{PAGE_HEADER_SIZE, PAGE_SIZE, PageHeader, PageType, SLOT_SIZE};
 
 /// A slotted page that stores variable-length tuples within a fixed 8 KiB buffer.
 ///
@@ -170,7 +170,7 @@ impl SlottedPage {
 
     /// Deletes the tuple at the given slot index by marking it as a tombstone.
     ///
-    /// The space is not immediately reclaimed; call [`compact`] to defragment.
+    /// The space is not immediately reclaimed; call [`SlottedPage::compact`] to defragment.
     pub fn delete(&mut self, slot_index: u16) -> Result<()> {
         if slot_index >= self.num_slots() {
             let header = self.header();
@@ -408,8 +408,8 @@ mod tests {
     #[test]
     fn test_slotted_page_tombstone_reuse() {
         let mut page = SlottedPage::new(1);
-        page.insert(b"first").unwrap();   // slot 0
-        page.insert(b"second").unwrap();  // slot 1
+        page.insert(b"first").unwrap(); // slot 0
+        page.insert(b"second").unwrap(); // slot 1
 
         page.delete(0).unwrap(); // slot 0 → tombstone
 

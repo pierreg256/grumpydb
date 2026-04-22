@@ -8,8 +8,8 @@ use uuid::Uuid;
 use crate::error::Result;
 use crate::page::{PageHeader, PageType};
 
-use super::node::{LeafEntry, LeafNode};
 use super::BTree;
+use super::node::{LeafEntry, LeafNode};
 
 /// A positioned cursor over B+Tree leaf entries.
 ///
@@ -65,11 +65,7 @@ impl BTree {
     ///
     /// Both `start` and `end` are inclusive-exclusive: `[start, end)`.
     /// Pass `None` for unbounded start/end.
-    pub fn range(
-        &mut self,
-        start: Option<&Uuid>,
-        end: Option<&Uuid>,
-    ) -> Result<Vec<CursorEntry>> {
+    pub fn range(&mut self, start: Option<&Uuid>, end: Option<&Uuid>) -> Result<Vec<CursorEntry>> {
         let mut cursor = if let Some(s) = start {
             self.cursor_from(s)?
         } else {

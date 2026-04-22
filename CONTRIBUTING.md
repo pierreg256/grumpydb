@@ -103,7 +103,7 @@ Use `tempfile::TempDir` for any test involving disk I/O.
 |-------|---------|
 | `uuid` | UUID v4 key generation |
 | `thiserror` | Error type definitions |
-| `crc32fast` | CRC32 checksums for pages/WAL |
+| `crc32fast` | CRC32 checksums for pages and WAL |
 | `parking_lot` | Fast RwLock/Mutex for SWMR concurrency |
 | `tempfile` | Temporary directories for tests |
 | `rand` | Random data generation for tests |

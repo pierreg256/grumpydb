@@ -7,8 +7,8 @@
 use std::collections::HashSet;
 
 use crate::error::Result;
-use crate::page::manager::PageManager;
 use crate::page::PAGE_SIZE;
+use crate::page::manager::PageManager;
 use crate::wal::record::{WalOpType, WalRecord};
 
 /// Performs crash recovery by replaying the WAL.
@@ -35,10 +35,7 @@ pub fn recover(
         .unwrap_or(0);
 
     // Only process records after the last checkpoint
-    let active: Vec<&WalRecord> = records
-        .iter()
-        .filter(|r| r.lsn > checkpoint_lsn)
-        .collect();
+    let active: Vec<&WalRecord> = records.iter().filter(|r| r.lsn > checkpoint_lsn).collect();
 
     // Identify committed transactions
     let committed_txs: HashSet<u64> = active
@@ -238,14 +235,14 @@ mod tests {
 
         let records = vec![
             WalRecord::page_write(1, 1, p1, &before1, &after1),
-            WalRecord::commit(2, 1),     // TX1 committed
+            WalRecord::commit(2, 1), // TX1 committed
             WalRecord::page_write(3, 2, p2, &before2, &after2),
             // TX2 NOT committed
         ];
 
         let result = recover(&records, &mut data, &mut index).unwrap();
-        assert_eq!(result.redo_count, 1);  // TX1 redone
-        assert_eq!(result.undo_count, 1);  // TX2 undone
+        assert_eq!(result.redo_count, 1); // TX1 redone
+        assert_eq!(result.undo_count, 1); // TX2 undone
 
         assert_eq!(data.read_page(p1).unwrap()[0], 0x22); // redo → after
         assert_eq!(data.read_page(p2).unwrap()[0], 0x33); // undo → before
@@ -264,7 +261,7 @@ mod tests {
             WalRecord::page_write(1, 1, p1, &before, &after),
             WalRecord::commit(2, 1),
             WalRecord::checkpoint(3), // checkpoint after TX1
-            // Only records after LSN 3 are processed
+                                      // Only records after LSN 3 are processed
         ];
 
         let result = recover(&records, &mut data, &mut index).unwrap();

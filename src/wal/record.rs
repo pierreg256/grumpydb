@@ -131,8 +131,7 @@ impl WalRecord {
 
         let lsn = u64::from_le_bytes(buf[4..12].try_into().unwrap());
         let tx_id = u64::from_le_bytes(buf[12..20].try_into().unwrap());
-        let op_type = WalOpType::from_u8(buf[20])
-            .ok_or(GrumpyError::WalCorrupted(lsn))?;
+        let op_type = WalOpType::from_u8(buf[20]).ok_or(GrumpyError::WalCorrupted(lsn))?;
         let page_id = u32::from_le_bytes(buf[21..25].try_into().unwrap());
         let data_len = u32::from_le_bytes(buf[25..29].try_into().unwrap()) as usize;
 
@@ -141,9 +140,8 @@ impl WalRecord {
         }
 
         let data = buf[29..29 + data_len].to_vec();
-        let checksum = u32::from_le_bytes(
-            buf[29 + data_len..29 + data_len + 4].try_into().unwrap(),
-        );
+        let checksum =
+            u32::from_le_bytes(buf[29 + data_len..29 + data_len + 4].try_into().unwrap());
 
         let rec = Self {
             record_len: record_len as u32,

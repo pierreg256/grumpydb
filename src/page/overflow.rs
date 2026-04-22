@@ -5,7 +5,9 @@
 
 use crate::error::Result;
 use crate::page::manager::PageManager;
-use crate::page::{PageHeader, PageType, OVERFLOW_MARKER, PAGE_HEADER_SIZE, PAGE_SIZE, PAGE_USABLE_SPACE};
+use crate::page::{
+    OVERFLOW_MARKER, PAGE_HEADER_SIZE, PAGE_SIZE, PAGE_USABLE_SPACE, PageHeader, PageType,
+};
 
 /// Size of the overflow reference stored in the main slotted page.
 /// `OVERFLOW_MARKER (1) + first_overflow_page_id (4) + total_data_len (4) = 9 bytes`
@@ -193,7 +195,11 @@ mod tests {
         // Reused page IDs should be from the freed chain
         let mut reused = [r1, r2, r3];
         reused.sort();
-        assert!(reused.iter().all(|&id| (first_id..first_id + 3).contains(&id)));
+        assert!(
+            reused
+                .iter()
+                .all(|&id| (first_id..first_id + 3).contains(&id))
+        );
     }
 
     #[test]

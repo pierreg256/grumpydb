@@ -272,9 +272,7 @@ impl TaskStore {
     ///
     /// After flush(), even a power failure won't lose data.
     pub fn flush(&mut self) -> Result<(), String> {
-        self.db
-            .flush()
-            .map_err(|e| format!("Failed to flush: {e}"))
+        self.db.flush().map_err(|e| format!("Failed to flush: {e}"))
     }
 
     /// Closes the task store, flushing all data.
@@ -297,6 +295,24 @@ impl TaskStore {
     /// - `capacity`: maximum number of pages the pool can hold
     pub fn pool_stats(&self) -> (u64, u64, usize, usize) {
         self.db.pool_stats()
+    }
+
+    /// Compacts the database: defragments data pages and rebuilds the index.
+    ///
+    /// Demonstrates: [`GrumpyDb::compact()`]
+    ///
+    /// Use after many deletes to reclaim disk space.
+    pub fn compact(&mut self) -> Result<grumpydb::CompactResult, String> {
+        self.db
+            .compact()
+            .map_err(|e| format!("Failed to compact: {e}"))
+    }
+
+    /// Returns the number of documents (O(1) via B+Tree metadata).
+    ///
+    /// Demonstrates: [`GrumpyDb::document_count()`]
+    pub fn document_count(&self) -> u64 {
+        self.db.document_count()
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -352,8 +368,7 @@ impl TaskStore {
                 continue; // Skip malformed lines
             }
 
-            let id = uuid::Uuid::parse_str(parts[0])
-                .map_err(|e| format!("Invalid UUID: {e}"))?;
+            let id = uuid::Uuid::parse_str(parts[0]).map_err(|e| format!("Invalid UUID: {e}"))?;
             let title = parts[1].to_string();
             let description = if parts[2].is_empty() {
                 None

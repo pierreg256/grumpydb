@@ -263,7 +263,15 @@ mod tests {
 
         let records = wal.read_all_records().unwrap();
         assert_eq!(records.len(), 3); // pw1, commit1, pw2
-        assert!(records.iter().any(|r| r.tx_id == tx1 && r.op_type == WalOpType::Commit));
-        assert!(!records.iter().any(|r| r.tx_id == tx2 && r.op_type == WalOpType::Commit));
+        assert!(
+            records
+                .iter()
+                .any(|r| r.tx_id == tx1 && r.op_type == WalOpType::Commit)
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|r| r.tx_id == tx2 && r.op_type == WalOpType::Commit)
+        );
     }
 }
