@@ -1,10 +1,12 @@
 //! Relaxed JSON parser: converts JS-like syntax to GrumpyDB `Value`.
 //!
 //! Supports: unquoted keys, single/double quotes, trailing commas,
-//! booleans, null, numbers (integer & float), strings, arrays, objects.
+//! booleans, null, numbers (integer & float), strings, arrays, objects,
+//! and `$ref("collection", "uuid")` references.
 
 use grumpydb::Value;
 use std::collections::BTreeMap;
+use uuid::Uuid;
 
 /// Parses a relaxed JSON string into a `Value`.
 pub fn parse_json(input: &str) -> Result<Value, String> {
@@ -24,6 +26,7 @@ pub fn to_json_string(value: &Value, indent: usize) -> String {
         Value::Float(f) => format!("{f}"),
         Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
         Value::Bytes(b) => format!("\"<{} bytes>\"", b.len()),
+        Value::Ref(collection, uuid) => format!("$ref(\"{collection}\", \"{uuid}\")"),
         Value::Array(arr) => {
             if arr.is_empty() {
                 return "[]".to_string();
@@ -78,6 +81,7 @@ fn parse_value(chars: &mut Chars) -> Result<Value, String> {
         Some('{') => parse_object(chars),
         Some('[') => parse_array(chars),
         Some('"') | Some('\'') => parse_string(chars),
+        Some('$') => parse_ref(chars),
         Some('t') | Some('f') => parse_bool(chars),
         Some('n') => parse_null(chars),
         Some(c) if *c == '-' || c.is_ascii_digit() => parse_number(chars),
@@ -285,6 +289,49 @@ fn parse_null(chars: &mut Chars) -> Result<Value, String> {
     }
 }
 
+/// Parses `$ref("collection", "uuid")` into `Value::Ref`.
+fn parse_ref(chars: &mut Chars) -> Result<Value, String> {
+    // Consume "$ref("
+    let mut keyword = String::new();
+    for _ in 0..4 {
+        match chars.next() {
+            Some(c) => keyword.push(c),
+            None => return Err("unexpected end of input in $ref".into()),
+        }
+    }
+    if keyword != "$ref" {
+        return Err(format!("expected $ref, got '{keyword}'"));
+    }
+    skip_whitespace(chars);
+    expect_char(chars, '(')?;
+
+    // Parse collection name (string)
+    skip_whitespace(chars);
+    let collection = match parse_string(chars)? {
+        Value::String(s) => s,
+        _ => return Err("expected string for $ref collection".into()),
+    };
+
+    skip_whitespace(chars);
+    expect_char(chars, ',')?;
+
+    // Parse UUID (string)
+    skip_whitespace(chars);
+    let uuid_str = match parse_string(chars)? {
+        Value::String(s) => s,
+        _ => return Err("expected string for $ref uuid".into()),
+    };
+
+    skip_whitespace(chars);
+    expect_char(chars, ')')?;
+
+    let uuid: Uuid = uuid_str
+        .parse()
+        .map_err(|e| format!("invalid UUID in $ref: {e}"))?;
+
+    Ok(Value::Ref(collection, uuid))
+}
+
 fn expect_char(chars: &mut Chars, expected: char) -> Result<(), String> {
     skip_whitespace(chars);
     match chars.next() {
@@ -386,5 +433,33 @@ mod tests {
         let json = to_json_string(&v, 0);
         assert!(json.contains("\"name\": \"Alice\""));
         assert!(json.contains("\"age\": 30"));
+    }
+
+    #[test]
+    fn test_parse_ref() {
+        let uuid = Uuid::from_u128(42);
+        let input = format!("$ref(\"users\", \"{uuid}\")");
+        let v = parse_json(&input).unwrap();
+        assert_eq!(v, Value::Ref("users".into(), uuid));
+    }
+
+    #[test]
+    fn test_parse_ref_in_object() {
+        let uuid = Uuid::from_u128(99);
+        let input = format!("{{ owner: $ref(\"users\", \"{uuid}\"), name: \"order\" }}");
+        let v = parse_json(&input).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.get("owner"), Some(&Value::Ref("users".into(), uuid)));
+        assert_eq!(obj.get("name"), Some(&Value::String("order".into())));
+    }
+
+    #[test]
+    fn test_pretty_print_ref() {
+        let uuid = Uuid::from_u128(42);
+        let v = Value::Ref("tasks".into(), uuid);
+        let s = to_json_string(&v, 0);
+        assert!(s.starts_with("$ref("));
+        assert!(s.contains("tasks"));
+        assert!(s.contains(&uuid.to_string()));
     }
 }

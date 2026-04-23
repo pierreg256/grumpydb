@@ -51,6 +51,9 @@ pub enum GrumpyError {
 
     #[error("invalid name: {0}")]
     InvalidName(String),
+
+    #[error("cyclic reference detected")]
+    CyclicReference,
 }
 
 /// Convenience Result type for GrumpyDB operations.

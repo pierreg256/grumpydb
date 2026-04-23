@@ -5,6 +5,8 @@
 
 use std::collections::BTreeMap;
 
+use uuid::Uuid;
+
 use crate::document::value::Value;
 use crate::error::{GrumpyError, Result};
 
@@ -18,6 +20,10 @@ const TAG_STRING: u8 = 0x04;
 const TAG_BYTES: u8 = 0x05;
 const TAG_ARRAY: u8 = 0x06;
 const TAG_OBJECT: u8 = 0x07;
+const TAG_REF: u8 = 0x08;
+
+/// Maximum collection name length in a Ref (from naming rules).
+const MAX_REF_NAME_LEN: u32 = 64;
 
 // ── Safety limits ───────────────────────────────────────────────────────
 
@@ -74,6 +80,12 @@ pub fn encode(value: &Value, buf: &mut Vec<u8>) {
                 encode(val, buf);
             }
         }
+        Value::Ref(collection, uuid) => {
+            buf.push(TAG_REF);
+            buf.extend_from_slice(&(collection.len() as u32).to_le_bytes());
+            buf.extend_from_slice(collection.as_bytes());
+            buf.extend_from_slice(uuid.as_bytes());
+        }
     }
 }
 
@@ -102,6 +114,7 @@ pub fn encoded_size(value: &Value) -> usize {
                     .map(|(k, v)| 4 + k.len() + encoded_size(v))
                     .sum::<usize>()
         }
+        Value::Ref(collection, _) => 1 + 4 + collection.len() + 16,
     }
 }
 
@@ -195,6 +208,18 @@ fn decode_recursive(cursor: &mut &[u8], depth: usize) -> Result<Value> {
                 map.insert(key, val);
             }
             Ok(Value::Object(map))
+        }
+        TAG_REF => {
+            let name_len = read_u32_le(cursor)?;
+            if name_len > MAX_REF_NAME_LEN {
+                return Err(GrumpyError::Codec(format!(
+                    "ref collection name length {name_len} exceeds maximum ({MAX_REF_NAME_LEN})"
+                )));
+            }
+            let collection = read_string(cursor, name_len as usize)?;
+            let uuid_bytes = read_bytes(cursor, 16)?;
+            let uuid = Uuid::from_bytes(uuid_bytes.try_into().unwrap());
+            Ok(Value::Ref(collection, uuid))
         }
         _ => Err(GrumpyError::Codec(format!("unknown type tag: 0x{tag:02x}"))),
     }
@@ -468,5 +493,39 @@ mod tests {
             Value::Float(f) => assert!(f.is_nan()),
             _ => panic!("expected Float"),
         }
+    }
+
+    #[test]
+    fn test_ref_round_trip() {
+        let uuid = Uuid::from_u128(12345);
+        round_trip(&Value::Ref("users".into(), uuid));
+    }
+
+    #[test]
+    fn test_ref_in_object_round_trip() {
+        let uuid = Uuid::from_u128(42);
+        let value = Value::Object(BTreeMap::from([
+            ("name".into(), Value::String("Order #1".into())),
+            ("owner".into(), Value::Ref("users".into(), uuid)),
+        ]));
+        round_trip(&value);
+    }
+
+    #[test]
+    fn test_ref_in_array_round_trip() {
+        let value = Value::Array(vec![
+            Value::Ref("a".into(), Uuid::from_u128(1)),
+            Value::Ref("b".into(), Uuid::from_u128(2)),
+        ]);
+        round_trip(&value);
+    }
+
+    #[test]
+    fn test_ref_encoded_size() {
+        let v = Value::Ref("users".into(), Uuid::from_u128(1));
+        let encoded = encode_to_vec(&v);
+        assert_eq!(encoded.len(), encoded_size(&v));
+        // tag(1) + name_len(4) + "users"(5) + uuid(16) = 26
+        assert_eq!(encoded.len(), 26);
     }
 }

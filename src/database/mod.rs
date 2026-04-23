@@ -14,7 +14,7 @@
 //!     idx_*.idx        ← secondary indexes
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
@@ -302,6 +302,62 @@ impl Database {
         coll.query_index_range(index_name, start, end)
     }
 
+    // ── References ─────────────────────────────────────────────────────
+
+    /// Resolves a single reference to its target document value.
+    pub fn resolve_ref(&mut self, collection: &str, id: &Uuid) -> Result<Option<Value>> {
+        self.get(collection, id)
+    }
+
+    /// Recursively resolves all `Ref` values in a value tree.
+    ///
+    /// Each `Value::Ref(collection, uuid)` is replaced by the target document's
+    /// value. Cycles are detected and return `GrumpyError::CyclicReference`.
+    pub fn resolve_deep(&mut self, value: &Value, max_depth: usize) -> Result<Value> {
+        let mut visited = HashSet::new();
+        self.resolve_recursive(value, max_depth, 0, &mut visited)
+    }
+
+    fn resolve_recursive(
+        &mut self,
+        value: &Value,
+        max_depth: usize,
+        depth: usize,
+        visited: &mut HashSet<(String, Uuid)>,
+    ) -> Result<Value> {
+        if depth > max_depth {
+            return Ok(value.clone());
+        }
+
+        match value {
+            Value::Ref(collection, uuid) => {
+                let key = (collection.clone(), *uuid);
+                if !visited.insert(key) {
+                    return Err(GrumpyError::CyclicReference);
+                }
+                match self.get(collection, uuid)? {
+                    Some(target) => self.resolve_recursive(&target, max_depth, depth + 1, visited),
+                    None => Ok(value.clone()), // target not found — keep ref as-is
+                }
+            }
+            Value::Object(map) => {
+                let mut resolved = std::collections::BTreeMap::new();
+                for (k, v) in map {
+                    resolved.insert(k.clone(), self.resolve_recursive(v, max_depth, depth, visited)?);
+                }
+                Ok(Value::Object(resolved))
+            }
+            Value::Array(arr) => {
+                let resolved: Result<Vec<Value>> = arr
+                    .iter()
+                    .map(|v| self.resolve_recursive(v, max_depth, depth, visited))
+                    .collect();
+                Ok(Value::Array(resolved?))
+            }
+            _ => Ok(value.clone()),
+        }
+    }
+
     // ── Maintenance ─────────────────────────────────────────────────────
 
     /// Returns the document count for a collection.
@@ -559,5 +615,107 @@ mod tests {
         let (_dir, mut db) = setup();
         assert!(db.create_collection("Bad-Name").is_err());
         assert!(db.create_collection("").is_err());
+    }
+
+    #[test]
+    fn test_resolve_ref_simple() {
+        let (_dir, mut db) = setup();
+        db.create_collection("users").unwrap();
+        db.create_collection("orders").unwrap();
+
+        let user_key = Uuid::from_u128(1);
+        db.insert(
+            "users",
+            user_key,
+            Value::Object(BTreeMap::from([(
+                "name".into(),
+                Value::String("Alice".into()),
+            )])),
+        )
+        .unwrap();
+
+        // Insert an order referencing the user
+        let order_key = Uuid::from_u128(2);
+        db.insert(
+            "orders",
+            order_key,
+            Value::Object(BTreeMap::from([
+                ("product".into(), Value::String("Widget".into())),
+                ("owner".into(), Value::Ref("users".into(), user_key)),
+            ])),
+        )
+        .unwrap();
+
+        // Resolve the ref
+        let resolved = db.resolve_ref("users", &user_key).unwrap();
+        assert!(resolved.is_some());
+        let val = resolved.unwrap();
+        assert_eq!(
+            val.as_object().unwrap().get("name"),
+            Some(&Value::String("Alice".into()))
+        );
+    }
+
+    #[test]
+    fn test_resolve_deep_nested_refs() {
+        let (_dir, mut db) = setup();
+        db.create_collection("a").unwrap();
+        db.create_collection("b").unwrap();
+
+        let key_a = Uuid::from_u128(10);
+        let key_b = Uuid::from_u128(20);
+
+        db.insert("a", key_a, Value::String("target_a".into()))
+            .unwrap();
+        db.insert(
+            "b",
+            key_b,
+            Value::Object(BTreeMap::from([(
+                "link".into(),
+                Value::Ref("a".into(), key_a),
+            )])),
+        )
+        .unwrap();
+
+        // A document with a ref to b, which itself refs a
+        let doc = Value::Object(BTreeMap::from([(
+            "nested".into(),
+            Value::Ref("b".into(), key_b),
+        )]));
+
+        let resolved = db.resolve_deep(&doc, 16).unwrap();
+        // nested -> b's doc -> { link: "target_a" }
+        let nested = resolved.as_object().unwrap().get("nested").unwrap();
+        let link = nested.as_object().unwrap().get("link").unwrap();
+        assert_eq!(link, &Value::String("target_a".into()));
+    }
+
+    #[test]
+    fn test_resolve_deep_cycle_detection() {
+        let (_dir, mut db) = setup();
+        db.create_collection("items").unwrap();
+
+        let key1 = Uuid::from_u128(100);
+        let key2 = Uuid::from_u128(200);
+
+        // key1 -> refs key2, key2 -> refs key1 (cycle)
+        db.insert("items", key1, Value::Ref("items".into(), key2))
+            .unwrap();
+        db.insert("items", key2, Value::Ref("items".into(), key1))
+            .unwrap();
+
+        let doc = Value::Ref("items".into(), key1);
+        let result = db.resolve_deep(&doc, 16);
+        assert!(matches!(result, Err(GrumpyError::CyclicReference)));
+    }
+
+    #[test]
+    fn test_resolve_ref_missing_target() {
+        let (_dir, mut db) = setup();
+        db.create_collection("items").unwrap();
+
+        let missing = Uuid::from_u128(999);
+        let result = db.resolve_ref("items", &missing).unwrap();
+        assert!(result.is_none());
     }
 }

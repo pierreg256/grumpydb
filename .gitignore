@@ -15,3 +15,6 @@ Thumbs.db
 # Database files (test artifacts)
 *.db
 *.log
+
+# Test Data Files
+.grumpysh_data/

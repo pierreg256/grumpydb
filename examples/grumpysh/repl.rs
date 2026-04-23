@@ -123,6 +123,10 @@ impl Repl {
                 ]));
                 Ok(to_json_string(&stats, 0))
             }),
+            Command::Resolve(coll, id) => self.cmd_resolve(&coll, &id),
+            Command::ResolveDeep(coll, id, depth) => {
+                self.cmd_resolve_deep(&coll, &id, depth)
+            }
         }
     }
 
@@ -211,6 +215,50 @@ impl Repl {
         })
     }
 
+    fn cmd_resolve(&mut self, coll: &str, id: &str) -> Option<String> {
+        self.with_db(|db| {
+            let uuid = resolve_uuid(db, coll, id)?;
+            let value = db
+                .get(coll, &uuid)?
+                .ok_or(grumpydb::GrumpyError::KeyNotFound(uuid))?;
+
+            // Walk the value and resolve one level of Ref values
+            let resolved = resolve_one_level(db, &value)?;
+            let mut obj = BTreeMap::new();
+            obj.insert("_id".to_string(), Value::String(uuid.to_string()));
+            if let Value::Object(fields) = resolved {
+                for (k, v) in fields {
+                    obj.insert(k, v);
+                }
+            } else {
+                obj.insert("_value".to_string(), resolved);
+            }
+            Ok(to_json_string(&Value::Object(obj), 0))
+        })
+    }
+
+    fn cmd_resolve_deep(&mut self, coll: &str, id: &str, depth: Option<usize>) -> Option<String> {
+        self.with_db(|db| {
+            let uuid = resolve_uuid(db, coll, id)?;
+            let value = db
+                .get(coll, &uuid)?
+                .ok_or(grumpydb::GrumpyError::KeyNotFound(uuid))?;
+
+            let max_depth = depth.unwrap_or(16);
+            let resolved = db.resolve_deep(&value, max_depth)?;
+            let mut obj = BTreeMap::new();
+            obj.insert("_id".to_string(), Value::String(uuid.to_string()));
+            if let Value::Object(fields) = resolved {
+                for (k, v) in fields {
+                    obj.insert(k, v);
+                }
+            } else {
+                obj.insert("_value".to_string(), resolved);
+            }
+            Ok(to_json_string(&Value::Object(obj), 0))
+        })
+    }
+
     fn cmd_query(&mut self, coll: &str, idx: &str, value: &Value) -> Option<String> {
         self.with_db(|db| {
             let results = db.query(coll, idx, value)?;
@@ -292,6 +340,29 @@ fn wrap_with_id(key: Uuid, value: Value) -> Value {
     Value::Object(obj)
 }
 
+/// Resolves one level of Ref values in a Value tree.
+fn resolve_one_level(db: &mut Database, value: &Value) -> grumpydb::Result<Value> {
+    match value {
+        Value::Ref(collection, uuid) => match db.resolve_ref(collection, uuid)? {
+            Some(resolved) => Ok(resolved),
+            None => Ok(value.clone()),
+        },
+        Value::Object(map) => {
+            let mut resolved = BTreeMap::new();
+            for (k, v) in map {
+                resolved.insert(k.clone(), resolve_one_level(db, v)?);
+            }
+            Ok(Value::Object(resolved))
+        }
+        Value::Array(arr) => {
+            let resolved: grumpydb::Result<Vec<Value>> =
+                arr.iter().map(|v| resolve_one_level(db, v)).collect();
+            Ok(Value::Array(resolved?))
+        }
+        _ => Ok(value.clone()),
+    }
+}
+
 fn help_text(topic: Option<&str>) -> String {
     match topic {
         None => r#"GrumpyShell — Interactive GrumpyDB REPL
@@ -312,6 +383,12 @@ CRUD:
   db.<coll>.count()                     Document count
   db.<coll>.update("id", { ... })       Replace a document
   db.<coll>.delete("id")                Delete a document
+
+REFERENCES:
+  $ref("collection", "uuid")            Reference syntax in JSON values
+  db.<coll>.resolve("id")               Resolve refs (one level)
+  db.<coll>.resolveDeep("id")           Resolve refs recursively (max 16)
+  db.<coll>.resolveDeep("id", N)        Resolve refs recursively (max N)
 
 INDEXES:
   db.<coll>.createIndex("name", "field")  Create secondary index
@@ -334,6 +411,9 @@ OTHER:
         Some("insert") => "db.<collection>.insert({ key: value, ... })\n\nInserts a JSON document with an auto-generated UUID.\nKeys can be unquoted. Values: strings, numbers, booleans, null, arrays, objects.\n\nExample: db.users.insert({ name: \"Alice\", age: 30 })".to_string(),
         Some("find") => "db.<collection>.find()\ndb.<collection>.find({ field: value })\n\nWithout a filter: returns all documents.\nWith a filter: returns documents where all fields match.\nNested fields: { \"address.city\": \"Paris\" }\n\nExample: db.users.find({ age: 30 })".to_string(),
         Some("query") => "db.<collection>.query(\"index_name\", value)\n\nLooks up documents via a secondary index (exact match).\nThe index must be created first with createIndex.\n\nExample:\n  db.users.createIndex(\"by_age\", \"age\")\n  db.users.query(\"by_age\", 30)".to_string(),
+        Some("resolve") => "db.<collection>.resolve(\"id\")\n\nRetrieves a document and resolves one level of $ref() values.\nEach $ref(\"coll\", \"uuid\") is replaced by the target document's value.\n\nExample:\n  db.orders.resolve(\"abc123\")".to_string(),
+        Some("resolveDeep") | Some("resolvedeep") => "db.<collection>.resolveDeep(\"id\"[, depth])\n\nRetrieves a document and recursively resolves $ref() values.\nDefault max depth is 16. Cycles are detected and reported as errors.\n\nExample:\n  db.orders.resolveDeep(\"abc123\")\n  db.orders.resolveDeep(\"abc123\", 5)".to_string(),
+        Some("ref") => "$ref(\"collection\", \"uuid\")\n\nA reference to a document in another collection.\nUse in insert/update to create cross-collection links.\n\nExample:\n  db.orders.insert({ product: \"widget\", owner: $ref(\"users\", \"a3b4c5d6-...\") })".to_string(),
         Some(cmd) => format!("No detailed help for '{cmd}'. Try: help"),
     }
 }

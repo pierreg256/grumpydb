@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-04-23
+
+### Added
+- **Document References** (Phase 12c): cross-collection document linking with cycle detection
+  - `Value::Ref(String, Uuid)` — reference type pointing to a document in another collection
+  - Binary codec `TAG_REF = 0x08` for serialization/deserialization of Ref values
+  - Sortable index encoding for Ref (`TAG_REF = 0x06`) in `src/index/encoding.rs`
+  - `GrumpyError::CyclicReference` error variant for detecting circular reference chains
+  - `Database::resolve_ref()` — resolve a single Ref to its target document
+  - `Database::resolve_deep()` — recursively resolve all Ref fields with cycle detection
+  - GrumpyShell: `$ref("collection", "uuid")` syntax for creating references in documents
+  - GrumpyShell: `resolve()` and `resolveDeep()` commands for reference resolution
+- 268 total tests (253 unit + 12 integration + 3 doctests), 0 clippy warnings
+
 ## [2.0.0] - 2026-04-23
 
 ### Added

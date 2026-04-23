@@ -29,7 +29,7 @@ src/
 │   └── mod.rs          # Collection struct, raw CRUD, compact, PageWriteRecord, secondary indexes
 ├── index/              # Secondary indexes on document fields
 │   ├── mod.rs          # SecondaryIndex struct, IndexDefinition, lookup, range_query
-│   └── encoding.rs     # Sortable binary encoding (integers, floats, strings), extract_field
+│   └── encoding.rs     # Sortable binary encoding (integers, floats, strings, refs), extract_field
 ├── page/               # Page storage (8 KiB pages)
 │   ├── mod.rs          # Constants (PAGE_SIZE, etc.), PageHeader, PageType
 │   ├── manager.rs      # PageManager — disk I/O, free-list
@@ -47,7 +47,7 @@ src/
 │   └── var_cursor.rs   # VarCursor, range scans for variable keys
 ├── document/           # Document model
 │   ├── mod.rs          # Document struct (UUID + Value)
-│   ├── value.rs        # Value enum — schema-less JSON-like type
+│   ├── value.rs        # Value enum — schema-less JSON-like type + Ref
 │   └── codec.rs        # Binary codec — encode/decode/encoded_size
 ├── wal/                # Write-Ahead Log
 │   ├── mod.rs          # WAL module

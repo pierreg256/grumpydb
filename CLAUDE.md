@@ -40,14 +40,14 @@ GrumpyDB is a disk-based object storage engine written in Rust. It provides pers
 | `btree`        | B+Tree index (fixed UUID keys + variable-length keys), search/insert/delete/split/merge, cursor |
 | `wal`          | WAL records, writer, checkpoint, recovery                |
 | `buffer`       | Buffer pool LRU, dirty tracking, pin/unpin               |
-| `document`     | Value type (JSON-like), binary codec                     |
+| `document`     | Value type (JSON-like + Ref), binary codec                |
 | `collection`   | Unit of storage: data pages + primary index + secondary indexes, raw CRUD |
 | `index`        | Secondary indexes: sortable encoding, SecondaryIndex, IndexDefinition |
-| `database`     | Multi-collection management with shared WAL, CRUD routing |
+| `database`     | Multi-collection management with shared WAL, CRUD routing, reference resolution |
 | `naming`       | Name validation: `[a-z0-9_]{1,64}`                       |
 | `concurrency`  | SWMR lock manager, page-level locks                     |
 | `engine`       | Thin wrapper over Collection + WAL, exposes public CRUD  |
-| `error`        | Centralized error types (14 variants)                    |
+| `error`        | Centralized error types (16 variants)                    |
 
 ## Code conventions
 

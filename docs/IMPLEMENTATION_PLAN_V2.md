@@ -73,6 +73,7 @@ Phase 10: Collection            ████████████████
 Phase 11: Secondary Indexes     ████████████████████  Done    — sortable encoding
 Phase 12: Database              ████████████████████  Done    — multi-collection + WAL
 Phase 12b: GrumpyShell          ████████████████████  Done    — interactive JS-like REPL
+Phase 12c: Document References  ████████████████████  Done    — cross-collection refs
 Phase 13: Client & Server       ░░░░░░░░░░░░░░░░░░░░  Pending — multi-tenant
 Phase 14: Concurrency v2        ░░░░░░░░░░░░░░░░░░░░  Pending — per-database SWMR
 Phase 15: Polish & Migration    ░░░░░░░░░░░░░░░░░░░░  Pending — backward compat, docs
@@ -649,6 +650,119 @@ json_value    := json_object | json_array | STRING | NUMBER | BOOL | NULL
 - [x] Pretty JSON output
 - [x] History persists across sessions via rustyline
 - [x] 17 new tests (11 json_parser + 6 filter), 268 total tests
+
+---
+
+## Phase 12c: Document References
+
+### Objective
+
+Allow documents to reference other documents across collections via a new
+`Value::Ref(collection, uuid)` type. References are stored as first-class
+values and can be resolved lazily through the `Database` layer.
+
+### Design
+
+#### New `Value` variant
+
+```rust
+pub enum Value {
+    // ... existing variants ...
+    /// Reference to a document in another (or the same) collection.
+    Ref(String, Uuid),  // (collection_name, document_uuid)
+}
+```
+
+#### Codec
+
+New tag `TAG_REF = 0x08`. Wire format: `TAG_REF + 4-byte LE collection name
+length + UTF-8 collection name + 16-byte UUID`.
+
+#### Resolution
+
+Lazy resolution at the `Database` level (the only layer aware of all
+collections):
+
+```rust
+impl Database {
+    /// Resolves a single Ref to its target document.
+    pub fn resolve_ref(&mut self, collection: &str, id: &Uuid) -> Result<Option<Value>>;
+
+    /// Recursively resolves all Ref values in a document tree (cycle-safe).
+    pub fn resolve_deep(&mut self, value: &Value, max_depth: usize) -> Result<Value>;
+}
+```
+
+`resolve_deep` uses a `HashSet<(String, Uuid)>` visited set to detect
+cycles and returns `GrumpyError::CyclicReference` if one is found.
+
+#### GrumpyShell syntax
+
+```js
+// Insert a document with a reference
+db.orders.insert({ product: "widget", owner: $ref("users", "a3b4c5d6-...") })
+
+// Resolve references in a document
+db.orders.resolve("order-uuid")           // one level
+db.orders.resolveDeep("order-uuid")       // recursive (max 16 levels)
+db.orders.resolveDeep("order-uuid", 5)    // recursive (max 5 levels)
+```
+
+### Tasks
+
+#### 12c.1 Value::Ref variant (`src/document/value.rs`)
+
+- [x] Add `Ref(String, Uuid)` variant to `Value` enum
+- [x] Add `as_ref() → Option<(&str, &Uuid)>` accessor
+- [x] Update `PartialEq` (derived — automatic)
+- [x] Tests: construction, accessor, equality (2 tests)
+
+#### 12c.2 Codec update (`src/document/codec.rs`)
+
+- [x] Add `TAG_REF = 0x08`
+- [x] `encode()`: write tag + 4-byte LE name length + name bytes + 16-byte UUID
+- [x] `decode()`: read tag, name length, name, UUID
+- [x] Validate collection name length ≤ 64 (from naming rules)
+- [x] Tests: round-trip, nested Ref in Object/Array
+
+#### 12c.3 Index encoding (`src/index/encoding.rs`)
+
+- [x] Add `TAG_REF = 0x06` for sortable encoding
+- [x] Encode as: tag + collection name bytes (truncated to 128) + UUID bytes
+- [x] Ref values are indexable (useful for "find all docs referencing X")
+- [x] Tests: sort order, composite key with Ref
+
+#### 12c.4 Database resolve methods (`src/database/mod.rs`)
+
+- [x] `resolve_ref(collection, uuid) → Result<Option<Value>>` — delegates to `get()`
+- [x] `resolve_deep(value, max_depth) → Result<Value>` — recursive with visited set
+- [x] Cycle detection via `HashSet<(String, Uuid)>`
+- [x] New error: `GrumpyError::CyclicReference`
+- [x] Tests: resolve simple ref, resolve nested refs, cycle detection, missing target (4 tests)
+
+#### 12c.5 GrumpyShell: JSON parser update (`examples/grumpysh/json_parser.rs`)
+
+- [x] Parse `$ref("collection", "uuid")` syntax → `Value::Ref(collection, uuid)`
+- [x] Pretty-print `Ref` as `$ref("collection", "uuid")`
+- [x] Tests: parse $ref, round-trip display
+
+#### 12c.6 GrumpyShell: parser + REPL update (`examples/grumpysh/parser.rs`, `repl.rs`)
+
+- [x] New commands: `Resolve(collection, id)`, `ResolveDeep(collection, id, Option<usize>)`
+- [x] Parse `db.<coll>.resolve("id")` and `db.<coll>.resolveDeep("id"[, depth])`
+- [x] REPL: execute resolve commands via `Database::resolve_ref` / `resolve_deep`
+- [x] Help text updated with reference documentation
+
+### Validation criteria Phase 12c
+
+- [x] Insert documents with `Ref` values, retrieve them unchanged
+- [x] `resolve_ref` follows a reference to the target document
+- [x] `resolve_deep` recursively resolves nested refs (depth-limited)
+- [x] Cyclic references detected and reported as error
+- [x] GrumpyShell: `$ref()` syntax works in insert, display, and resolve commands
+- [x] All existing tests pass (regression)
+- [x] `cargo clippy -- -D warnings` passes
+- [x] 266 unit tests, 0 clippy warnings
 
 ---
 

@@ -223,6 +223,7 @@ enum Value {
     Bytes(Vec<u8>),
     Array(Vec<Value>),
     Object(BTreeMap<String, Value>),
+    Ref(String, Uuid),  // (collection_name, document_uuid)
 }
 ```
 
@@ -241,6 +242,7 @@ Tag  Type       Encoding
 0x05 Bytes      4 bytes len (u32 LE) + raw bytes
 0x06 Array      4 bytes count (u32 LE) + recursive elements
 0x07 Object     4 bytes count (u32 LE) + recursive pairs (key_string + value)
+0x08 Ref        4 bytes name len (u32 LE) + UTF-8 collection name + 16 bytes UUID
 ```
 
 ### 4.3 Document
@@ -573,6 +575,9 @@ pub enum GrumpyError {
 
     #[error("invalid name: {0}")]
     InvalidName(String),
+
+    #[error("cyclic reference detected")]
+    CyclicReference,
 }
 ```
 
@@ -593,9 +598,10 @@ Type tag (1 byte) + encoded value:
   0x03  Float(f64)      → IEEE 754 sortable encoding
   0x04  String          → UTF-8 bytes (truncated to 128 bytes)
   0x05  Bytes           → raw bytes (truncated to 128 bytes)
+  0x06  Ref             → collection name bytes (truncated to 128) + 16 bytes UUID
 ```
 
-Ordering: `Null < Bool < Integer < Float < String < Bytes`. Arrays and Objects return `NotIndexable`.
+Ordering: `Null < Bool < Integer < Float < String < Bytes < Ref`. Arrays and Objects return `NotIndexable`.
 
 Composite key = `encode_sortable_value(field) + uuid_bytes` (ensures uniqueness, max ~145 bytes).
 
@@ -694,6 +700,10 @@ impl Database {
     pub fn query(&mut self, collection: &str, index: &str, value: &Value) -> Result<Vec<(Uuid, Value)>>;
     pub fn query_range(&mut self, collection: &str, index: &str, start: &Value, end: &Value) -> Result<Vec<(Uuid, Value)>>;
 
+    // Reference resolution
+    pub fn resolve_ref(&mut self, collection: &str, id: &Uuid) -> Result<Option<Value>>;
+    pub fn resolve_deep(&mut self, value: &Value, max_depth: usize) -> Result<Value>;
+
     // Maintenance
     pub fn flush(&mut self) -> Result<()>;
     pub fn compact(&mut self, collection: &str) -> Result<u64>;
@@ -739,6 +749,10 @@ db.users.query("by_age", 30)              // exact-match query
 db.users.queryRange("by_age", 20, 30)     // range query
 db.users.count()                           // document count
 db.users.compact()                         // compaction
+db.orders.insert({ owner: $ref("users", "uuid") })  // document reference
+db.orders.resolve("uuid")                 // resolve one level of refs
+db.orders.resolveDeep("uuid")             // recursive resolve (max 16)
+db.orders.resolveDeep("uuid", 5)          // recursive resolve (max 5)
 help                                       // command reference
 ```
 
@@ -749,7 +763,7 @@ help                                       // command reference
 | `main.rs` | CLI entry: `--data`, `--eval`, `--help` flags |
 | `repl.rs` | Read-eval-print loop, session state, command execution |
 | `parser.rs` | Command parser: `Command` enum, tokenizer |
-| `json_parser.rs` | Relaxed JSON parser (unquoted keys, single quotes, trailing commas) |
+| `json_parser.rs` | Relaxed JSON parser (unquoted keys, single quotes, trailing commas, `$ref()`) |
 | `filter.rs` | Client-side document matching for `find({ field: value })` |
 
 Relaxed JSON: unquoted keys, single/double quotes, trailing commas. Uses `rustyline` for line editing and persistent history (`~/.grumpysh_history`).

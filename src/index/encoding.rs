@@ -8,13 +8,14 @@ use uuid::Uuid;
 use crate::document::value::Value;
 use crate::error::{GrumpyError, Result};
 
-/// Type tags for sortable encoding (ordering: Null < Bool < Integer < Float < String < Bytes).
+/// Type tags for sortable encoding (ordering: Null < Bool < Integer < Float < String < Bytes < Ref).
 const TAG_NULL: u8 = 0x00;
 const TAG_BOOL: u8 = 0x01;
 const TAG_INTEGER: u8 = 0x02;
 const TAG_FLOAT: u8 = 0x03;
 const TAG_STRING: u8 = 0x04;
 const TAG_BYTES: u8 = 0x05;
+const TAG_REF: u8 = 0x06;
 
 /// Maximum length of string/bytes values in an index key (truncated if longer).
 const MAX_INDEXED_LEN: usize = 128;
@@ -63,6 +64,14 @@ pub fn encode_sortable_value(value: &Value) -> Result<Vec<u8>> {
             let mut buf = vec![TAG_BYTES];
             let len = b.len().min(MAX_INDEXED_LEN);
             buf.extend_from_slice(&b[..len]);
+            Ok(buf)
+        }
+        Value::Ref(collection, uuid) => {
+            let mut buf = vec![TAG_REF];
+            let name_bytes = collection.as_bytes();
+            let len = name_bytes.len().min(MAX_INDEXED_LEN);
+            buf.extend_from_slice(&name_bytes[..len]);
+            buf.extend_from_slice(uuid.as_bytes());
             Ok(buf)
         }
         Value::Array(_) | Value::Object(_) => Err(GrumpyError::NotIndexable),
@@ -233,5 +242,32 @@ mod tests {
     fn test_extract_field_not_object() {
         let val = Value::Integer(42);
         assert_eq!(extract_field(&val, "field"), None);
+    }
+
+    #[test]
+    fn test_encode_ref() {
+        let uuid = Uuid::from_u128(42);
+        let encoded = encode_sortable_value(&Value::Ref("users".into(), uuid)).unwrap();
+        // tag(1) + "users"(5) + uuid(16) = 22
+        assert_eq!(encoded.len(), 22);
+        assert_eq!(encoded[0], TAG_REF);
+    }
+
+    #[test]
+    fn test_encode_ref_ordering() {
+        // Ref should sort after Bytes
+        let bytes_v = encode_sortable_value(&Value::Bytes(vec![0])).unwrap();
+        let ref_v =
+            encode_sortable_value(&Value::Ref("a".into(), Uuid::from_u128(1))).unwrap();
+        assert!(bytes_v < ref_v);
+    }
+
+    #[test]
+    fn test_encode_ref_composite_key() {
+        let doc_uuid = Uuid::from_u128(99);
+        let ref_val = Value::Ref("orders".into(), Uuid::from_u128(1));
+        let key = encode_composite_key(&ref_val, &doc_uuid).unwrap();
+        // tag(1) + "orders"(6) + ref_uuid(16) + doc_uuid(16) = 39
+        assert_eq!(key.len(), 39);
     }
 }

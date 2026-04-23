@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
-/// A schema-less value, similar to JSON but with additional types (Bytes).
+use uuid::Uuid;
+
+/// A schema-less value, similar to JSON but with additional types (Bytes, Ref).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// JSON null.
@@ -21,6 +23,8 @@ pub enum Value {
     Array(Vec<Value>),
     /// Key-value map with deterministic ordering.
     Object(BTreeMap<String, Value>),
+    /// Reference to a document in another (or the same) collection.
+    Ref(std::string::String, Uuid),
 }
 
 impl Value {
@@ -81,6 +85,14 @@ impl Value {
     pub fn as_object(&self) -> Option<&BTreeMap<String, Value>> {
         match self {
             Value::Object(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Returns the collection name and UUID if this is a `Ref`.
+    pub fn as_ref(&self) -> Option<(&str, &Uuid)> {
+        match self {
+            Value::Ref(coll, id) => Some((coll, id)),
             _ => None,
         }
     }
@@ -151,6 +163,22 @@ mod tests {
             "nested".into(),
             Value::Array(vec![Value::Null, Value::Bool(false)]),
         )]));
+        let cloned = v.clone();
+        assert_eq!(v, cloned);
+    }
+
+    #[test]
+    fn test_value_ref() {
+        let id = Uuid::from_u128(42);
+        let v = Value::Ref("users".into(), id);
+        assert_eq!(v.as_ref(), Some(("users", &id)));
+        assert!(v.as_str().is_none());
+        assert!(!v.is_null());
+    }
+
+    #[test]
+    fn test_value_ref_clone_and_eq() {
+        let v = Value::Ref("tasks".into(), Uuid::from_u128(99));
         let cloned = v.clone();
         assert_eq!(v, cloned);
     }

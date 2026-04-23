@@ -26,6 +26,7 @@ pub enum Value {
     Bytes(Vec<u8>),
     Array(Vec<Value>),
     Object(BTreeMap<String, Value>),
+    Ref(String, Uuid),  // (collection_name, document_uuid)
 }
 ```
 
@@ -47,6 +48,7 @@ impl Value {
     pub fn as_bytes(&self) -> Option<&[u8]>;
     pub fn as_array(&self) -> Option<&[Value]>;
     pub fn as_object(&self) -> Option<&BTreeMap<String, Value>>;
+    pub fn as_ref(&self) -> Option<(&str, &Uuid)>;
 }
 ```
 
@@ -64,6 +66,7 @@ Each value is prefixed by a one-byte **type tag**:
 | `0x05` | Bytes | 4 bytes len (u32 LE) + raw bytes |
 | `0x06` | Array | 4 bytes count (u32 LE) + recursively encoded elements |
 | `0x07` | Object | 4 bytes count (u32 LE) + pairs (String key + encoded value) |
+| `0x08` | Ref | 4 bytes name len (u32 LE) + UTF-8 collection name + 16 bytes UUID |
 
 ### Encoding
 
@@ -109,6 +112,12 @@ pub fn encode(value: &Value, buf: &mut Vec<u8>) {
                 buf.extend_from_slice(key.as_bytes());
                 encode(val, buf);
             }
+        }
+        Value::Ref(name, uuid) => {
+            buf.push(0x08);
+            buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            buf.extend_from_slice(name.as_bytes());
+            buf.extend_from_slice(uuid.as_bytes());
         }
     }
 }
@@ -163,6 +172,7 @@ pub fn encoded_size(value: &Value) -> usize {
                 .map(|(k, v)| 4 + k.len() + encoded_size(v))
                 .sum::<usize>()
         }
+        Value::Ref(name, _) => 1 + 4 + name.len() + 16,  // tag + name_len + name + UUID
     }
 }
 ```

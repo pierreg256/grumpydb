@@ -43,6 +43,10 @@ pub enum Command {
     Compact(String),
     /// `db.<collection>.stats()`
     Stats(String),
+    /// `db.<collection>.resolve("id")`
+    Resolve(String, String),
+    /// `db.<collection>.resolveDeep("id"[, depth])`
+    ResolveDeep(String, String, Option<usize>),
     /// `help` or `help <topic>`
     Help(Option<String>),
     /// `clear`
@@ -165,6 +169,14 @@ fn parse_db_command(input: &str) -> Result<Command, String> {
     if rest.starts_with("stats()") {
         return Ok(Command::Stats(collection.into()));
     }
+    if let Some(args) = strip_method(rest, "resolveDeep") {
+        let (id, depth) = parse_resolve_deep_args(args)?;
+        return Ok(Command::ResolveDeep(collection.into(), id, depth));
+    }
+    if let Some(args) = strip_method(rest, "resolve") {
+        let id = parse_single_string_arg(args)?;
+        return Ok(Command::Resolve(collection.into(), id));
+    }
 
     Err(format!("unknown method: db.{input}"))
 }
@@ -254,4 +266,23 @@ fn find_top_level_comma(s: &str) -> Result<usize, String> {
     }
 
     Err("expected ','".into())
+}
+
+fn parse_resolve_deep_args(args: &str) -> Result<(String, Option<usize>), String> {
+    let args = args.trim();
+    match find_top_level_comma(args) {
+        Ok(comma) => {
+            let id = parse_single_string_arg(args[..comma].trim())?;
+            let depth_str = args[comma + 1..].trim();
+            let depth: usize = depth_str
+                .parse()
+                .map_err(|_| format!("invalid depth: {depth_str}"))?;
+            Ok((id, Some(depth)))
+        }
+        Err(_) => {
+            // No comma — just the ID, default depth
+            let id = parse_single_string_arg(args)?;
+            Ok((id, None))
+        }
+    }
 }

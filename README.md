@@ -23,6 +23,7 @@ A disk-based object storage engine written in Rust. GrumpyDB stores schema-less 
 | Collection abstraction (unit of storage) | ✅ Implemented |
 | Secondary indexes (field-level queries) | ✅ Implemented |
 | Multi-collection database | ✅ Implemented |
+| Document references (cross-collection Ref, resolve, cycle detection) | ✅ Implemented |
 | GrumpyShell interactive REPL | ✅ Implemented |
 
 ## Getting started
@@ -95,9 +96,15 @@ grumpy [demo]> db.users.query("by_age", 30)
 [{ "_id": "...", "age": 30, "name": "Alice" }]
 grumpy [demo]> db.users.find({ age: 30 })
 [{ "_id": "...", "age": 30, "name": "Alice" }]
+grumpy [demo]> db.orders.insert({ product: "widget", owner: $ref("users", "3df9dde6-...") })
+Inserted: a1b2c3d4-...
+grumpy [demo]> db.orders.resolve("a1b2c3d4")
+{ ... resolved document ... }
+grumpy [demo]> db.orders.resolveDeep("a1b2c3d4")
+{ ... deeply resolved document ... }
 ```
 
-Features: relaxed JSON (unquoted keys, single quotes), secondary index queries, client-side filtering, line editing with history.
+Features: relaxed JSON (unquoted keys, single quotes), secondary index queries, client-side filtering, document references (`$ref()`), reference resolution (`resolve`, `resolveDeep`), line editing with history.
 
 ## Demo App & Tutorial
 
@@ -164,7 +171,7 @@ src/
 │   └── var_cursor.rs   # VarCursor, range scans
 ├── document/           # Document model
 │   ├── mod.rs          # Document struct
-│   ├── value.rs        # Value enum (JSON-like)
+│   ├── value.rs        # Value enum (JSON-like + Ref)
 │   └── codec.rs        # Binary encode/decode
 ├── wal/                # Write-Ahead Log
 ├── buffer/             # Buffer pool LRU cache
