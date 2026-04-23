@@ -60,7 +60,11 @@ src/
 │   └── pool.rs         # BufferPool (LRU eviction, I/O counters)
 ├── concurrency/        # SWMR lock manager
 │   ├── mod.rs          # Concurrency module
-│   └── lock_manager.rs # SharedDb (Arc<RwLock<GrumpyDb>>)
+│   ├── lock_manager.rs # SharedDb (Arc<RwLock<GrumpyDb>>)
+│   └── shared.rs       # SharedDatabase + SharedServer (per-database SWMR)
+├── server/             # Multi-tenant server
+│   ├── mod.rs          # GrumpyServer — top-level multi-tenant management
+│   └── client.rs       # Client — manages multiple databases per tenant
 ├── engine.rs           # GrumpyDb — thin wrapper over Collection + WAL
 └── lib.rs              # Public API, re-exports
 ```

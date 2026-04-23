@@ -24,6 +24,8 @@ A disk-based object storage engine written in Rust. GrumpyDB stores schema-less 
 | Secondary indexes (field-level queries) | ✅ Implemented |
 | Multi-collection database | ✅ Implemented |
 | Document references (cross-collection Ref, resolve, cycle detection) | ✅ Implemented |
+| Multi-tenant server (Client & Server) | ✅ Implemented |
+| Thread-safe concurrency (per-database SWMR) | ✅ Implemented |
 | GrumpyShell interactive REPL | ✅ Implemented |
 
 ## Getting started
@@ -73,7 +75,7 @@ assert!(doc.is_some());
 db.close().unwrap();
 ```
 
-> **Note**: The full CRUD API (`insert`, `get`, `update`, `delete`, `scan`) is functional with WAL durability, LRU buffer pool caching, SWMR concurrency, page checksums, and compaction. The `Database` API provides multi-collection support with secondary indexes.
+> **Note**: The full CRUD API (`insert`, `get`, `update`, `delete`, `scan`) is functional with WAL durability, LRU buffer pool caching, SWMR concurrency, page checksums, and compaction. The `Database` API provides multi-collection support with secondary indexes. The `GrumpyServer` API provides multi-tenant isolation with per-client databases. Thread-safe wrappers (`SharedDatabase`, `SharedServer`) enable concurrent access with per-database SWMR locking.
 
 ## GrumpyShell — Interactive REPL
 
@@ -124,6 +126,8 @@ cargo run --example taskman -- help
 ┌──────────────────────────────────────┐
 │         Public API (lib.rs)          │
 ├──────────────────────────────────────┤
+│  Server (server/) + Concurrency v2   │
+├──────────────────────────────────────┤
 │  Database (database/) + Engine (engine.rs) │
 ├──────────────────────────────────────┤
 │     Collection (collection/) + Indexes    │
@@ -147,6 +151,9 @@ src/
 ├── error.rs            # GrumpyError, Result type
 ├── engine.rs           # GrumpyDb — thin wrapper over Collection + WAL
 ├── naming.rs           # Name validation: [a-z0-9_]{1,64}
+├── server/             # Multi-tenant server
+│   ├── mod.rs          # GrumpyServer — top-level multi-tenant entry point
+│   └── client.rs       # Client — manages multiple databases per tenant
 ├── database/           # Database — multi-collection management
 │   └── mod.rs          # Database struct, CRUD routing, shared WAL
 ├── collection/         # Collection — unit of document storage
@@ -175,7 +182,10 @@ src/
 │   └── codec.rs        # Binary encode/decode
 ├── wal/                # Write-Ahead Log
 ├── buffer/             # Buffer pool LRU cache
-└── concurrency/        # SWMR locks
+└── concurrency/        # SWMR concurrency wrappers
+    ├── mod.rs          # Module declarations
+    ├── lock_manager.rs # SharedDb (single-collection backward compat)
+    └── shared.rs       # SharedDatabase + SharedServer (per-database SWMR)
 ```
 
 ## License

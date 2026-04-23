@@ -8,6 +8,7 @@ GrumpyDB is an embedded storage engine (library crate) that persists schema-less
 - **Secondary indexes** on document fields via VarBTree (`idx_*.idx`)
 - **Collection** abstraction encapsulating data pages + primary index + secondary indexes
 - **Database** layer managing multiple collections with shared WAL
+- **Server** layer for multi-tenant isolation (Client & Server)
 - **Write-Ahead Log** in `wal.log` for durability
 - **LRU Buffer Pool** for in-memory caching
 - **SWMR** (Single-Writer, Multi-Reader) concurrency
@@ -578,6 +579,12 @@ pub enum GrumpyError {
 
     #[error("cyclic reference detected")]
     CyclicReference,
+
+    #[error("client not found: {0}")]
+    ClientNotFound(String),
+
+    #[error("database not found: {0}")]
+    DatabaseNotFound(String),
 }
 ```
 
@@ -767,3 +774,133 @@ help                                       // command reference
 | `filter.rs` | Client-side document matching for `find({ field: value })` |
 
 Relaxed JSON: unquoted keys, single/double quotes, trailing commas. Uses `rustyline` for line editing and persistent history (`~/.grumpysh_history`).
+
+## 16. Server & Client (Multi-Tenant)
+
+### 16.1 On-disk layout
+
+```
+<server_root>/
+  <client_name>/                     ← one directory per client
+    <database_name>/                 ← one directory per database
+      wal.log
+      <collection_name>/
+        data.db
+        primary.idx
+        idx_*.idx
+```
+
+### 16.2 GrumpyServer
+
+```rust
+pub struct GrumpyServer {
+    path: PathBuf,
+    clients: HashMap<String, Client>,
+}
+
+impl GrumpyServer {
+    pub fn open(path: &Path) -> Result<Self>;       // create dir, auto-discover clients
+    pub fn create_client(&mut self, name: &str) -> Result<()>;
+    pub fn drop_client(&mut self, name: &str) -> Result<()>;
+    pub fn client(&mut self, name: &str) -> Result<&mut Client>;
+    pub fn list_clients(&self) -> Vec<&str>;
+    pub fn close(self) -> Result<()>;
+}
+```
+
+### 16.3 Client
+
+```rust
+pub struct Client {
+    name: String,
+    path: PathBuf,
+    databases: HashMap<String, Database>,
+}
+
+impl Client {
+    pub fn open(path: &Path, name: &str) -> Result<Self>;  // create dir, auto-discover databases
+    pub fn create_database(&mut self, name: &str) -> Result<()>;
+    pub fn drop_database(&mut self, name: &str) -> Result<()>;
+    pub fn database(&mut self, name: &str) -> Result<&mut Database>;
+    pub fn list_databases(&self) -> Vec<&str>;
+    pub fn close(self) -> Result<()>;
+}
+```
+
+### 16.4 Auto-discovery
+
+Both `GrumpyServer` and `Client` auto-discover existing children by scanning subdirectories:
+- Server scans for client directories (skipping hidden dirs)
+- Client scans for database directories (identified by `wal.log` or collection subdirectories with `data.db`)
+
+## 17. Concurrency v2 (Per-Database SWMR)
+
+### 17.1 SharedDatabase
+
+Wraps a `Database` in `Arc<RwLock>` for thread-safe per-database access.
+
+```rust
+#[derive(Clone)]
+pub struct SharedDatabase {
+    inner: Arc<RwLock<Database>>,
+}
+
+impl SharedDatabase {
+    pub fn new(db: Database) -> Self;
+    pub fn open(path: &Path) -> Result<Self>;
+
+    // Collection management
+    pub fn create_collection(&self, name: &str) -> Result<()>;
+    pub fn drop_collection(&self, name: &str) -> Result<()>;
+    pub fn list_collections(&self) -> Vec<String>;
+
+    // CRUD (acquires write lock)
+    pub fn insert(&self, collection: &str, key: Uuid, value: Value) -> Result<()>;
+    pub fn get(&self, collection: &str, key: &Uuid) -> Result<Option<Value>>;
+    pub fn update(&self, collection: &str, key: &Uuid, value: Value) -> Result<()>;
+    pub fn delete(&self, collection: &str, key: &Uuid) -> Result<()>;
+    pub fn scan(&self, collection: &str, range: impl RangeBounds<Uuid>) -> Result<Vec<(Uuid, Value)>>;
+
+    // Index, resolve, maintenance...
+    pub fn close(self) -> Result<()>;
+}
+```
+
+Multiple threads can read concurrently. Writes acquire an exclusive lock.
+Clone is cheap (Arc clone).
+
+### 17.2 SharedServer
+
+Wraps a `GrumpyServer` with per-database independent locking.
+
+```rust
+#[derive(Clone)]
+pub struct SharedServer {
+    server: Arc<RwLock<GrumpyServer>>,
+    databases: Arc<RwLock<HashMap<String, SharedDatabase>>>,
+}
+
+impl SharedServer {
+    pub fn open(path: &Path) -> Result<Self>;
+    pub fn create_client(&self, name: &str) -> Result<()>;
+    pub fn drop_client(&self, name: &str) -> Result<()>;
+    pub fn list_clients(&self) -> Vec<String>;
+    pub fn create_database(&self, client: &str, db_name: &str) -> Result<()>;
+    pub fn drop_database(&self, client: &str, db_name: &str) -> Result<()>;
+    pub fn list_databases(&self, client: &str) -> Result<Vec<String>>;
+    pub fn database(&self, client: &str, db_name: &str) -> Result<SharedDatabase>;
+    pub fn close(self) -> Result<()>;
+}
+```
+
+Each database gets its own `SharedDatabase` with independent locking.
+Concurrent writes to **different databases** proceed without contention.
+Within a single database, SWMR rules apply (1 writer OR N readers).
+
+### 17.3 Concurrency Wrappers Summary
+
+| Wrapper | Wraps | Scope | Use case |
+|---------|-------|-------|----------|
+| `SharedDb` | `GrumpyDb` | Single collection | Backward compat, simple use |
+| `SharedDatabase` | `Database` | Multi-collection | Per-database concurrent access |
+| `SharedServer` | `GrumpyServer` | Multi-tenant | Server-wide concurrent access |

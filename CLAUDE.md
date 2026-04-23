@@ -45,9 +45,10 @@ GrumpyDB is a disk-based object storage engine written in Rust. It provides pers
 | `index`        | Secondary indexes: sortable encoding, SecondaryIndex, IndexDefinition |
 | `database`     | Multi-collection management with shared WAL, CRUD routing, reference resolution |
 | `naming`       | Name validation: `[a-z0-9_]{1,64}`                       |
-| `concurrency`  | SWMR lock manager, page-level locks                     |
+| `concurrency`  | SWMR wrappers: SharedDb (single-collection), SharedDatabase (per-database), SharedServer (multi-tenant) |
+| `server`       | Multi-tenant server: GrumpyServer (clients), Client (databases per tenant) |
 | `engine`       | Thin wrapper over Collection + WAL, exposes public CRUD  |
-| `error`        | Centralized error types (16 variants)                    |
+| `error`        | Centralized error types (18 variants)                    |
 
 ## Code conventions
 
@@ -110,8 +111,10 @@ error (no internal dependencies)
                 → naming (depends on error)
                   → concurrency (depends on error, page, buffer)
                     → database (depends on error, collection, wal, naming)
-                      → engine (depends on collection, wal, concurrency)
-                        → lib.rs (exposes engine, database, index)
+                      → server (depends on error, database, naming)
+                        → concurrency (depends on error, server, database)
+                          → engine (depends on collection, wal, concurrency)
+                            → lib.rs (exposes engine, database, server, concurrency, index)
 ```
 
 ## Implementation plan

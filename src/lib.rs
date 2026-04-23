@@ -36,11 +36,15 @@ pub mod error;
 pub mod index;
 pub mod naming;
 pub mod page;
+pub mod server;
 pub mod wal;
 
 pub use concurrency::lock_manager::SharedDb;
+pub use concurrency::shared::{SharedDatabase, SharedServer};
 pub use database::Database;
 pub use document::value::Value;
 pub use engine::{CompactResult, GrumpyDb};
 pub use error::{GrumpyError, Result};
 pub use index::IndexDefinition;
+pub use server::client::Client;
+pub use server::GrumpyServer;

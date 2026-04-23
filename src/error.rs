@@ -54,6 +54,12 @@ pub enum GrumpyError {
 
     #[error("cyclic reference detected")]
     CyclicReference,
+
+    #[error("client not found: {0}")]
+    ClientNotFound(String),
+
+    #[error("database not found: {0}")]
+    DatabaseNotFound(String),
 }
 
 /// Convenience Result type for GrumpyDB operations.

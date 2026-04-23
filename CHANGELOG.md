@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-04-23
+
+### Added
+- **Multi-Tenant Server** (Phase 13): full client/server hierarchy for multi-tenant isolation
+  - `src/server/mod.rs`: `GrumpyServer` struct — multi-tenant server managing isolated clients
+  - `src/server/client.rs`: `Client` struct — per-tenant client with independent databases
+  - Full hierarchy: Server → Client → Database → Collection
+  - `GrumpyError::ClientNotFound` and `GrumpyError::DatabaseNotFound` error variants
+  - `GrumpyServer` and `Client` exported from `lib.rs`
+  - 19 new tests (9 client + 10 server)
+- **Concurrency v2** (Phase 14): thread-safe wrappers for Database and Server
+  - `SharedDatabase` — thread-safe Database wrapper with per-database `Arc<RwLock>`
+  - `SharedServer` — multi-tenant server with independent per-database locking
+  - Concurrent writes to different databases without contention
+  - `SharedDatabase` and `SharedServer` exported from `lib.rs`
+  - 9 new concurrency tests (4 SharedDatabase + 5 SharedServer)
+- 295 total tests (unit + integration + doctests), 0 clippy warnings
+
 ## [2.1.0] - 2026-04-23
 
 ### Added

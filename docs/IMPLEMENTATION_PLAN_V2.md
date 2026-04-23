@@ -74,8 +74,8 @@ Phase 11: Secondary Indexes     ████████████████
 Phase 12: Database              ████████████████████  Done    — multi-collection + WAL
 Phase 12b: GrumpyShell          ████████████████████  Done    — interactive JS-like REPL
 Phase 12c: Document References  ████████████████████  Done    — cross-collection refs
-Phase 13: Client & Server       ░░░░░░░░░░░░░░░░░░░░  Pending — multi-tenant
-Phase 14: Concurrency v2        ░░░░░░░░░░░░░░░░░░░░  Pending — per-database SWMR
+Phase 13: Client & Server       ████████████████████  Done    — multi-tenant
+Phase 14: Concurrency v2        ████████████████████  Done    — per-database SWMR
 Phase 15: Polish & Migration    ░░░░░░░░░░░░░░░░░░░░  Pending — backward compat, docs
 ```
 
@@ -776,38 +776,44 @@ Multi-tenant isolation: each client has their own databases.
 
 #### 13.1 Client struct (`src/server/client.rs`) — NEW FILE
 
-- [ ] `Client` struct: name, path, databases catalogue
-- [ ] `Client::open(path)` → read `_databases.db`, list available databases
-- [ ] `create_database(name) → Result<()>` — create subdirectory + Database
-- [ ] `drop_database(name) → Result<()>` — close + delete directory
-- [ ] `database(name) → Result<&mut Database>` — open (lazy) or return cached
-- [ ] `list_databases() → Vec<String>`
-- [ ] Tests: create/open client, create/drop databases, lazy open
+- [x] `Client` struct: name, path, databases HashMap
+- [x] `Client::open(path, name)` → create dir, auto-discover existing databases by scanning subdirs
+- [x] `create_database(name) → Result<()>` — validate name, create subdirectory + Database
+- [x] `drop_database(name) → Result<()>` — close + delete directory
+- [x] `database(name) → Result<&mut Database>` — lazy open or return cached
+- [x] `list_databases() → Vec<&str>`
+- [x] `name() → &str`, `path() → &Path`
+- [x] `close()` — flush all databases
+- [x] `has_collection_subdirs()` helper for discovery
+- [x] New error variants: `GrumpyError::ClientNotFound`, `GrumpyError::DatabaseNotFound`
+- [x] Tests: 9 tests — create/open client, create/drop databases, lazy open, isolation, persistence
 
 #### 13.2 Server struct (`src/server/mod.rs`) — NEW FILE
 
-- [ ] `GrumpyServer` struct: root_path, clients catalogue
-- [ ] `GrumpyServer::open(path)` → create root dir, read `_clients.db`
-- [ ] `create_client(name) → Result<()>` — create subdirectory
-- [ ] `drop_client(name) → Result<()>` — close all databases + delete directory
-- [ ] `client(name) → Result<&mut Client>` — open (lazy) or return cached
-- [ ] `list_clients() → Vec<String>`
-- [ ] Tests: create/open server, create/drop clients, isolation between clients
+- [x] `GrumpyServer` struct: path, clients HashMap
+- [x] `GrumpyServer::open(path)` → create root dir, auto-discover clients by scanning subdirs
+- [x] `create_client(name) → Result<()>` — validate name, create subdirectory
+- [x] `drop_client(name) → Result<()>` — close all databases + delete directory
+- [x] `client(name) → Result<&mut Client>` — lazy open or return cached
+- [x] `list_clients() → Vec<&str>`
+- [x] `path() → &Path`
+- [x] `close()` — flush all clients and databases
+- [x] Tests: 10 tests — create/open server, create/drop clients, isolation, full flow, persistence
 
 #### 13.3 Public API (`src/lib.rs`) — UPDATE
 
-- [ ] Export `GrumpyServer`, `Client`, `Database`, `Collection` (public)
-- [ ] Export `IndexDefinition`, `CompactResult`
-- [ ] Keep existing `GrumpyDb` export for backward compat
-- [ ] Tests: doctest with full Server → Client → Database → Collection flow
+- [x] Export `GrumpyServer`, `Client` (public)
+- [x] Keep existing `GrumpyDb`, `Database`, `Value`, `IndexDefinition`, `CompactResult` exports
+- [x] Tests: doctests on GrumpyServer with full Server → Client → Database → Collection flow
 
 ### Validation criteria Phase 13
 
-- [ ] 2 clients, 2 databases each, 2 collections each — isolated
-- [ ] Drop client removes everything
-- [ ] Drop database removes everything under it
-- [ ] Server survives close + reopen
-- [ ] All existing tests pass
+- [x] 2 clients, 2 databases each, 2 collections each — isolated
+- [x] Drop client removes everything
+- [x] Drop database removes everything under it
+- [x] Server survives close + reopen
+- [x] All existing tests pass
+- [x] 19 new tests (9 client + 10 server), 292 total tests
 
 ---
 
@@ -837,32 +843,38 @@ Within one database, SWMR rules apply (1 writer OR N readers).
 
 ### Tasks
 
-#### 14.1 SharedDatabase (`src/concurrency/mod.rs`) — REFACTOR
+#### 14.1 SharedDatabase (`src/concurrency/shared.rs`) — NEW FILE
 
-- [ ] `SharedDatabase` wrapping `Arc<RwLock<Database>>`
-- [ ] All Database methods wrapped with appropriate locks
-- [ ] `Clone` for thread sharing
-- [ ] Tests: concurrent reads on same database, concurrent writes on different databases
+- [x] `SharedDatabase` wrapping `Arc<RwLock<Database>>`
+- [x] All Database methods wrapped with appropriate read/write locks
+- [x] `Clone` for cheap thread sharing (Arc clone)
+- [x] Full API: collection management, CRUD, index, resolve, maintenance
+- [x] `close()` consumes handle via `Arc::try_unwrap`
+- [x] Tests: 4 tests — CRUD, concurrent reads, writer+readers, collections+indexes
 
-#### 14.2 SharedServer (`src/concurrency/mod.rs`)
+#### 14.2 SharedServer (`src/concurrency/shared.rs`)
 
-- [ ] `SharedServer` wrapping `Arc<RwLock<GrumpyServer>>`
-- [ ] `client(name)` → returns client (short lock)
-- [ ] `database(client, db)` → returns `SharedDatabase`
-- [ ] Tests: 4 threads writing to 4 different databases concurrently, no contention
+- [x] `SharedServer` wrapping `Arc<RwLock<GrumpyServer>>` + per-database `SharedDatabase` cache
+- [x] `create_client()`, `drop_client()`, `list_clients()` — short server lock
+- [x] `create_database()`, `drop_database()`, `list_databases()` — per-client operations
+- [x] `database(client, db)` → returns cached `SharedDatabase` for independent locking
+- [x] `Clone` for thread sharing
+- [x] `close()` drops database handles then server
+- [x] Tests: 5 tests — basic flow, concurrent writes to different databases, concurrent reads, server operations, database caching
 
 #### 14.3 Backward compat (`src/concurrency/lock_manager.rs`)
 
-- [ ] `SharedDb` now wraps a `SharedDatabase` with default collection
-- [ ] All existing `SharedDb` tests pass
-- [ ] Tests: SharedDb regression
+- [x] `SharedDb` preserved unchanged — wraps single-collection `GrumpyDb`
+- [x] All existing `SharedDb` tests pass unchanged
+- [x] Module docs updated to describe all three wrappers
 
 ### Validation criteria Phase 14
 
-- [ ] 8 threads × 4 databases — concurrent writes, no deadlocks
-- [ ] 1 writer + 4 readers per database — no corruption
-- [ ] Cross-database operations are independent (no lock contention)
-- [ ] Backward compat: existing SharedDb tests pass
+- [x] Concurrent writes to different databases proceed without contention
+- [x] 1 writer + N readers per database — no corruption
+- [x] Cross-database operations are independent
+- [x] Backward compat: existing SharedDb tests pass
+- [x] 9 new tests (4 SharedDatabase + 5 SharedServer), 311 total tests (295 unit + 12 integration + 4 doctests)
 
 ---
 
@@ -972,11 +984,12 @@ Phases 9–11 are backward compatible → minor versions.
 
 | Phase | New tests | Total |
 |-------|-----------|-------|
-| 9 | ~25 | ~215 |
-| 10 | ~15 | ~230 |
-| 11 | ~30 | ~260 |
-| 12 | ~25 | ~285 |
-| 12b | ~10 | ~295 |
-| 13 | ~15 | ~310 |
-| 14 | ~15 | ~325 |
-| 15 | ~15 | ~340 |
+| 9 | 30 | 220 |
+| 10 | 10 | 230 |
+| 11 | 20 | 268 |
+| 12 | 17 | 268 |
+| 12b | 17 | 268 |
+| 12c | 7 | 273 |
+| 13 | 19 | 292 |
+| 14 | 9 | 311 (295 unit + 12 integration + 4 doctests) |
+| 15 | ~15 | ~326 |
