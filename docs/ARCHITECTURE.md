@@ -4,7 +4,8 @@
 
 GrumpyDB is an embedded storage engine (library crate) that persists schema-less documents on disk with:
 - **Page-based storage** of 8 KiB in `data.db`
-- **B+Tree index** in `index.db` for O(log n) access by UUID
+- **B+Tree index** in `primary.idx` for O(log n) access by UUID
+- **Collection** abstraction encapsulating data pages + primary index
 - **Write-Ahead Log** in `wal.log` for durability
 - **LRU Buffer Pool** for in-memory caching
 - **SWMR** (Single-Writer, Multi-Reader) concurrency
@@ -353,10 +354,75 @@ LockManager {
 1. **Read**: `read_lock(page_id)` → read → `read_unlock(page_id)`
 2. **Write**: `write_mutex.lock()` → `write_lock(pages...)` → modify → WAL → `write_unlock` → `write_mutex.unlock()`
 
-## 8. Public API
+## 8. Collection
+
+A `Collection` is the unit of document storage — it owns its data pages (via a `BufferPool`) and a primary B+Tree index. The engine (`GrumpyDb`) is a thin wrapper over a single `Collection` plus a `WalWriter`.
+
+### On-disk layout
+
+```
+<collection_dir>/
+  data.db       ← slotted pages (documents)
+  primary.idx   ← B+Tree: UUID → (PageId, SlotId)
+```
+
+### Structure
 
 ```rust
-pub struct GrumpyDb { /* ... */ }
+pub struct Collection {
+    name: String,
+    path: PathBuf,
+    data_pool: BufferPool,        // LRU cache wrapping data PageManager
+    btree: BTree,                  // primary index
+    current_data_page: u32,        // page being filled
+}
+
+pub struct PageWriteRecord {
+    pub page_id: u32,
+    pub before: [u8; PAGE_SIZE],   // page image before modification
+    pub after: [u8; PAGE_SIZE],    // page image after modification
+}
+```
+
+### API
+
+```rust
+impl Collection {
+    pub fn open(path: &Path, name: &str, pool_capacity: usize) -> Result<Self>;
+    pub fn open_default(path: &Path, name: &str) -> Result<Self>;
+
+    // Raw CRUD — no WAL, caller handles logging via returned PageWriteRecords
+    pub fn insert_raw(&mut self, key: Uuid, encoded: &[u8]) -> Result<((u32, u16), Vec<PageWriteRecord>)>;
+    pub fn get_raw(&mut self, key: &Uuid) -> Result<Option<Vec<u8>>>;
+    pub fn delete_raw(&mut self, key: &Uuid) -> Result<Vec<PageWriteRecord>>;
+    pub fn scan_raw(&mut self, range: impl RangeBounds<Uuid>) -> Result<Vec<(Uuid, Vec<u8>)>>;
+
+    // Maintenance
+    pub fn compact(&mut self) -> Result<u64>;
+    pub fn flush(&mut self) -> Result<()>;
+    pub fn document_count(&self) -> u64;
+    pub fn pool_stats(&self) -> (u64, u64, usize, usize);
+    pub fn data_page_manager(&mut self) -> &mut PageManager;
+    pub fn index_page_manager(&mut self) -> &mut PageManager;
+}
+```
+
+### Design rationale
+
+- **WAL-free**: the `Collection` does not know about WAL. It returns `PageWriteRecord`s (before/after images) so the caller (`GrumpyDb` or future `Database`) can log them.
+- **Self-contained**: a `Collection` can be used standalone in tests without WAL infrastructure.
+- **Future-proof**: in Phase 12, a `Database` will own multiple `Collection`s sharing a single WAL.
+
+## 9. Public API
+
+`GrumpyDb` is a thin wrapper over a single `Collection` + `WalWriter`.
+
+```rust
+pub struct GrumpyDb {
+    collection: Collection,
+    wal: WalWriter,
+    writes_since_checkpoint: u32,
+}
 
 impl GrumpyDb {
     /// Opens or creates a database in the specified directory.
@@ -367,22 +433,22 @@ impl GrumpyDb {
     pub fn open_with_pool_capacity(path: &Path, pool_capacity: usize) -> Result<Self>;
 
     /// Inserts a document with a UUID key, returns error if key exists
-    pub fn insert(&self, key: Uuid, value: Value) -> Result<()>;
+    pub fn insert(&mut self, key: Uuid, value: Value) -> Result<()>;
 
     /// Retrieves a document by its key
-    pub fn get(&self, key: &Uuid) -> Result<Option<Value>>;
+    pub fn get(&mut self, key: &Uuid) -> Result<Option<Value>>;
 
     /// Updates an existing document, returns error if key does not exist
-    pub fn update(&self, key: &Uuid, value: Value) -> Result<()>;
+    pub fn update(&mut self, key: &Uuid, value: Value) -> Result<()>;
 
     /// Deletes a document by its key
-    pub fn delete(&self, key: &Uuid) -> Result<()>;
+    pub fn delete(&mut self, key: &Uuid) -> Result<()>;
 
     /// Iterates over a key range
-    pub fn scan(&self, range: impl RangeBounds<Uuid>) -> Result<Vec<(Uuid, Value)>>;
+    pub fn scan(&mut self, range: impl RangeBounds<Uuid>) -> Result<Vec<(Uuid, Value)>>;
 
     /// Forces flush of all dirty pages + WAL checkpoint
-    pub fn flush(&self) -> Result<()>;
+    pub fn flush(&mut self) -> Result<()>;
 
     /// Returns buffer pool stats: (read_count, write_count, cached_count, capacity)
     pub fn pool_stats(&self) -> (u64, u64, usize, usize);
@@ -399,7 +465,7 @@ impl GrumpyDb {
 }
 ```
 
-## 9. Page Checksums
+## 10. Page Checksums
 
 Every page written to disk is stamped with a CRC32 checksum covering all bytes
 except the 4-byte checksum field itself (bytes 28–31).
@@ -424,7 +490,7 @@ to remain readable.
 - `PageManager::read_page()` calls `verify_checksum()` after reading.
 - The B+Tree page manager follows the same protocol.
 
-## 10. Compaction
+## 11. Compaction
 
 The `compact()` method defragments the database by rewriting all live documents
 into fresh, tightly-packed data pages and rebuilding the B+Tree index from scratch.
@@ -434,7 +500,7 @@ into fresh, tightly-packed data pages and rebuilding the B+Tree index from scrat
 1. **Flush** all dirty pages from the buffer pool and sync the B+Tree.
 2. **Scan** all live entries from the B+Tree (sorted by key).
 3. **Read** each document's raw bytes (inline or overflow).
-4. **Create** temporary files (`data.db.compact`, `index.db.compact`).
+4. **Create** temporary files (`data.db.compact`, `primary.idx.compact`).
 5. **Reinsert** all documents into the fresh files, packing pages tightly.
 6. **Swap** the compacted files over the originals (`rename`).
 7. **Reopen** the engine with fresh file handles and buffer pool.
@@ -455,7 +521,7 @@ pub struct CompactResult {
 ```
 ```
 
-## 11. Error Handling
+## 12. Error Handling
 
 ```rust
 #[derive(Debug, thiserror::Error)]

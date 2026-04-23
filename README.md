@@ -20,6 +20,7 @@ A disk-based object storage engine written in Rust. GrumpyDB stores schema-less 
 | Page checksums (CRC32 integrity) | ✅ Implemented |
 | Compaction (defrag + index rebuild) | ✅ Implemented |
 | Variable-key B+Tree (secondary indexes) | ✅ Implemented |
+| Collection abstraction (unit of storage) | ✅ Implemented |
 
 ## Getting started
 
@@ -88,15 +89,17 @@ cargo run --example taskman -- help
 ┌──────────────────────────────────────┐
 │         Public API (lib.rs)          │
 ├──────────────────────────────────────┤
-│         Engine (engine.rs)           │
-├────────────┬─────────────┬───────────┤
-│  Document  │  Concurrency│  Buffer   │
-│  Model     │  (SWMR)     │  Pool     │
-├────────────┼─────────────┼───────────┤
+│     Engine (engine.rs) + WAL         │
+├──────────────────────────────────────┤
+│     Collection (collection/)         │
+├────────────┬─────────────┬────────────┤
+│  Document  │  Concurrency │  Buffer   │
+│  Model     │  (SWMR)      │  Pool     │
+├────────────┼─────────────┼────────────┤
 │  B+Tree    │     WAL     │  Page     │
 │  Index     │             │  Manager  │
-│ (index.db) │  (wal.log)  │ (data.db) │
-└────────────┴─────────────┴───────────┘
+│(primary.idx)│  (wal.log)  │ (data.db) │
+└────────────┴─────────────┴────────────┘
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for technical details.
@@ -107,7 +110,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for technical details.
 src/
 ├── lib.rs              # Public API, re-exports
 ├── error.rs            # GrumpyError, Result type
-├── engine.rs           # GrumpyDb — CRUD orchestrator
+├── engine.rs           # GrumpyDb — thin wrapper over Collection + WAL
+├── collection/         # Collection — unit of document storage
+│   └── mod.rs          # Collection struct, raw CRUD, compact
 ├── page/               # 8 KiB page management
 │   ├── mod.rs          # Constants, PageHeader, PageType
 │   ├── manager.rs      # PageManager (I/O, free-list)

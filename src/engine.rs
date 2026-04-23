@@ -1,24 +1,17 @@
 //! Storage engine: orchestrates all subsystems to provide CRUD operations.
 //!
-//! All data page access goes through the [`BufferPool`] for LRU caching.
-//! Overflow pages bypass the pool (they are sequential, not revisited).
+//! `GrumpyDb` is a thin wrapper over a single [`Collection`] with WAL logging.
+//! All data page access goes through the collection's [`BufferPool`].
 
 use std::path::Path;
 use uuid::Uuid;
 
-use crate::btree::BTree;
-use crate::buffer::pool::BufferPool;
+use crate::collection::Collection;
 use crate::document::Document;
 use crate::document::value::Value;
 use crate::error::{GrumpyError, Result};
 use crate::page::manager::PageManager;
-use crate::page::overflow;
-use crate::page::slotted::SlottedPage;
-use crate::page::{PAGE_SIZE, PAGE_USABLE_SPACE, PageHeader, PageType, SLOT_SIZE};
 use crate::wal::writer::WalWriter;
-
-/// Maximum document size that fits in a single slotted page (without overflow).
-const INLINE_MAX: usize = PAGE_USABLE_SPACE - SLOT_SIZE;
 
 /// Default number of frames in the buffer pool (256 frames × 8 KiB = 2 MiB).
 const DEFAULT_POOL_CAPACITY: usize = 256;
@@ -42,12 +35,10 @@ const DEFAULT_POOL_CAPACITY: usize = 256;
 /// db.close().unwrap();
 /// ```
 pub struct GrumpyDb {
-    /// Buffer pool wrapping the data page manager (LRU cache).
-    data_pool: BufferPool,
-    btree: BTree,
+    /// The underlying collection (data pages + primary index).
+    collection: Collection,
+    /// Write-Ahead Log for durability.
     wal: WalWriter,
-    /// Page ID of the current data page being filled.
-    current_data_page: u32,
     /// Write counter for periodic checkpointing.
     writes_since_checkpoint: u32,
 }
@@ -65,7 +56,7 @@ pub struct CompactResult {
 impl GrumpyDb {
     /// Opens or creates a database at the given directory path.
     ///
-    /// Creates `data.db` for document storage and `index.db` for the B+Tree index.
+    /// Creates `data.db` for document storage and `primary.idx` for the B+Tree index.
     /// Data pages are cached in a buffer pool (256 frames = 2 MiB by default).
     /// If the files already exist, they are opened and the engine resumes.
     pub fn open(path: &Path) -> Result<Self> {
@@ -77,50 +68,29 @@ impl GrumpyDb {
         std::fs::create_dir_all(path)?;
 
         let data_path = path.join("data.db");
-        let index_path = path.join("index.db");
+        let index_path = path.join("primary.idx");
         let wal_path = path.join("wal.log");
 
-        let data_exists = data_path.exists() && data_path.metadata()?.len() > 0;
-        let index_exists = index_path.exists() && index_path.metadata()?.len() > 0;
-
-        let mut data_pm = PageManager::new(&data_path)?;
-
-        let mut btree = if index_exists {
-            BTree::open(&index_path)?
-        } else {
-            BTree::create(&index_path)?
-        };
-
-        // WAL recovery: replay committed transactions, undo uncommitted ones
+        // WAL recovery happens BEFORE creating the Collection,
+        // because recovery needs two &mut PageManager references.
         let mut wal = WalWriter::new(&wal_path)?;
         let records = wal.read_all_records()?;
         if !records.is_empty() {
-            crate::wal::recovery::recover(&records, &mut data_pm, &mut btree.pm)?;
-            // Checkpoint after recovery to clean the WAL
+            let mut data_pm = PageManager::new(&data_path)?;
+            let mut index_pm = PageManager::new(&index_path)?;
+            crate::wal::recovery::recover(&records, &mut data_pm, &mut index_pm)?;
             data_pm.sync()?;
-            btree.sync()?;
+            index_pm.sync()?;
             wal.log_checkpoint()?;
             wal.truncate()?;
         }
 
-        // Find or allocate the current data page
-        let current_data_page = if data_exists {
-            Self::find_or_alloc_data_page(&mut data_pm)?
-        } else {
-            let page_id = data_pm.allocate_page()?;
-            let page = SlottedPage::new(page_id);
-            data_pm.write_page(page_id, &page.data)?;
-            page_id
-        };
-
-        // Wrap the PageManager in a BufferPool for LRU caching
-        let data_pool = BufferPool::new(pool_capacity, data_pm);
+        // Now open the Collection (wraps data.db + primary.idx in BufferPool + BTree)
+        let collection = Collection::open(path, "_default", pool_capacity)?;
 
         Ok(Self {
-            data_pool,
-            btree,
+            collection,
             wal,
-            current_data_page,
             writes_since_checkpoint: 0,
         })
     }
@@ -129,27 +99,19 @@ impl GrumpyDb {
     ///
     /// Returns `DuplicateKey` if the key already exists.
     pub fn insert(&mut self, key: Uuid, value: Value) -> Result<()> {
-        // Check for duplicate via B+Tree
-        if self.btree.search(&key)?.is_some() {
-            return Err(GrumpyError::DuplicateKey(key));
-        }
-
         let doc = Document::new(key, value);
         let encoded = doc.encode();
 
-        // Begin WAL transaction
         let tx_id = self.wal.begin_tx();
 
-        let (page_id, slot_id) = if encoded.len() > INLINE_MAX {
-            self.store_overflow_wal(tx_id, &encoded)?
-        } else {
-            self.store_inline_wal(tx_id, &encoded)?
-        };
+        let ((_page_id, _slot_id), records) = self.collection.insert_raw(key, &encoded)?;
 
-        // Index in B+Tree
-        self.btree.insert(key, page_id, slot_id)?;
+        // Log all page writes to WAL
+        for rec in &records {
+            self.wal
+                .log_page_write(tx_id, rec.page_id, &rec.before, &rec.after)?;
+        }
 
-        // Commit the transaction (fsync WAL)
         self.wal.log_commit(tx_id)?;
         self.maybe_checkpoint()?;
         Ok(())
@@ -160,11 +122,9 @@ impl GrumpyDb {
     /// Returns `None` if the key does not exist.
     /// Uses the buffer pool — repeated reads of the same page hit the cache.
     pub fn get(&mut self, key: &Uuid) -> Result<Option<Value>> {
-        let Some((page_id, slot_id)) = self.btree.search(key)? else {
+        let Some(raw) = self.collection.get_raw(key)? else {
             return Ok(None);
         };
-
-        let raw = self.read_tuple(page_id, slot_id)?;
         let doc = Document::decode(&raw)?;
         Ok(Some(doc.value))
     }
@@ -173,12 +133,9 @@ impl GrumpyDb {
     ///
     /// Returns `KeyNotFound` if the key does not exist.
     pub fn update(&mut self, key: &Uuid, value: Value) -> Result<()> {
-        // Verify the key exists
-        if self.btree.search(key)?.is_none() {
+        if self.collection.get_raw(key)?.is_none() {
             return Err(GrumpyError::KeyNotFound(*key));
         }
-
-        // Delete old + insert new (simple strategy)
         self.delete(key)?;
         self.insert(*key, value)?;
         Ok(())
@@ -188,38 +145,14 @@ impl GrumpyDb {
     ///
     /// Returns `KeyNotFound` if the key does not exist.
     pub fn delete(&mut self, key: &Uuid) -> Result<()> {
-        let Some((page_id, slot_id)) = self.btree.search(key)? else {
-            return Err(GrumpyError::KeyNotFound(*key));
-        };
-
         let tx_id = self.wal.begin_tx();
 
-        // Read the slot via buffer pool to check for overflow
-        let frame_idx = self.data_pool.fetch_page(page_id)?;
-        let slot_data = {
-            let page = SlottedPage::from_bytes(self.data_pool.get_frame(frame_idx).data);
-            page.get(slot_id)?.to_vec()
-        };
+        let records = self.collection.delete_raw(key)?;
 
-        if overflow::is_overflow(&slot_data) {
-            let (overflow_page_id, _) = overflow::decode_overflow_ref(&slot_data).unwrap();
-            // Overflow bypasses the buffer pool (sequential I/O, not revisited)
-            overflow::free_overflow(self.data_pool.page_manager(), overflow_page_id)?;
+        for rec in &records {
+            self.wal
+                .log_page_write(tx_id, rec.page_id, &rec.before, &rec.after)?;
         }
-
-        // WAL: log before deleting from slotted page
-        let before = self.data_pool.get_frame(frame_idx).data;
-        let mut page = SlottedPage::from_bytes(before);
-        page.delete(slot_id)?;
-        self.wal
-            .log_page_write(tx_id, page_id, &before, &page.data)?;
-
-        // Write the modified data into the frame and unpin as dirty
-        self.data_pool.get_frame_mut(frame_idx).data = page.data;
-        self.data_pool.unpin(page_id, true)?;
-
-        // Remove from B+Tree
-        self.btree.delete(key)?;
 
         self.wal.log_commit(tx_id)?;
         self.maybe_checkpoint()?;
@@ -230,61 +163,18 @@ impl GrumpyDb {
     ///
     /// Returns all documents whose keys fall within the given range, sorted by key.
     pub fn scan(&mut self, range: impl std::ops::RangeBounds<Uuid>) -> Result<Vec<(Uuid, Value)>> {
-        use std::ops::Bound;
-
-        let start = match range.start_bound() {
-            Bound::Included(k) => Some(*k),
-            Bound::Excluded(k) => {
-                // For UUID, "excluded" is tricky. We'll start from k and skip it.
-                Some(*k)
-            }
-            Bound::Unbounded => None,
-        };
-
-        let entries = self.btree.range(
-            start.as_ref(),
-            None, // We'll filter the end in post
-        )?;
-
-        let mut results = Vec::new();
-        for entry in &entries {
-            // Check end bound
-            match range.end_bound() {
-                Bound::Included(end) => {
-                    if entry.key > *end {
-                        break;
-                    }
-                }
-                Bound::Excluded(end) => {
-                    if entry.key >= *end {
-                        break;
-                    }
-                }
-                Bound::Unbounded => {}
-            }
-
-            // Check start bound (for Excluded)
-            if let Bound::Excluded(start_key) = range.start_bound() {
-                if entry.key == *start_key {
-                    continue;
-                }
-            }
-
-            let raw = self.read_tuple(entry.page_id, entry.slot_id)?;
+        let raw_results = self.collection.scan_raw(range)?;
+        let mut results = Vec::with_capacity(raw_results.len());
+        for (key, raw) in raw_results {
             let doc = Document::decode(&raw)?;
-            results.push((doc.key, doc.value));
+            results.push((key, doc.value));
         }
-
         Ok(results)
     }
 
     /// Flushes all data to disk and writes a WAL checkpoint.
-    ///
-    /// Flushes all dirty pages from the buffer pool, syncs the B+Tree,
-    /// writes a WAL checkpoint, and truncates the WAL.
     pub fn flush(&mut self) -> Result<()> {
-        self.data_pool.flush_all()?;
-        self.btree.sync()?;
+        self.collection.flush()?;
         self.wal.log_checkpoint()?;
         self.wal.truncate()?;
         self.writes_since_checkpoint = 0;
@@ -298,162 +188,23 @@ impl GrumpyDb {
 
     /// Returns the number of documents in the database.
     pub fn document_count(&self) -> u64 {
-        self.btree.len()
+        self.collection.document_count()
     }
 
     /// Compacts the database: defragments data pages and rebuilds the B+Tree index.
-    ///
-    /// This reclaims space from deleted documents by:
-    /// 1. Scanning all live documents via the B+Tree
-    /// 2. Writing them into fresh, tightly-packed data pages
-    /// 3. Rebuilding the B+Tree index from scratch
-    /// 4. Replacing the old files with the compacted ones
-    ///
-    /// The database is unavailable during compaction (requires `&mut self`).
     pub fn compact(&mut self) -> Result<CompactResult> {
-        // Flush everything first to ensure data is consistent on disk
-        self.data_pool.flush_all()?;
-        self.btree.sync()?;
+        let docs = self.collection.compact()?;
 
-        // Step 1: Collect all live documents via B+Tree scan
-        let entries = self.btree.scan_all()?;
-        let mut docs: Vec<(Uuid, Vec<u8>)> = Vec::with_capacity(entries.len());
-        for entry in &entries {
-            let raw = self.read_tuple(entry.page_id, entry.slot_id)?;
-            docs.push((entry.key, raw));
-        }
-
-        let docs_count = docs.len();
-
-        // Step 2: Get the paths from the page manager, create temp files
-        let data_path = self.data_pool.page_manager().path().to_path_buf();
-        let index_path = self.btree.pm.path().to_path_buf();
-
-        let data_tmp = data_path.with_extension("db.compact");
-        let index_tmp = index_path.with_extension("db.compact");
-
-        // Step 3: Create fresh data file + index, reinsert all documents
-        {
-            let mut new_data_pm = PageManager::new(&data_tmp)?;
-            let mut new_btree = BTree::create(&index_tmp)?;
-
-            let mut current_page_id = new_data_pm.allocate_page()?;
-            let mut current_page = SlottedPage::new(current_page_id);
-
-            for (key, encoded) in &docs {
-                if encoded.len() > INLINE_MAX {
-                    // Overflow document: write overflow chain + reference
-                    let overflow_page_id = overflow::write_overflow(&mut new_data_pm, encoded)?;
-                    let ref_data =
-                        overflow::encode_overflow_ref(overflow_page_id, encoded.len() as u32);
-
-                    match current_page.insert(&ref_data) {
-                        Ok(slot_id) => {
-                            new_btree.insert(*key, current_page_id, slot_id)?;
-                        }
-                        Err(GrumpyError::PageFull(_)) => {
-                            new_data_pm.write_page(current_page_id, &current_page.data)?;
-                            current_page_id = new_data_pm.allocate_page()?;
-                            current_page = SlottedPage::new(current_page_id);
-                            let slot_id = current_page.insert(&ref_data)?;
-                            new_btree.insert(*key, current_page_id, slot_id)?;
-                        }
-                        Err(e) => return Err(e),
-                    }
-                } else {
-                    match current_page.insert(encoded) {
-                        Ok(slot_id) => {
-                            new_btree.insert(*key, current_page_id, slot_id)?;
-                        }
-                        Err(GrumpyError::PageFull(_)) => {
-                            new_data_pm.write_page(current_page_id, &current_page.data)?;
-                            current_page_id = new_data_pm.allocate_page()?;
-                            current_page = SlottedPage::new(current_page_id);
-                            let slot_id = current_page.insert(encoded)?;
-                            new_btree.insert(*key, current_page_id, slot_id)?;
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-            }
-
-            // Write the last page
-            new_data_pm.write_page(current_page_id, &current_page.data)?;
-            new_data_pm.sync()?;
-            new_btree.flush_meta()?;
-            new_btree.sync()?;
-        }
-
-        // Step 4: Swap the files
-        // Close current file handles by replacing with the new ones
-        std::fs::rename(&data_tmp, &data_path)?;
-        std::fs::rename(&index_tmp, &index_path)?;
-
-        // Step 5: Reopen with fresh handles
-        let new_data_pm = PageManager::new(&data_path)?;
-        let new_btree = BTree::open(&index_path)?;
-
-        let pool_capacity = self.data_pool.capacity();
-        self.data_pool = BufferPool::new(pool_capacity, new_data_pm);
-        self.btree = new_btree;
-
-        // Find the current data page in the compacted file
-        self.current_data_page = Self::find_or_alloc_data_page(self.data_pool.page_manager())?;
-
-        // Truncate WAL (compaction is a checkpoint)
         self.wal.log_checkpoint()?;
         self.wal.truncate()?;
         self.writes_since_checkpoint = 0;
 
-        Ok(CompactResult {
-            documents: docs_count as u64,
-        })
+        Ok(CompactResult { documents: docs })
     }
 
-    // ── Internal helpers ────────────────────────────────────────────────
-
-    /// Stores inline with WAL logging, using the buffer pool.
-    fn store_inline_wal(&mut self, tx_id: u64, encoded: &[u8]) -> Result<(u32, u16)> {
-        let frame_idx = self.data_pool.fetch_page(self.current_data_page)?;
-        let before = self.data_pool.get_frame(frame_idx).data;
-        let mut page = SlottedPage::from_bytes(before);
-
-        match page.insert(encoded) {
-            Ok(slot_id) => {
-                self.wal
-                    .log_page_write(tx_id, self.current_data_page, &before, &page.data)?;
-                self.data_pool.get_frame_mut(frame_idx).data = page.data;
-                self.data_pool.unpin(self.current_data_page, true)?;
-                Ok((self.current_data_page, slot_id))
-            }
-            Err(GrumpyError::PageFull(_)) => {
-                // Current page is full — unpin it (not dirty) and allocate a new one
-                self.data_pool.unpin(self.current_data_page, false)?;
-
-                let (new_page_id, new_fidx) = self.data_pool.new_page()?;
-                let before_new = [0u8; PAGE_SIZE];
-                let mut new_page = SlottedPage::new(new_page_id);
-                let slot_id = new_page.insert(encoded)?;
-                self.wal
-                    .log_page_write(tx_id, new_page_id, &before_new, &new_page.data)?;
-                self.data_pool.get_frame_mut(new_fidx).data = new_page.data;
-                self.data_pool.unpin(new_page_id, true)?;
-                self.current_data_page = new_page_id;
-                Ok((new_page_id, slot_id))
-            }
-            Err(e) => {
-                self.data_pool.unpin(self.current_data_page, false)?;
-                Err(e)
-            }
-        }
-    }
-
-    /// Stores overflow with WAL logging (for the reference slot only).
-    /// Overflow page chains bypass the buffer pool (sequential writes, not revisited).
-    fn store_overflow_wal(&mut self, tx_id: u64, encoded: &[u8]) -> Result<(u32, u16)> {
-        let overflow_page_id = overflow::write_overflow(self.data_pool.page_manager(), encoded)?;
-        let ref_data = overflow::encode_overflow_ref(overflow_page_id, encoded.len() as u32);
-        self.store_inline_wal(tx_id, &ref_data)
+    /// Returns buffer pool statistics: `(read_count, write_count, cached_count, capacity)`.
+    pub fn pool_stats(&self) -> (u64, u64, usize, usize) {
+        self.collection.pool_stats()
     }
 
     /// Periodic checkpoint: flush + truncate WAL every N writes.
@@ -463,51 +214,6 @@ impl GrumpyDb {
             self.flush()?;
         }
         Ok(())
-    }
-
-    /// Returns buffer pool statistics: `(read_count, write_count, cached_count, capacity)`.
-    pub fn pool_stats(&self) -> (u64, u64, usize, usize) {
-        (
-            self.data_pool.read_count,
-            self.data_pool.write_count,
-            self.data_pool.cached_count(),
-            self.data_pool.capacity(),
-        )
-    }
-
-    /// Reads a tuple from a slotted page via the buffer pool, following overflow chains if needed.
-    fn read_tuple(&mut self, page_id: u32, slot_id: u16) -> Result<Vec<u8>> {
-        let frame_idx = self.data_pool.fetch_page(page_id)?;
-        let slot_data = {
-            let page = SlottedPage::from_bytes(self.data_pool.get_frame(frame_idx).data);
-            page.get(slot_id)?.to_vec()
-        };
-        self.data_pool.unpin(page_id, false)?;
-
-        if overflow::is_overflow(&slot_data) {
-            let (overflow_page_id, _) = overflow::decode_overflow_ref(&slot_data).unwrap();
-            overflow::read_overflow(self.data_pool.page_manager(), overflow_page_id)
-        } else {
-            Ok(slot_data)
-        }
-    }
-
-    /// Finds a usable data page or allocates a new one.
-    fn find_or_alloc_data_page(pm: &mut PageManager) -> Result<u32> {
-        // Scan from the last page backwards to find a Data page with space
-        let num_pages = pm.num_pages();
-        for pid in (1..num_pages).rev() {
-            let buf = pm.read_page(pid)?;
-            let header = PageHeader::read_from(&buf);
-            if header.page_type == PageType::Data {
-                return Ok(pid);
-            }
-        }
-        // No data page found → allocate one
-        let page_id = pm.allocate_page()?;
-        let page = SlottedPage::new(page_id);
-        pm.write_page(page_id, &page.data)?;
-        Ok(page_id)
     }
 }
 
@@ -529,7 +235,7 @@ mod tests {
         let db_path = dir.path().join("testdb");
         let db = GrumpyDb::open(&db_path).unwrap();
         assert!(db_path.join("data.db").exists());
-        assert!(db_path.join("index.db").exists());
+        assert!(db_path.join("primary.idx").exists());
         db.close().unwrap();
     }
 

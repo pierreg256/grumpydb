@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-04-23
+
+### Added
+- **Collection abstraction** (Phase 10): extracted per-collection storage from engine
+  - `src/collection/mod.rs`: `Collection` struct — self-contained data pages + primary index
+  - `Collection::open(path, name, pool_capacity)` — opens/creates a collection directory with `data.db` + `primary.idx`
+  - Raw CRUD: `insert_raw()`, `get_raw()`, `delete_raw()`, `scan_raw()` — no WAL, caller handles logging
+  - `PageWriteRecord` struct: before/after page images for WAL logging
+  - `compact()`, `flush()`, `document_count()`, `pool_stats()`
+  - `data_page_manager()`, `index_page_manager()` — for WAL recovery access
+  - 10 new Collection unit tests (create, CRUD, scan, compact, overflow, persistence, duplicate key, pool stats)
+  - 230 total tests (215 unit + 12 integration + 3 doctests), 0 clippy warnings
+
+### Changed
+- **Engine refactored**: `GrumpyDb` is now a thin wrapper over `Collection` + `WalWriter`
+  - All internal page management code removed from engine (delegated to Collection)
+  - WAL logging remains at engine level using `PageWriteRecord` from Collection
+  - WAL recovery done on raw `PageManager`s before creating Collection (avoids double-borrow)
+  - Index file renamed: `index.db` → `primary.idx` (matching Collection naming)
+
 ## [1.1.0] - 2026-04-23
 
 ### Added

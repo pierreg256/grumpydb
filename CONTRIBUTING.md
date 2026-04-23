@@ -22,12 +22,14 @@ cargo doc --no-deps --open      # Generate docs
 ```
 src/
 ├── error.rs            # GrumpyError enum, Result<T> alias
+├── collection/         # Collection — unit of document storage
+│   └── mod.rs          # Collection struct, raw CRUD, compact, PageWriteRecord
 ├── page/               # Page storage (8 KiB pages)
 │   ├── mod.rs          # Constants (PAGE_SIZE, etc.), PageHeader, PageType
 │   ├── manager.rs      # PageManager — disk I/O, free-list
 │   ├── slotted.rs      # SlottedPage — variable-length tuple storage
 │   └── overflow.rs     # Overflow page chains for large documents
-├── btree/              # B+Tree index (separate file: index.db)
+├── btree/              # B+Tree index (separate file: primary.idx)
 │   ├── mod.rs          # BTree struct, metadata (page 1)
 │   ├── node.rs         # InternalNode, LeafNode, binary serialization
 │   ├── ops.rs          # search, insert (with split), delete (with merge)
@@ -53,7 +55,7 @@ src/
 ├── concurrency/        # SWMR lock manager
 │   ├── mod.rs          # Concurrency module
 │   └── lock_manager.rs # SharedDb (Arc<RwLock<GrumpyDb>>)
-├── engine.rs           # GrumpyDb — CRUD orchestrator with buffer pool
+├── engine.rs           # GrumpyDb — thin wrapper over Collection + WAL
 └── lib.rs              # Public API, re-exports
 ```
 

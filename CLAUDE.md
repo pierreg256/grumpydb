@@ -10,24 +10,26 @@ GrumpyDB is a disk-based object storage engine written in Rust. It provides pers
 ┌──────────────────────────────────────┐
 │         Public API (lib.rs)          │  ← CRUD interface for external apps
 ├──────────────────────────────────────┤
-│         Engine (engine.rs)           │  ← Orchestrator
-├────────────┬─────────────┬───────────┤
-│  Document  │  Concurrency│  Buffer   │
-│  Model     │  (SWMR)     │  Pool     │
-├────────────┼─────────────┼───────────┤
+│     Engine (engine.rs) + WAL         │  ← Thin wrapper: Collection + WalWriter
+├──────────────────────────────────────┤
+│     Collection (collection/)         │  ← Unit of storage: data + index
+├────────────┬─────────────┬────────────┤
+│  Document  │  Concurrency │  Buffer   │
+│  Model     │  (SWMR)      │  Pool     │
+├────────────┼─────────────┼────────────┤
 │  B+Tree    │     WAL     │  Page     │
 │  Index     │             │  Manager  │
-│ (index.db) │  (wal.log)  │ (data.db) │
-└────────────┴─────────────┴───────────┘
+│(primary.idx)│  (wal.log)  │ (data.db) │
+└────────────┴─────────────┴────────────┘
 ```
 
 ### On-disk files
 
-| File        | Role                                      |
-|-------------|-------------------------------------------|
-| `data.db`   | Page-based document storage                |
-| `index.db`  | B+Tree index (UUID → PageId + SlotId)      |
-| `wal.log`   | Write-Ahead Log for crash recovery         |
+| File          | Role                                      |
+|---------------|-------------------------------------------|
+| `data.db`     | Page-based document storage                |
+| `primary.idx` | B+Tree index (UUID → PageId + SlotId)      |
+| `wal.log`     | Write-Ahead Log for crash recovery         |
 
 ### Modules
 
@@ -38,8 +40,9 @@ GrumpyDB is a disk-based object storage engine written in Rust. It provides pers
 | `wal`          | WAL records, writer, checkpoint, recovery                |
 | `buffer`       | Buffer pool LRU, dirty tracking, pin/unpin               |
 | `document`     | Value type (JSON-like), binary codec                     |
+| `collection`   | Unit of storage: data pages + primary index, raw CRUD    |
 | `concurrency`  | SWMR lock manager, page-level locks                     |
-| `engine`       | Orchestrates all modules, exposes CRUD                   |
+| `engine`       | Thin wrapper over Collection + WAL, exposes public CRUD  |
 | `error`        | Centralized error types                                  |
 
 ## Code conventions
@@ -98,14 +101,16 @@ error (no internal dependencies)
       → btree (depends on error, page, document)
         → wal (depends on error, page)
           → buffer (depends on error, page)
-            → concurrency (depends on error, page, buffer)
-              → engine (depends on ALL)
-                → lib.rs (exposes engine)
+            → collection (depends on error, page, btree, buffer)
+              → concurrency (depends on error, page, buffer)
+                → engine (depends on collection, wal, concurrency)
+                  → lib.rs (exposes engine)
 ```
 
 ## Implementation plan
 
 See `docs/IMPLEMENTATION_PLAN.md` for the full phased plan.
+See `docs/IMPLEMENTATION_PLAN_V2.md` for the v2 multi-tenant plan.
 See `docs/ARCHITECTURE.md` for in-depth technical details.
 
 ## Available skills

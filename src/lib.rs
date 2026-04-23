@@ -27,6 +27,7 @@
 
 pub mod btree;
 pub mod buffer;
+pub mod collection;
 pub mod concurrency;
 pub mod document;
 pub mod engine;

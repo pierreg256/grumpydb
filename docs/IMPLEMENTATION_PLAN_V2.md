@@ -69,7 +69,7 @@ grumpydb_root/
 
 ```
 Phase 9:  Generic B+Tree       ████████████████████  Done    — variable-length keys
-Phase 10: Collection            ░░░░░░░░░░░░░░░░░░░░  Pending — extract from engine
+Phase 10: Collection            ████████████████████  Done    — extract from engine
 Phase 11: Secondary Indexes     ░░░░░░░░░░░░░░░░░░░░  Pending — sortable encoding
 Phase 12: Database              ░░░░░░░░░░░░░░░░░░░░  Pending — multi-collection + WAL
 Phase 13: Client & Server       ░░░░░░░░░░░░░░░░░░░░  Pending — multi-tenant
@@ -215,38 +215,43 @@ impl Collection {
 
 #### 10.1 Collection struct (`src/collection/mod.rs`) — NEW FILE
 
-- [ ] `Collection` struct: name, data_pool, primary_index, current_data_page
-- [ ] `Collection::open(path, pool_capacity)` → open/create data.db + primary.idx
-- [ ] `Collection::create(path, name, pool_capacity)` → create directory + files
-- [ ] Move `store_inline`, `store_overflow`, `read_tuple` from engine.rs
-- [ ] Move `find_or_alloc_data_page` from engine.rs
-- [ ] Tests: CRUD lifecycle, overflow, persistence
+- [x] `Collection` struct: name, data_pool, primary_index (BTree), current_data_page
+- [x] `Collection::open(path, name, pool_capacity)` → open/create data.db + primary.idx
+- [x] `Collection::open_default(path, name)` → open with default pool capacity (256)
+- [x] Move `store_inline`, `store_overflow`, `read_tuple` from engine.rs
+- [x] Move `find_or_alloc_data_page` from engine.rs
+- [x] `PageWriteRecord` struct: page_id, before/after images for WAL logging
+- [x] Tests: CRUD lifecycle, overflow, persistence
 
 #### 10.2 Collection CRUD (`src/collection/mod.rs`)
 
-- [ ] `insert(key, encoded_doc) → (page_id, slot_id)` — no WAL (caller handles)
-- [ ] `get(key) → Option<Vec<u8>>` — returns raw encoded bytes
-- [ ] `delete(key) → (page_id, slot_id, before_image, after_image)` — returns WAL data
-- [ ] `scan(range) → Vec<(Uuid, Vec<u8>)>` — raw scan
-- [ ] `compact() → u64` — defrag + rebuild primary index, return doc count
-- [ ] `flush()` — flush buffer pool
-- [ ] `document_count()` — from primary index metadata
-- [ ] `pool_stats()` — delegate to buffer pool
-- [ ] Tests: 10 tests covering CRUD, overflow, compact, flush
+- [x] `insert_raw(key, encoded) → ((page_id, slot_id), Vec<PageWriteRecord>)` — no WAL (caller handles)
+- [x] `get_raw(key) → Option<Vec<u8>>` — returns raw encoded bytes
+- [x] `delete_raw(key) → Vec<PageWriteRecord>` — returns page images for WAL
+- [x] `scan_raw(range) → Vec<(Uuid, Vec<u8>)>` — raw scan
+- [x] `compact() → u64` — defrag + rebuild primary index, return doc count
+- [x] `flush()` — flush buffer pool + sync index
+- [x] `document_count()` — from primary index metadata
+- [x] `pool_stats()` — delegate to buffer pool
+- [x] `data_page_manager()`, `index_page_manager()` — for WAL recovery access
+- [x] Tests: 10 tests covering CRUD, scan, compact, overflow, persistence, duplicate key, pool stats
 
 #### 10.3 Engine refactor (`src/engine.rs`) — REFACTOR
 
-- [ ] `GrumpyDb` now wraps a single `Collection` (for backward compat)
-- [ ] All existing methods delegate to `self.collection`
-- [ ] WAL operations remain in `GrumpyDb` (not in Collection)
-- [ ] Collection returns before/after images for WAL logging
-- [ ] Tests: all 190 existing tests pass unchanged
+- [x] `GrumpyDb` now wraps a single `Collection` + `WalWriter` (for backward compat)
+- [x] All existing CRUD methods delegate to `self.collection.*_raw()` methods
+- [x] WAL operations remain in `GrumpyDb` (not in Collection)
+- [x] Collection returns `Vec<PageWriteRecord>` for WAL logging
+- [x] WAL recovery done on raw PageManagers BEFORE creating Collection (avoids double-borrow)
+- [x] File names changed: `index.db` → `primary.idx` (matching Collection naming)
+- [x] Tests: all existing engine tests pass unchanged
 
 ### Validation criteria Phase 10
 
-- [ ] All existing tests pass (engine is a thin wrapper over Collection)
-- [ ] Collection can be used standalone (without WAL) in tests
-- [ ] `cargo clippy -- -D warnings` passes
+- [x] All existing tests pass (engine is a thin wrapper over Collection)
+- [x] Collection can be used standalone (without WAL) in tests
+- [x] `cargo clippy -- -D warnings` passes
+- [x] 230 total tests (215 unit + 12 integration + 3 doctests), 10 new Collection tests
 
 ---
 
