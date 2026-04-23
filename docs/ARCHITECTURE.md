@@ -137,6 +137,76 @@ Descent via `find_child()`: linear scan, first entry whose key > search_key → 
 
 ## 4. Document Model
 
+### 4.0 Variable-Key B+Tree (VarBTree)
+
+A parallel B+Tree implementation supporting variable-length byte keys (up to 256 bytes), used for secondary indexes.
+
+#### Properties
+
+| Property | Value |
+|----------|-------|
+| Key type | Variable-length `&[u8]` (max 256 bytes) |
+| Value | `page_id(u32) + slot_id(u16)` = 6 bytes |
+| Page size | 8192 bytes |
+| Key storage | Fixed-stride: `key_len(u16) + key_data + padding` to `max_key_size` |
+| Metadata page | Page 1 (page 0 = PageManager free-list) |
+| Initial root | Page 2 (empty leaf) |
+| Merge threshold | 40% occupancy |
+
+Fan-out depends on `max_key_size` (configured at creation):
+- Internal: `(8160 - 8) / (2 + max_key_size + 4)` keys
+- Leaf: `(8160 - 12) / (2 + max_key_size + 6)` entries
+
+#### VarBTree Internal Node
+
+```
+┌──────────────────────────────────────────────┐
+│ Page Header (32 bytes, type=BTreeInternal)    │
+├──────────────────────────────────────────────┤
+│ num_keys: u16                                 │
+│ right_child: u32                              │
+│ max_key_size: u16                             │
+├──────────────────────────────────────────────┤
+│ Entry[0]: key_len(u16) + key + pad + child(4) │  = (2 + max_key_size + 4) bytes
+│ Entry[1]: ...                                 │
+│ ...                                           │
+└──────────────────────────────────────────────┘
+```
+
+#### VarBTree Leaf Node
+
+```
+┌──────────────────────────────────────────────┐
+│ Page Header (32 bytes, type=BTreeLeaf)        │
+├──────────────────────────────────────────────┤
+│ num_entries: u16                              │
+│ next_leaf: u32                                │
+│ prev_leaf: u32                                │
+│ max_key_size: u16                             │
+├──────────────────────────────────────────────┤
+│ Entry[0]: key_len(u16) + key + pad + page(4) + slot(2) │  = (2 + max_key_size + 6) bytes
+│ Entry[1]: ...                                 │
+│ ...                                           │
+└──────────────────────────────────────────────┘
+```
+
+#### VarBTree Metadata (Page 1)
+
+```
+Offset  Content
+0-31    PageHeader (type = BTreeInternal)
+32-35   root_page_id: u32
+36-39   height: u32
+40-47   num_entries: u64
+48-49   max_key_size: u16
+```
+
+#### VarCursor
+
+Range scans via `VarCursor` with `scan_all()`, `range(start, end)`, and `cursor_from(start_key)`.
+
+## 4. Document Model
+
 ### 4.1 Value Type
 
 ```rust

@@ -31,7 +31,12 @@ src/
 │   ├── mod.rs          # BTree struct, metadata (page 1)
 │   ├── node.rs         # InternalNode, LeafNode, binary serialization
 │   ├── ops.rs          # search, insert (with split), delete (with merge)
-│   └── cursor.rs       # BTreeCursor, range scans
+│   ├── cursor.rs       # BTreeCursor, range scans
+│   ├── key.rs          # Key encoding utilities (VAR_KEY_MAX_SIZE, encode/decode)
+│   ├── var_node.rs     # VarInternalNode, VarLeafNode (variable-length keys)
+│   ├── var_ops.rs      # VarBTree search/insert/delete with split/merge
+│   ├── var_tree.rs     # VarBTree struct, metadata persistence
+│   └── var_cursor.rs   # VarCursor, range scans for variable keys
 ├── document/           # Document model
 │   ├── mod.rs          # Document struct (UUID + Value)
 │   ├── value.rs        # Value enum — schema-less JSON-like type

@@ -19,6 +19,7 @@ A disk-based object storage engine written in Rust. GrumpyDB stores schema-less 
 | SWMR concurrency | ✅ Implemented |
 | Page checksums (CRC32 integrity) | ✅ Implemented |
 | Compaction (defrag + index rebuild) | ✅ Implemented |
+| Variable-key B+Tree (secondary indexes) | ✅ Implemented |
 
 ## Getting started
 
@@ -114,9 +115,14 @@ src/
 │   └── overflow.rs     # Overflow page chains
 ├── btree/              # B+Tree index
 │   ├── mod.rs          # BTree struct, metadata
-│   ├── node.rs         # InternalNode, LeafNode
+│   ├── node.rs         # InternalNode, LeafNode (fixed UUID keys)
 │   ├── ops.rs          # search, insert, delete
-│   └── cursor.rs       # BTreeCursor, range scans
+│   ├── cursor.rs       # BTreeCursor, range scans
+│   ├── key.rs          # Key encoding utilities
+│   ├── var_node.rs     # VarInternalNode, VarLeafNode (variable keys)
+│   ├── var_ops.rs      # VarBTree search/insert/delete
+│   ├── var_tree.rs     # VarBTree struct
+│   └── var_cursor.rs   # VarCursor, range scans
 ├── document/           # Document model
 │   ├── mod.rs          # Document struct
 │   ├── value.rs        # Value enum (JSON-like)

@@ -19,6 +19,11 @@ Read these files before starting:
 - `src/btree/node.rs` — InternalNode, LeafNode, serialization/deserialization
 - `src/btree/ops.rs` — search, insert (with split), delete (with merge)
 - `src/btree/cursor.rs` — BTreeCursor, iteration, range scan
+- `src/btree/key.rs` — Key encoding utilities (VAR_KEY_MAX_SIZE, encode/decode)
+- `src/btree/var_node.rs` — VarInternalNode, VarLeafNode (variable-length keys)
+- `src/btree/var_ops.rs` — VarBTree search, insert, delete with split/merge
+- `src/btree/var_tree.rs` — VarBTree struct, metadata persistence
+- `src/btree/var_cursor.rs` — VarCursor, iteration, range scan
 
 ### Internal dependencies you use (read-only)
 - `src/page/` — PageManager to read/write index pages

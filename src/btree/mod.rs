@@ -1,11 +1,19 @@
 //! B+Tree index: maps UUID keys to (PageId, SlotId) locations in the data file.
 //!
-//! The B+Tree is stored in a separate file (`index.db`) with its own page management.
-//! Page 0 holds metadata (root, height, entry count).
+//! Two variants are provided:
+//! - **`BTree`** (fixed 16-byte UUID keys) — used for primary indexes
+//! - **`VarBTree`** (variable-length byte keys) — used for secondary indexes
+//!
+//! The B+Tree is stored in a separate file with its own page management.
 
 pub mod cursor;
+pub mod key;
 pub mod node;
 pub mod ops;
+pub mod var_cursor;
+pub mod var_node;
+pub mod var_ops;
+pub mod var_tree;
 
 use std::path::Path;
 

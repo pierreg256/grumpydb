@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-04-23
+
+### Added
+- **Variable-Key B+Tree** (Phase 9): parallel `VarBTree` for variable-length byte keys
+  - `src/btree/key.rs`: key encoding utilities — `encode_var_key()`, `decode_var_key()`, `var_key_disk_size()`, `VAR_KEY_MAX_SIZE=256`
+  - `src/btree/var_node.rs`: `VarInternalNode`, `VarLeafNode` with fixed-stride serialization (length prefix + padded to max_key_size)
+  - `src/btree/var_ops.rs`: search, insert (with split), delete (with merge/redistribute) for VarBTree
+  - `src/btree/var_tree.rs`: `VarBTree` struct — `create(path, max_key_size)`, `open(path)`, `search()`, `insert()`, `delete()`, metadata persistence
+  - `src/btree/var_cursor.rs`: `VarCursor` with `scan_all()`, `range()`, `cursor_from()`
+  - Capacity functions: `var_internal_max_keys()`, `var_leaf_max_entries()`
+  - 30 new tests (key encoding, node serialization, CRUD, splits, deletes, cursor, stress 3,000 keys)
+  - 220 total tests (205 unit + 12 integration + 3 doctests), 0 clippy warnings
+- Zero changes to existing BTree code (parallel implementation, no regression risk)
+
 ## [1.0.0] - 2026-04-22
 
 ### Added

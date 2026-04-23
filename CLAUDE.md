@@ -34,7 +34,7 @@ GrumpyDB is a disk-based object storage engine written in Rust. It provides pers
 | Module         | Responsibility                                          |
 |----------------|---------------------------------------------------------|
 | `page`         | 8 KiB pages, slotted layout, overflow, free-list        |
-| `btree`        | B+Tree index, search/insert/delete/split/merge, cursor  |
+| `btree`        | B+Tree index (fixed UUID keys + variable-length keys), search/insert/delete/split/merge, cursor |
 | `wal`          | WAL records, writer, checkpoint, recovery                |
 | `buffer`       | Buffer pool LRU, dirty tracking, pin/unpin               |
 | `document`     | Value type (JSON-like), binary codec                     |

@@ -7,6 +7,11 @@ When working on:
 - `src/btree/node.rs` — InternalNode, LeafNode, serialization
 - `src/btree/ops.rs` — search, insert, delete, split, merge
 - `src/btree/cursor.rs` — iteration, range scan
+- `src/btree/key.rs` — Key encoding utilities for VarBTree
+- `src/btree/var_node.rs` — VarInternalNode, VarLeafNode (variable-length keys)
+- `src/btree/var_ops.rs` — VarBTree search, insert, delete, split, merge
+- `src/btree/var_tree.rs` — VarBTree struct, metadata persistence
+- `src/btree/var_cursor.rs` — VarCursor, iteration, range scan
 
 ## Core principles
 
@@ -246,3 +251,70 @@ mod tests {
 6. **UUID comparison**: use lexicographic comparison on the 16 raw bytes (`Uuid::as_bytes()`)
 7. **find_child**: linear scan (first entry with key > search_key), not binary_search, to avoid convention bugs
 8. **insert_entry**: handles two cases (insertion before an existing entry, or at the end with right_child update)
+
+## VarBTree (Variable-Key B+Tree)
+
+A parallel B+Tree supporting variable-length byte keys (up to 256 bytes), used for secondary indexes.
+
+### Two B+Tree variants
+
+| Variant | Key type | Key size | Use case |
+|---------|----------|----------|----------|
+| `BTree` | UUID | Fixed 16 bytes | Primary indexes |
+| `VarBTree` | `&[u8]` | Variable, up to `max_key_size` (default 256) | Secondary indexes |
+
+### VarBTree parameters
+
+```rust
+// Key encoding
+const VAR_KEY_MAX_SIZE: usize = 256;
+const VAR_KEY_LEN_PREFIX: usize = 2; // u16 LE length prefix
+
+// Node layout uses fixed-stride serialization:
+// Each entry = key_len(u16) + key_data + padding_to_max_key_size + pointer
+// This wastes some space but enables O(1) random access to entries.
+
+// Internal: entry = (2 + max_key_size + 4) bytes
+fn var_internal_max_keys(max_key_size: usize) -> usize {
+    (8160 - 8) / (2 + max_key_size + 4)
+}
+
+// Leaf: entry = (2 + max_key_size + 6) bytes
+fn var_leaf_max_entries(max_key_size: usize) -> usize {
+    (8160 - 12) / (2 + max_key_size + 6)
+}
+```
+
+### VarBTree internal node format
+
+```
+Offset  Content
+0-31    PageHeader (type = BTreeInternal)
+32-33   num_keys: u16
+34-37   right_child: u32
+38-39   max_key_size: u16
+40+     entries: [key_len(u16) + key + pad + child_page_id(u32)] × num_keys
+```
+
+### VarBTree leaf node format
+
+```
+Offset  Content
+0-31    PageHeader (type = BTreeLeaf)
+32-33   num_entries: u16
+34-37   next_leaf: u32
+38-41   prev_leaf: u32
+42-43   max_key_size: u16
+44+     entries: [key_len(u16) + key + pad + page_id(u32) + slot_id(u16)] × n
+```
+
+### VarBTree metadata (page 1)
+
+```
+Offset  Content
+0-31    PageHeader
+32-35   root_page_id: u32
+36-39   height: u32
+40-47   num_entries: u64
+48-49   max_key_size: u16
+```
