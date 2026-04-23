@@ -29,13 +29,18 @@ pub mod btree;
 pub mod buffer;
 pub mod collection;
 pub mod concurrency;
+pub mod database;
 pub mod document;
 pub mod engine;
 pub mod error;
+pub mod index;
+pub mod naming;
 pub mod page;
 pub mod wal;
 
 pub use concurrency::lock_manager::SharedDb;
+pub use database::Database;
 pub use document::value::Value;
 pub use engine::{CompactResult, GrumpyDb};
 pub use error::{GrumpyError, Result};
+pub use index::IndexDefinition;

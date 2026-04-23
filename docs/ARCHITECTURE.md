@@ -5,10 +5,13 @@
 GrumpyDB is an embedded storage engine (library crate) that persists schema-less documents on disk with:
 - **Page-based storage** of 8 KiB in `data.db`
 - **B+Tree index** in `primary.idx` for O(log n) access by UUID
-- **Collection** abstraction encapsulating data pages + primary index
+- **Secondary indexes** on document fields via VarBTree (`idx_*.idx`)
+- **Collection** abstraction encapsulating data pages + primary index + secondary indexes
+- **Database** layer managing multiple collections with shared WAL
 - **Write-Ahead Log** in `wal.log` for durability
 - **LRU Buffer Pool** for in-memory caching
 - **SWMR** (Single-Writer, Multi-Reader) concurrency
+- **GrumpyShell** interactive REPL for exploring databases
 
 ## 2. Page Format (8 KiB)
 
@@ -555,5 +558,198 @@ pub enum GrumpyError {
 
     #[error("codec error: {0}")]
     Codec(String),
+
+    #[error("value type cannot be indexed")]
+    NotIndexable,
+
+    #[error("index not found: {0}")]
+    IndexNotFound(String),
+
+    #[error("index already exists: {0}")]
+    IndexAlreadyExists(String),
+
+    #[error("collection not found: {0}")]
+    CollectionNotFound(String),
+
+    #[error("invalid name: {0}")]
+    InvalidName(String),
 }
 ```
+
+## 13. Secondary Indexes
+
+Secondary indexes enable fast exact-match and range queries on document fields.
+
+### 13.1 Sortable Encoding (`src/index/encoding.rs`)
+
+Field values are encoded into byte sequences that preserve natural ordering under lexicographic byte comparison, enabling B+Tree range scans.
+
+```
+Type tag (1 byte) + encoded value:
+
+  0x00  Null            → (empty)
+  0x01  Bool(false)     → 0x00; Bool(true) → 0x01
+  0x02  Integer(i64)    → XOR with 0x8000000000000000 (flip sign bit for sort)
+  0x03  Float(f64)      → IEEE 754 sortable encoding
+  0x04  String          → UTF-8 bytes (truncated to 128 bytes)
+  0x05  Bytes           → raw bytes (truncated to 128 bytes)
+```
+
+Ordering: `Null < Bool < Integer < Float < String < Bytes`. Arrays and Objects return `NotIndexable`.
+
+Composite key = `encode_sortable_value(field) + uuid_bytes` (ensures uniqueness, max ~145 bytes).
+
+### 13.2 SecondaryIndex struct (`src/index/mod.rs`)
+
+```rust
+pub struct IndexDefinition {
+    pub name: String,        // e.g., "by_email"
+    pub field_path: String,  // e.g., "email" or "address.city"
+}
+
+pub struct SecondaryIndex {
+    pub def: IndexDefinition,
+    btree: VarBTree,         // variable-key B+Tree (max key size: 160 bytes)
+    path: PathBuf,
+}
+```
+
+On-disk file: `idx_<name>.idx` in the collection directory.
+
+### 13.3 API
+
+```rust
+impl SecondaryIndex {
+    pub fn create(dir: &Path, def: IndexDefinition) -> Result<Self>;
+    pub fn open(dir: &Path, def: IndexDefinition) -> Result<Self>;
+    pub fn index_document(&mut self, uuid: &Uuid, doc: &Value) -> Result<()>;
+    pub fn unindex_document(&mut self, uuid: &Uuid, doc: &Value) -> Result<()>;
+    pub fn lookup(&mut self, value: &Value) -> Result<Vec<Uuid>>;
+    pub fn range_query(&mut self, start: &Value, end: &Value) -> Result<Vec<Uuid>>;
+    pub fn count(&self) -> u64;
+    pub fn rebuild(&mut self, docs: &[(Uuid, Value)]) -> Result<()>;
+}
+```
+
+### 13.4 Collection Integration
+
+`Collection` manages secondary indexes alongside the primary index:
+- `create_index(name, field_path)` — creates `.idx` file + rebuilds from existing docs
+- `drop_index(name)` — removes `.idx` file
+- `insert_doc()` / `delete_doc()` — updates all secondary indexes automatically
+- `query_index()` / `query_index_range()` — lookup + fetch full documents
+- `compact()` — rebuilds secondary indexes after defragmentation
+
+### 13.5 Field Extraction
+
+`extract_field(value, "address.city")` navigates a `Value::Object` using dot-separated paths. Missing fields are silently skipped (document not indexed).
+
+## 14. Database
+
+A `Database` manages multiple named collections with a shared WAL.
+
+### 14.1 On-disk layout
+
+```
+<database_dir>/
+  wal.log             ← Write-Ahead Log (shared across collections)
+  <collection_name>/
+    data.db
+    primary.idx
+    idx_*.idx         ← secondary indexes
+```
+
+### 14.2 Structure
+
+```rust
+pub struct Database {
+    path: PathBuf,
+    collections: HashMap<String, Collection>,
+    wal: WalWriter,
+    writes_since_checkpoint: u32,
+}
+```
+
+### 14.3 API
+
+```rust
+impl Database {
+    pub fn open(path: &Path) -> Result<Self>;
+
+    // Collection management
+    pub fn create_collection(&mut self, name: &str) -> Result<()>;
+    pub fn drop_collection(&mut self, name: &str) -> Result<()>;
+    pub fn list_collections(&self) -> Vec<&str>;
+
+    // CRUD (routed to named collection)
+    pub fn insert(&mut self, collection: &str, key: Uuid, value: Value) -> Result<()>;
+    pub fn get(&mut self, collection: &str, key: &Uuid) -> Result<Option<Value>>;
+    pub fn update(&mut self, collection: &str, key: &Uuid, value: Value) -> Result<()>;
+    pub fn delete(&mut self, collection: &str, key: &Uuid) -> Result<()>;
+    pub fn scan(&mut self, collection: &str, range: impl RangeBounds<Uuid>) -> Result<Vec<(Uuid, Value)>>;
+
+    // Index management
+    pub fn create_index(&mut self, collection: &str, name: &str, field_path: &str) -> Result<()>;
+    pub fn drop_index(&mut self, collection: &str, name: &str) -> Result<()>;
+    pub fn query(&mut self, collection: &str, index: &str, value: &Value) -> Result<Vec<(Uuid, Value)>>;
+    pub fn query_range(&mut self, collection: &str, index: &str, start: &Value, end: &Value) -> Result<Vec<(Uuid, Value)>>;
+
+    // Maintenance
+    pub fn flush(&mut self) -> Result<()>;
+    pub fn compact(&mut self, collection: &str) -> Result<u64>;
+    pub fn document_count(&mut self, collection: &str) -> Result<u64>;
+    pub fn close(self) -> Result<()>;
+}
+```
+
+### 14.4 Name Validation (`src/naming.rs`)
+
+All names (collections, indexes) are validated: `[a-z0-9_]{1,64}`, no path separators, no dots. Names starting with `_` are reserved (exception: `_default`).
+
+### 14.5 Auto-discovery
+
+On `Database::open()`, existing collections are discovered by scanning subdirectories for `data.db` files. No separate catalogue file is needed.
+
+## 15. GrumpyShell — Interactive REPL
+
+`examples/grumpysh/` provides a JavaScript-like shell for exploring GrumpyDB interactively.
+
+### 15.1 Usage
+
+```bash
+cargo run --example grumpysh                           # launch REPL
+cargo run --example grumpysh -- --data ./mydata        # custom data dir
+cargo run --example grumpysh -- --eval "use test; db.users.count()"  # one-shot
+```
+
+### 15.2 Commands
+
+```js
+use mydb                                    // open/create database
+db.createCollection("users")               // collection management
+db.collections()
+db.users.insert({ name: "Alice", age: 30 }) // insert JSON document
+db.users.find()                            // list all documents
+db.users.find({ age: 30 })                 // filter (client-side)
+db.users.get("uuid-prefix")               // get by ID prefix
+db.users.update("uuid", { ... })           // update document
+db.users.delete("uuid")                    // delete document
+db.users.createIndex("by_age", "age")      // secondary index
+db.users.query("by_age", 30)              // exact-match query
+db.users.queryRange("by_age", 20, 30)     // range query
+db.users.count()                           // document count
+db.users.compact()                         // compaction
+help                                       // command reference
+```
+
+### 15.3 Architecture
+
+| File | Role |
+|------|------|
+| `main.rs` | CLI entry: `--data`, `--eval`, `--help` flags |
+| `repl.rs` | Read-eval-print loop, session state, command execution |
+| `parser.rs` | Command parser: `Command` enum, tokenizer |
+| `json_parser.rs` | Relaxed JSON parser (unquoted keys, single quotes, trailing commas) |
+| `filter.rs` | Client-side document matching for `find({ field: value })` |
+
+Relaxed JSON: unquoted keys, single/double quotes, trailing commas. Uses `rustyline` for line editing and persistent history (`~/.grumpysh_history`).

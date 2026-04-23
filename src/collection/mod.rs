@@ -18,7 +18,10 @@ use uuid::Uuid;
 
 use crate::btree::BTree;
 use crate::buffer::pool::BufferPool;
+use crate::document::Document;
+use crate::document::value::Value;
 use crate::error::{GrumpyError, Result};
+use crate::index::{IndexDefinition, SecondaryIndex};
 use crate::page::manager::PageManager;
 use crate::page::overflow;
 use crate::page::slotted::SlottedPage;
@@ -53,6 +56,10 @@ pub struct Collection {
     pub(crate) btree: BTree,
     /// Page ID of the current data page being filled.
     current_data_page: u32,
+    /// Secondary indexes.
+    secondary_indexes: Vec<SecondaryIndex>,
+    /// Index definitions (persisted separately by the database layer).
+    index_defs: Vec<IndexDefinition>,
 }
 
 impl Collection {
@@ -91,6 +98,8 @@ impl Collection {
             data_pool,
             btree,
             current_data_page,
+            secondary_indexes: Vec::new(),
+            index_defs: Vec::new(),
         })
     }
 
@@ -114,6 +123,7 @@ impl Collection {
     /// Inserts an encoded document. Returns (page_id, slot_id) and WAL records.
     ///
     /// The caller is responsible for WAL logging the returned records.
+    /// Does NOT update secondary indexes — use `insert_doc` for that.
     pub fn insert_raw(
         &mut self,
         key: Uuid,
@@ -219,6 +229,24 @@ impl Collection {
         Ok(results)
     }
 
+    /// Inserts a document and updates all secondary indexes.
+    pub fn insert_doc(
+        &mut self,
+        key: Uuid,
+        value: &Value,
+        encoded: &[u8],
+    ) -> Result<((u32, u16), Vec<PageWriteRecord>)> {
+        let result = self.insert_raw(key, encoded)?;
+        self.index_doc_in_secondaries(&key, value);
+        Ok(result)
+    }
+
+    /// Deletes a document and removes it from all secondary indexes.
+    pub fn delete_doc(&mut self, key: &Uuid, value: &Value) -> Result<Vec<PageWriteRecord>> {
+        self.unindex_doc_from_secondaries(key, value);
+        self.delete_raw(key)
+    }
+
     // ── Maintenance ─────────────────────────────────────────────────────
 
     /// Returns the number of documents (O(1) from B+Tree metadata).
@@ -306,6 +334,18 @@ impl Collection {
         self.btree = new_btree;
         self.current_data_page = Self::find_or_alloc_data_page(self.data_pool.page_manager())?;
 
+        // Rebuild secondary indexes from the compacted data
+        if !self.secondary_indexes.is_empty() {
+            let decoded_docs: Vec<(Uuid, Value)> = docs
+                .iter()
+                .filter_map(|(key, raw)| Document::decode(raw).ok().map(|doc| (*key, doc.value)))
+                .collect();
+
+            for idx in &mut self.secondary_indexes {
+                idx.rebuild(&decoded_docs)?;
+            }
+        }
+
         Ok(docs_count as u64)
     }
 
@@ -317,6 +357,112 @@ impl Collection {
     /// Provides access to the index PageManager (for WAL recovery).
     pub fn index_page_manager(&mut self) -> &mut PageManager {
         &mut self.btree.pm
+    }
+
+    // ── Secondary Indexes ───────────────────────────────────────────────
+
+    /// Creates a secondary index on a field path and rebuilds it from existing docs.
+    pub fn create_index(&mut self, name: &str, field_path: &str) -> Result<()> {
+        // Check for duplicate
+        if self.index_defs.iter().any(|d| d.name == name) {
+            return Err(GrumpyError::IndexAlreadyExists(name.into()));
+        }
+
+        let def = IndexDefinition {
+            name: name.to_string(),
+            field_path: field_path.to_string(),
+        };
+
+        let mut idx = SecondaryIndex::create(&self.path, def.clone())?;
+
+        // Rebuild from existing documents
+        let entries = self.btree.scan_all()?;
+        for entry in &entries {
+            let raw = self.read_tuple(entry.page_id, entry.slot_id)?;
+            let doc = Document::decode(&raw)?;
+            idx.index_document(&entry.key, &doc.value)?;
+        }
+        idx.sync()?;
+
+        self.secondary_indexes.push(idx);
+        self.index_defs.push(def);
+        Ok(())
+    }
+
+    /// Drops a secondary index by name.
+    pub fn drop_index(&mut self, name: &str) -> Result<()> {
+        let pos = self
+            .index_defs
+            .iter()
+            .position(|d| d.name == name)
+            .ok_or_else(|| GrumpyError::IndexNotFound(name.into()))?;
+
+        let idx = self.secondary_indexes.remove(pos);
+        self.index_defs.remove(pos);
+        let _ = std::fs::remove_file(idx.path());
+        Ok(())
+    }
+
+    /// Returns the list of index definitions.
+    pub fn list_indexes(&self) -> &[IndexDefinition] {
+        &self.index_defs
+    }
+
+    /// Queries a secondary index by exact value match.
+    pub fn query_index(&mut self, index_name: &str, value: &Value) -> Result<Vec<(Uuid, Value)>> {
+        let idx = self
+            .secondary_indexes
+            .iter_mut()
+            .find(|i| i.def.name == index_name)
+            .ok_or_else(|| GrumpyError::IndexNotFound(index_name.into()))?;
+
+        let uuids = idx.lookup(value)?;
+        let mut results = Vec::with_capacity(uuids.len());
+        for uuid in uuids {
+            if let Some(raw) = self.get_raw(&uuid)? {
+                let doc = Document::decode(&raw)?;
+                results.push((uuid, doc.value));
+            }
+        }
+        Ok(results)
+    }
+
+    /// Queries a secondary index by range [start, end).
+    pub fn query_index_range(
+        &mut self,
+        index_name: &str,
+        start: &Value,
+        end: &Value,
+    ) -> Result<Vec<(Uuid, Value)>> {
+        let idx = self
+            .secondary_indexes
+            .iter_mut()
+            .find(|i| i.def.name == index_name)
+            .ok_or_else(|| GrumpyError::IndexNotFound(index_name.into()))?;
+
+        let uuids = idx.range_query(start, end)?;
+        let mut results = Vec::with_capacity(uuids.len());
+        for uuid in uuids {
+            if let Some(raw) = self.get_raw(&uuid)? {
+                let doc = Document::decode(&raw)?;
+                results.push((uuid, doc.value));
+            }
+        }
+        Ok(results)
+    }
+
+    /// Updates all secondary indexes after an insert.
+    fn index_doc_in_secondaries(&mut self, key: &Uuid, value: &Value) {
+        for idx in &mut self.secondary_indexes {
+            let _ = idx.index_document(key, value);
+        }
+    }
+
+    /// Removes a document from all secondary indexes.
+    fn unindex_doc_from_secondaries(&mut self, key: &Uuid, value: &Value) {
+        for idx in &mut self.secondary_indexes {
+            let _ = idx.unindex_document(key, value);
+        }
     }
 
     // ── Internal helpers ────────────────────────────────────────────────

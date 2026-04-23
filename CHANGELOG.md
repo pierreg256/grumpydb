@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-04-23
+
+### Added
+- **Secondary Indexes** (Phase 11): fast exact-match and range queries on document fields
+  - `src/index/encoding.rs`: sortable binary encoding — `encode_sortable_value()`, `encode_composite_key()`, `extract_field()`. Integer XOR sign-bit encoding, IEEE 754 float sort, string truncation to 128 bytes. 13 tests.
+  - `src/index/mod.rs`: `SecondaryIndex` struct backed by VarBTree — `IndexDefinition`, `lookup()`, `range_query()`, `rebuild()`, `index_document()`, `unindex_document()`. 7 tests.
+  - Collection integration: `create_index()`, `drop_index()`, `list_indexes()`, `query_index()`, `query_index_range()`, `insert_doc()`, `delete_doc()`. Compact rebuilds secondary indexes.
+  - 5 new error variants: `NotIndexable`, `IndexNotFound`, `IndexAlreadyExists`, `CollectionNotFound`, `InvalidName`
+  - `IndexDefinition` exported from `lib.rs`
+- **Database** (Phase 12): multi-collection management with shared WAL
+  - `src/database/mod.rs`: `Database` struct — `create_collection()`, `drop_collection()`, `list_collections()`. Full CRUD routed by collection name. Index management. Auto-discovery of existing collections on open. 12 tests.
+  - `src/naming.rs`: `validate_name()` with `[a-z0-9_]{1,64}` validation. 5 tests.
+  - `Database` exported from `lib.rs`
+- **GrumpyShell** (Phase 12b): interactive JavaScript-like REPL for exploring GrumpyDB
+  - `examples/grumpysh/main.rs`: CLI entry with `--data`, `--eval`, `--help`. Rustyline integration with history.
+  - `examples/grumpysh/repl.rs`: read-eval-print loop with database state management
+  - `examples/grumpysh/parser.rs`: command parser — `use`, `db.method()`, `db.coll.method()`, `Command` enum
+  - `examples/grumpysh/json_parser.rs`: relaxed JSON parser (unquoted keys, single quotes, trailing commas). 11 tests.
+  - `examples/grumpysh/filter.rs`: client-side document matching for `find({ field: value })`. 6 tests.
+  - `rustyline` and `serde_json` added to dev-dependencies
+- 268 total tests (253 unit + 12 integration + 3 doctests), 48 new tests, 0 clippy warnings
+
 ## [1.2.0] - 2026-04-23
 
 ### Added

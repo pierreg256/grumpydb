@@ -22,8 +22,14 @@ cargo doc --no-deps --open      # Generate docs
 ```
 src/
 ├── error.rs            # GrumpyError enum, Result<T> alias
+├── naming.rs           # Name validation: [a-z0-9_]{1,64}
+├── database/           # Database — multi-collection management
+│   └── mod.rs          # Database struct, CRUD routing, shared WAL, index management
 ├── collection/         # Collection — unit of document storage
-│   └── mod.rs          # Collection struct, raw CRUD, compact, PageWriteRecord
+│   └── mod.rs          # Collection struct, raw CRUD, compact, PageWriteRecord, secondary indexes
+├── index/              # Secondary indexes on document fields
+│   ├── mod.rs          # SecondaryIndex struct, IndexDefinition, lookup, range_query
+│   └── encoding.rs     # Sortable binary encoding (integers, floats, strings), extract_field
 ├── page/               # Page storage (8 KiB pages)
 │   ├── mod.rs          # Constants (PAGE_SIZE, etc.), PageHeader, PageType
 │   ├── manager.rs      # PageManager — disk I/O, free-list
@@ -114,3 +120,5 @@ Use `tempfile::TempDir` for any test involving disk I/O.
 | `parking_lot` | Fast RwLock/Mutex for SWMR concurrency |
 | `tempfile` | Temporary directories for tests |
 | `rand` | Random data generation for tests |
+| `rustyline` | Line editing for GrumpyShell REPL (dev) |
+| `serde_json` | JSON serialization for GrumpyShell (dev) |

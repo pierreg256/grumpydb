@@ -36,6 +36,21 @@ pub enum GrumpyError {
 
     #[error("codec error: {0}")]
     Codec(String),
+
+    #[error("value type cannot be indexed")]
+    NotIndexable,
+
+    #[error("index not found: {0}")]
+    IndexNotFound(String),
+
+    #[error("index already exists: {0}")]
+    IndexAlreadyExists(String),
+
+    #[error("collection not found: {0}")]
+    CollectionNotFound(String),
+
+    #[error("invalid name: {0}")]
+    InvalidName(String),
 }
 
 /// Convenience Result type for GrumpyDB operations.

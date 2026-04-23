@@ -21,6 +21,9 @@ A disk-based object storage engine written in Rust. GrumpyDB stores schema-less 
 | Compaction (defrag + index rebuild) | ✅ Implemented |
 | Variable-key B+Tree (secondary indexes) | ✅ Implemented |
 | Collection abstraction (unit of storage) | ✅ Implemented |
+| Secondary indexes (field-level queries) | ✅ Implemented |
+| Multi-collection database | ✅ Implemented |
+| GrumpyShell interactive REPL | ✅ Implemented |
 
 ## Getting started
 
@@ -69,7 +72,32 @@ assert!(doc.is_some());
 db.close().unwrap();
 ```
 
-> **Note**: The full CRUD API (`insert`, `get`, `update`, `delete`, `scan`) is functional with WAL durability, LRU buffer pool caching, SWMR concurrency, page checksums, and compaction.
+> **Note**: The full CRUD API (`insert`, `get`, `update`, `delete`, `scan`) is functional with WAL durability, LRU buffer pool caching, SWMR concurrency, page checksums, and compaction. The `Database` API provides multi-collection support with secondary indexes.
+
+## GrumpyShell — Interactive REPL
+
+GrumpyShell provides a JavaScript-like interactive shell for exploring GrumpyDB:
+
+```bash
+cargo run --example grumpysh                           # launch REPL
+cargo run --example grumpysh -- --data ./mydata        # custom data dir
+cargo run --example grumpysh -- --eval "use test; db.users.count()"  # one-shot
+```
+
+```js
+grumpy> use demo
+grumpy [demo]> db.createCollection("users")
+grumpy [demo]> db.users.insert({ name: "Alice", age: 30 })
+Inserted: 3df9dde6-...
+grumpy [demo]> db.users.createIndex("by_age", "age")
+Index "by_age" created on field "age"
+grumpy [demo]> db.users.query("by_age", 30)
+[{ "_id": "...", "age": 30, "name": "Alice" }]
+grumpy [demo]> db.users.find({ age: 30 })
+[{ "_id": "...", "age": 30, "name": "Alice" }]
+```
+
+Features: relaxed JSON (unquoted keys, single quotes), secondary index queries, client-side filtering, line editing with history.
 
 ## Demo App & Tutorial
 
@@ -89,9 +117,9 @@ cargo run --example taskman -- help
 ┌──────────────────────────────────────┐
 │         Public API (lib.rs)          │
 ├──────────────────────────────────────┤
-│     Engine (engine.rs) + WAL         │
+│  Database (database/) + Engine (engine.rs) │
 ├──────────────────────────────────────┤
-│     Collection (collection/)         │
+│     Collection (collection/) + Indexes    │
 ├────────────┬─────────────┬────────────┤
 │  Document  │  Concurrency │  Buffer   │
 │  Model     │  (SWMR)      │  Pool     │
@@ -111,8 +139,14 @@ src/
 ├── lib.rs              # Public API, re-exports
 ├── error.rs            # GrumpyError, Result type
 ├── engine.rs           # GrumpyDb — thin wrapper over Collection + WAL
+├── naming.rs           # Name validation: [a-z0-9_]{1,64}
+├── database/           # Database — multi-collection management
+│   └── mod.rs          # Database struct, CRUD routing, shared WAL
 ├── collection/         # Collection — unit of document storage
-│   └── mod.rs          # Collection struct, raw CRUD, compact
+│   └── mod.rs          # Collection struct, raw CRUD, compact, secondary indexes
+├── index/              # Secondary indexes on document fields
+│   ├── mod.rs          # SecondaryIndex struct, IndexDefinition, lookup, range_query
+│   └── encoding.rs     # Sortable binary encoding for B+Tree keys
 ├── page/               # 8 KiB page management
 │   ├── mod.rs          # Constants, PageHeader, PageType
 │   ├── manager.rs      # PageManager (I/O, free-list)

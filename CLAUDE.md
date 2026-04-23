@@ -10,9 +10,9 @@ GrumpyDB is a disk-based object storage engine written in Rust. It provides pers
 ┌──────────────────────────────────────┐
 │         Public API (lib.rs)          │  ← CRUD interface for external apps
 ├──────────────────────────────────────┤
-│     Engine (engine.rs) + WAL         │  ← Thin wrapper: Collection + WalWriter
+│  Database (database/) + Engine (engine.rs) │  ← Multi-collection + single-collection wrappers
 ├──────────────────────────────────────┤
-│     Collection (collection/)         │  ← Unit of storage: data + index
+│     Collection (collection/) + Indexes    │  ← Unit of storage: data + primary + secondary
 ├────────────┬─────────────┬────────────┤
 │  Document  │  Concurrency │  Buffer   │
 │  Model     │  (SWMR)      │  Pool     │
@@ -29,6 +29,7 @@ GrumpyDB is a disk-based object storage engine written in Rust. It provides pers
 |---------------|-------------------------------------------|
 | `data.db`     | Page-based document storage                |
 | `primary.idx` | B+Tree index (UUID → PageId + SlotId)      |
+| `idx_*.idx`   | Secondary indexes (field value + UUID)     |
 | `wal.log`     | Write-Ahead Log for crash recovery         |
 
 ### Modules
@@ -40,10 +41,13 @@ GrumpyDB is a disk-based object storage engine written in Rust. It provides pers
 | `wal`          | WAL records, writer, checkpoint, recovery                |
 | `buffer`       | Buffer pool LRU, dirty tracking, pin/unpin               |
 | `document`     | Value type (JSON-like), binary codec                     |
-| `collection`   | Unit of storage: data pages + primary index, raw CRUD    |
+| `collection`   | Unit of storage: data pages + primary index + secondary indexes, raw CRUD |
+| `index`        | Secondary indexes: sortable encoding, SecondaryIndex, IndexDefinition |
+| `database`     | Multi-collection management with shared WAL, CRUD routing |
+| `naming`       | Name validation: `[a-z0-9_]{1,64}`                       |
 | `concurrency`  | SWMR lock manager, page-level locks                     |
 | `engine`       | Thin wrapper over Collection + WAL, exposes public CRUD  |
-| `error`        | Centralized error types                                  |
+| `error`        | Centralized error types (14 variants)                    |
 
 ## Code conventions
 
@@ -101,10 +105,13 @@ error (no internal dependencies)
       → btree (depends on error, page, document)
         → wal (depends on error, page)
           → buffer (depends on error, page)
-            → collection (depends on error, page, btree, buffer)
-              → concurrency (depends on error, page, buffer)
-                → engine (depends on collection, wal, concurrency)
-                  → lib.rs (exposes engine)
+            → index (depends on error, btree, document)
+              → collection (depends on error, page, btree, buffer, index)
+                → naming (depends on error)
+                  → concurrency (depends on error, page, buffer)
+                    → database (depends on error, collection, wal, naming)
+                      → engine (depends on collection, wal, concurrency)
+                        → lib.rs (exposes engine, database, index)
 ```
 
 ## Implementation plan
