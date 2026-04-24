@@ -56,7 +56,10 @@ impl SharedDatabase {
     /// Lists all collection names.
     pub fn list_collections(&self) -> Vec<String> {
         let db = self.inner.read();
-        db.list_collections().into_iter().map(|s| s.to_string()).collect()
+        db.list_collections()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     // ── CRUD ────────────────────────────────────────────────────────
@@ -93,13 +96,10 @@ impl SharedDatabase {
     // ── Index management ────────────────────────────────────────────
 
     /// Creates a secondary index.
-    pub fn create_index(
-        &self,
-        collection: &str,
-        index_name: &str,
-        field_path: &str,
-    ) -> Result<()> {
-        self.inner.write().create_index(collection, index_name, field_path)
+    pub fn create_index(&self, collection: &str, index_name: &str, field_path: &str) -> Result<()> {
+        self.inner
+            .write()
+            .create_index(collection, index_name, field_path)
     }
 
     /// Drops a secondary index.
@@ -125,7 +125,9 @@ impl SharedDatabase {
         start: &Value,
         end: &Value,
     ) -> Result<Vec<(Uuid, Value)>> {
-        self.inner.write().query_range(collection, index_name, start, end)
+        self.inner
+            .write()
+            .query_range(collection, index_name, start, end)
     }
 
     // ── References ──────────────────────────────────────────────────
@@ -219,7 +221,11 @@ impl SharedServer {
     /// Lists all client names.
     pub fn list_clients(&self) -> Vec<String> {
         let server = self.server.read();
-        server.list_clients().into_iter().map(|s| s.to_string()).collect()
+        server
+            .list_clients()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect()
     }
 
     // ── Database management ─────────────────────────────────────────
@@ -240,7 +246,10 @@ impl SharedServer {
     pub fn list_databases(&self, client: &str) -> Result<Vec<String>> {
         let mut server = self.server.write();
         let c = server.client(client)?;
-        Ok(c.list_databases().into_iter().map(|s| s.to_string()).collect())
+        Ok(c.list_databases()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect())
     }
 
     /// Returns a `SharedDatabase` handle for independent per-database locking.
@@ -447,9 +456,7 @@ mod tests {
 
         // Create 4 databases
         for i in 0..4 {
-            server
-                .create_database("alice", &format!("db{i}"))
-                .unwrap();
+            server.create_database("alice", &format!("db{i}")).unwrap();
             let db = server.database("alice", &format!("db{i}")).unwrap();
             db.create_collection("items").unwrap();
         }
@@ -492,9 +499,7 @@ mod tests {
         server.create_client("test").unwrap();
 
         for i in 0..4 {
-            server
-                .create_database("test", &format!("db{i}"))
-                .unwrap();
+            server.create_database("test", &format!("db{i}")).unwrap();
             let db = server.database("test", &format!("db{i}")).unwrap();
             db.create_collection("data").unwrap();
         }
@@ -609,11 +614,7 @@ mod tests {
             b2.wait();
             for i in 0u128..100 {
                 db_slow
-                    .insert(
-                        "items",
-                        Uuid::from_u128(1000 + i),
-                        Value::Integer(i as i64),
-                    )
+                    .insert("items", Uuid::from_u128(1000 + i), Value::Integer(i as i64))
                     .unwrap();
             }
         });

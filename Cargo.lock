@@ -127,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "grumpydb"
-version = "3.0.0"
+version = "3.1.0"
 dependencies = [
  "crc32fast",
  "parking_lot",

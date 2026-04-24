@@ -257,8 +257,7 @@ mod tests {
     fn test_encode_ref_ordering() {
         // Ref should sort after Bytes
         let bytes_v = encode_sortable_value(&Value::Bytes(vec![0])).unwrap();
-        let ref_v =
-            encode_sortable_value(&Value::Ref("a".into(), Uuid::from_u128(1))).unwrap();
+        let ref_v = encode_sortable_value(&Value::Ref("a".into(), Uuid::from_u128(1))).unwrap();
         assert!(bytes_v < ref_v);
     }
 

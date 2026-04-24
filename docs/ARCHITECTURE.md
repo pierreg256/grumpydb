@@ -466,6 +466,11 @@ impl GrumpyDb {
     /// Returns a `CompactResult` with the number of preserved documents.
     pub fn compact(&mut self) -> Result<CompactResult>;
 
+    /// Migrates all documents from this v1 GrumpyDb into a v2 Database collection.
+    /// Creates the target collection if it doesn't exist.
+    /// Returns the number of documents migrated.
+    pub fn migrate_to_database(&mut self, target: &mut Database, collection: &str) -> Result<u64>;
+
     /// Closes the database cleanly (flush + close files)
     pub fn close(self) -> Result<()>;
 }
@@ -904,3 +909,26 @@ Within a single database, SWMR rules apply (1 writer OR N readers).
 | `SharedDb` | `GrumpyDb` | Single collection | Backward compat, simple use |
 | `SharedDatabase` | `Database` | Multi-collection | Per-database concurrent access |
 | `SharedServer` | `GrumpyServer` | Multi-tenant | Server-wide concurrent access |
+
+## 18. v1 → v2 Migration
+
+`GrumpyDb::migrate_to_database()` provides a one-shot migration from the v1
+single-collection engine to a v2 `Database` collection.
+
+### Algorithm
+
+1. `scan(..)` all documents from the v1 `GrumpyDb`.
+2. Ensure the target collection exists in the `Database` (create if absent).
+3. `insert()` each document into the target collection.
+4. Return the number of migrated documents.
+
+### Usage
+
+```rust
+let mut v1 = GrumpyDb::open(Path::new("./old_db")).unwrap();
+let mut v2 = Database::open(Path::new("./new_db")).unwrap();
+let count = v1.migrate_to_database(&mut v2, "my_collection").unwrap();
+println!("Migrated {count} documents");
+```
+
+The original v1 data is **not modified** — this is a copy, not a move.

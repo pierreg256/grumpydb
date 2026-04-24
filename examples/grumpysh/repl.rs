@@ -124,9 +124,7 @@ impl Repl {
                 Ok(to_json_string(&stats, 0))
             }),
             Command::Resolve(coll, id) => self.cmd_resolve(&coll, &id),
-            Command::ResolveDeep(coll, id, depth) => {
-                self.cmd_resolve_deep(&coll, &id, depth)
-            }
+            Command::ResolveDeep(coll, id, depth) => self.cmd_resolve_deep(&coll, &id, depth),
         }
     }
 

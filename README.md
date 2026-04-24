@@ -26,6 +26,7 @@ A disk-based object storage engine written in Rust. GrumpyDB stores schema-less 
 | Document references (cross-collection Ref, resolve, cycle detection) | ✅ Implemented |
 | Multi-tenant server (Client & Server) | ✅ Implemented |
 | Thread-safe concurrency (per-database SWMR) | ✅ Implemented |
+| v1→v2 migration tool | ✅ Implemented |
 | GrumpyShell interactive REPL | ✅ Implemented |
 
 ## Getting started

@@ -1,22 +1,19 @@
-//! # Concurrent operations — demonstrating GrumpyDB's SharedDb
+//! # Concurrent operations — demonstrating GrumpyDB's SharedDatabase
 //!
-//! This module shows how to use [`SharedDb`] for thread-safe access to GrumpyDB.
-//! It demonstrates the SWMR (Single-Writer, Multi-Reader) concurrency model:
+//! This module shows how to use [`SharedDatabase`] for thread-safe access
+//! to a GrumpyDB database. It demonstrates the SWMR (Single-Writer,
+//! Multi-Reader) concurrency model with per-database locking.
 //!
-//! - **Multiple readers** can access the database concurrently (shared lock)
-//! - **One writer** at a time gets exclusive access (write lock)
-//! - No deadlocks — `parking_lot::RwLock` is fair and efficient
-//!
-//! ## Key pattern: Arc<RwLock<GrumpyDb>> via SharedDb
+//! ## Key pattern: Arc<RwLock<Database>> via SharedDatabase
 //!
 //! ```text
 //! Thread 1 (reader)  ─┐
-//! Thread 2 (reader)  ─┤── SharedDb::get()  → shared lock (non-blocking)
+//! Thread 2 (reader)  ─┤── SharedDatabase::get()  → concurrent access
 //! Thread 3 (reader)  ─┘
-//! Thread 4 (writer)  ──── SharedDb::insert() → exclusive lock (blocks readers)
+//! Thread 4 (writer)  ──── SharedDatabase::insert() → exclusive lock
 //! ```
 //!
-//! `SharedDb` is cheaply cloneable (it's an `Arc` wrapper). Pass clones to threads.
+//! `SharedDatabase` is cheaply cloneable (Arc wrapper). Pass clones to threads.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -24,10 +21,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use grumpydb::{SharedDb, Value};
+use grumpydb::{SharedDatabase, Value};
 use uuid::Uuid;
 
 use super::task::Task;
+
+/// The collection name used by the concurrent module.
+const COLL: &str = "tasks";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // BENCH: concurrent read/write benchmark
@@ -55,29 +55,24 @@ pub fn run_bench(
     readers: usize,
     count: usize,
 ) -> Result<(), String> {
-    // SharedDb::open() creates a thread-safe database handle.
-    // Unlike GrumpyDb, it can be cloned and shared across threads.
-    let db = SharedDb::open(db_path).map_err(|e| format!("Failed to open: {e}"))?;
+    let db = SharedDatabase::open(db_path).map_err(|e| format!("Failed to open: {e}"))?;
+    db.create_collection(COLL)
+        .map_err(|e| format!("Failed to create collection: {e}"))?;
 
     println!("Benchmark: {writers} writers × {count} inserts + {readers} readers");
     println!("{}", "-".repeat(50));
 
-    // ── Phase 1: Writers ────────────────────────────────────────────────
     let start = Instant::now();
     let mut writer_handles = Vec::new();
 
     for t in 0..writers {
-        // Clone the handle — each thread gets its own Arc reference.
-        // This is the standard pattern for sharing SharedDb across threads.
         let db = db.clone();
         writer_handles.push(std::thread::spawn(move || {
             let base = (t * count) as u128;
             for i in 0..count {
                 let key = Uuid::from_u128(base + i as u128);
                 let value = Value::String(format!("bench_task_{t}_{i}"));
-                // SharedDb::insert() acquires an exclusive write lock.
-                // Other threads (readers and writers) wait during this call.
-                db.insert(key, value).unwrap();
+                db.insert(COLL, key, value).unwrap();
             }
         }));
     }
@@ -91,7 +86,6 @@ pub fn run_bench(
     let write_ops_sec = total_writes as f64 / write_elapsed.as_secs_f64();
     println!("  Writes: {total_writes} in {write_elapsed:.2?} ({write_ops_sec:.0} ops/sec)");
 
-    // ── Phase 2: Readers ────────────────────────────────────────────────
     let start = Instant::now();
     let total_keys = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut reader_handles = Vec::new();
@@ -100,9 +94,7 @@ pub fn run_bench(
         let db = db.clone();
         let total_keys = total_keys.clone();
         reader_handles.push(std::thread::spawn(move || {
-            // SharedDb::scan() acquires a lock to iterate all documents.
-            // Multiple readers can interleave their scans.
-            let results = db.scan(..).unwrap();
+            let results = db.scan(COLL, ..).unwrap();
             total_keys.fetch_add(results.len(), std::sync::atomic::Ordering::Relaxed);
         }));
     }
@@ -153,7 +145,9 @@ pub fn run_bench(
 /// - Multiple LIST/GET clients don't block each other
 /// - ADD/DONE/DELETE acquire exclusive access
 pub fn run_server(db_path: &Path, addr: &str) -> Result<(), String> {
-    let db = SharedDb::open(db_path).map_err(|e| format!("Failed to open: {e}"))?;
+    let db = SharedDatabase::open(db_path).map_err(|e| format!("Failed to open: {e}"))?;
+    // Ensure collection exists
+    let _ = db.create_collection(COLL);
 
     let listener = TcpListener::bind(addr).map_err(|e| format!("Bind failed: {e}"))?;
     println!("TaskMan server listening on {addr}");
@@ -170,8 +164,6 @@ pub fn run_server(db_path: &Path, addr: &str) -> Result<(), String> {
             .unwrap_or_default();
         println!("Client connected: {peer}");
 
-        // Clone the SharedDb handle for this connection's thread.
-        // This is the standard concurrency pattern with SharedDb.
         let db = db.clone();
 
         std::thread::spawn(move || {
@@ -185,8 +177,7 @@ pub fn run_server(db_path: &Path, addr: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Handles a single client connection.
-fn handle_client(stream: std::net::TcpStream, db: &SharedDb) -> Result<(), String> {
+fn handle_client(stream: std::net::TcpStream, db: &SharedDatabase) -> Result<(), String> {
     let reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
     let mut writer = stream;
 
@@ -223,23 +214,23 @@ fn handle_client(stream: std::net::TcpStream, db: &SharedDb) -> Result<(), Strin
     Ok(())
 }
 
-fn handle_add(db: &SharedDb, title: &str) -> String {
+fn handle_add(db: &SharedDatabase, title: &str) -> String {
     if title.is_empty() {
         return "ERR missing title\n".to_string();
     }
     let task = Task::new(title, None, vec![]);
     let id = task.id;
-    match db.insert(id, task.to_value()) {
+    match db.insert(COLL, id, task.to_value()) {
         Ok(()) => format!("OK {id}\n"),
         Err(e) => format!("ERR {e}\n"),
     }
 }
 
-fn handle_get(db: &SharedDb, id_str: &str) -> String {
+fn handle_get(db: &SharedDatabase, id_str: &str) -> String {
     let Ok(id) = Uuid::parse_str(id_str) else {
         return format!("ERR invalid UUID: {id_str}\n");
     };
-    match db.get(&id) {
+    match db.get(COLL, &id) {
         Ok(Some(value)) => {
             if let Some(task) = Task::from_value(id, &value) {
                 format!("OK {task}\n")
@@ -252,8 +243,8 @@ fn handle_get(db: &SharedDb, id_str: &str) -> String {
     }
 }
 
-fn handle_list(db: &SharedDb) -> String {
-    match db.scan(..) {
+fn handle_list(db: &SharedDatabase) -> String {
+    match db.scan(COLL, ..) {
         Ok(entries) => {
             let mut out = format!("OK {} tasks\n", entries.len());
             for (key, value) in &entries {
@@ -267,19 +258,15 @@ fn handle_list(db: &SharedDb) -> String {
     }
 }
 
-fn handle_done(db: &SharedDb, id_str: &str) -> String {
+fn handle_done(db: &SharedDatabase, id_str: &str) -> String {
     let Ok(id) = Uuid::parse_str(id_str) else {
         return format!("ERR invalid UUID: {id_str}\n");
     };
-    // Read-modify-write with SharedDb: each step acquires the lock separately.
-    // Between get() and update(), another thread could modify the data.
-    // For a task manager this is fine. For stricter guarantees, you'd need
-    // application-level locking or a compare-and-swap pattern.
-    match db.get(&id) {
+    match db.get(COLL, &id) {
         Ok(Some(value)) => {
             if let Some(mut task) = Task::from_value(id, &value) {
                 task.done = true;
-                match db.update(&id, task.to_value()) {
+                match db.update(COLL, &id, task.to_value()) {
                     Ok(()) => "OK done\n".to_string(),
                     Err(e) => format!("ERR {e}\n"),
                 }
@@ -292,18 +279,18 @@ fn handle_done(db: &SharedDb, id_str: &str) -> String {
     }
 }
 
-fn handle_delete(db: &SharedDb, id_str: &str) -> String {
+fn handle_delete(db: &SharedDatabase, id_str: &str) -> String {
     let Ok(id) = Uuid::parse_str(id_str) else {
         return format!("ERR invalid UUID: {id_str}\n");
     };
-    match db.delete(&id) {
+    match db.delete(COLL, &id) {
         Ok(()) => "OK deleted\n".to_string(),
         Err(e) => format!("ERR {e}\n"),
     }
 }
 
-fn handle_stats(db: &SharedDb) -> String {
-    match db.scan(..) {
+fn handle_stats(db: &SharedDatabase) -> String {
+    match db.scan(COLL, ..) {
         Ok(entries) => {
             let total = entries.len();
             let done = entries

@@ -343,7 +343,10 @@ impl Database {
             Value::Object(map) => {
                 let mut resolved = std::collections::BTreeMap::new();
                 for (k, v) in map {
-                    resolved.insert(k.clone(), self.resolve_recursive(v, max_depth, depth, visited)?);
+                    resolved.insert(
+                        k.clone(),
+                        self.resolve_recursive(v, max_depth, depth, visited)?,
+                    );
                 }
                 Ok(Value::Object(resolved))
             }

@@ -46,5 +46,5 @@ pub use document::value::Value;
 pub use engine::{CompactResult, GrumpyDb};
 pub use error::{GrumpyError, Result};
 pub use index::IndexDefinition;
-pub use server::client::Client;
 pub use server::GrumpyServer;
+pub use server::client::Client;

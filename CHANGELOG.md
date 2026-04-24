@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.0.0] - 2026-04-23
+## [3.1.0] - 2026-04-24
+
+### Added
+- `GrumpyDb::migrate_to_database()` — migration tool to move v1 single-collection data into a v2 Database collection
+- TaskMan v5: store.rs rewritten to use `Database` API with `create_collection("tasks")` and secondary index on `done` field
+- TaskMan concurrent: updated to use `SharedDatabase` instead of `SharedDb`
+- Stress test: 3 clients × 3 databases × 3 collections × 1,000 docs + concurrent multi-database test
+
+### Changed
+- Applied `cargo fmt` across the entire codebase
+- 314 total tests (296 unit + 14 integration + 4 doctests), 0 clippy warnings, 0 fmt diffs
+
+## [3.0.0] - 2026-04-24
 
 ### Added
 - **Multi-Tenant Server** (Phase 13): full client/server hierarchy for multi-tenant isolation
@@ -23,7 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Concurrent writes to different databases without contention
   - `SharedDatabase` and `SharedServer` exported from `lib.rs`
   - 9 new concurrency tests (4 SharedDatabase + 5 SharedServer)
-- 295 total tests (unit + integration + doctests), 0 clippy warnings
+- **Polish & Migration** (Phase 15): migration tool, stress tests, TaskMan v5
+  - `GrumpyDb::migrate_to_database()` — migrates all docs from v1 GrumpyDb to v2 Database collection
+  - TaskMan v5: rewrote store.rs to use `Database` API with `create_collection("tasks")` and secondary index on `done` field
+  - TaskMan concurrent: updated to use `SharedDatabase` instead of `SharedDb`
+  - Stress test: 3 clients × 3 databases × 3 collections × 1,000 docs + concurrent multi-database test
+  - All formatting fixed with `cargo fmt`
+- 314 total tests (296 unit + 14 integration + 4 doctests), 0 clippy warnings, 0 fmt diffs
 
 ## [2.1.0] - 2026-04-23
 

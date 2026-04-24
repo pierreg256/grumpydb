@@ -324,13 +324,13 @@ fn cmd_compact() -> Result<(), String> {
     let mut store = TaskStore::open(&db_path())?;
 
     let start = std::time::Instant::now();
-    let result = store.compact()?;
+    let count = store.compact()?;
     let elapsed = start.elapsed();
 
     store.close()?;
 
     println!("Compaction complete in {elapsed:.2?}");
-    println!("  Documents preserved: {}", result.documents);
+    println!("  Documents preserved: {count}");
     Ok(())
 }
 
@@ -343,8 +343,8 @@ fn cmd_compact() -> Result<(), String> {
 // Returns the number of documents via B+Tree metadata (O(1), no scan needed).
 // ─────────────────────────────────────────────────────────────────────────────
 fn cmd_count() -> Result<(), String> {
-    let store = TaskStore::open(&db_path())?;
-    let count = store.document_count();
+    let mut store = TaskStore::open(&db_path())?;
+    let count = store.document_count()?;
     store.close()?;
     println!("{count} documents");
     Ok(())
@@ -480,15 +480,9 @@ fn cmd_generate(args: &[String]) -> Result<(), String> {
     let elapsed = start.elapsed();
     let ops_sec = count as f64 / elapsed.as_secs_f64();
 
-    // Show buffer pool stats — demonstrates how the LRU cache reduces disk I/O.
-    // With a buffer pool, the current data page stays cached between inserts,
-    // so only the first insert (or a new page allocation) triggers a disk read.
-    let (reads, writes, cached, capacity) = store.pool_stats();
-
     store.close()?;
 
     println!("\r  Generated {count} tasks in {elapsed:.2?} ({ops_sec:.0} ops/sec)");
-    println!("  Buffer pool: {reads} reads, {writes} writes, {cached}/{capacity} pages cached");
     println!("  Use 'taskman search --tag urgent' to test scan+filter performance.");
     Ok(())
 }
@@ -536,10 +530,6 @@ fn cmd_search(args: &[String]) -> Result<(), String> {
         .collect();
     let filter_time = start_filter.elapsed();
 
-    // Buffer pool stats — shows how many pages were read from disk vs cache.
-    // On repeated scans, most page reads come from cache → faster scans.
-    let (reads, writes, cached, capacity) = store.pool_stats();
-
     store.close()?;
 
     println!("Search results for tag '{tag}':");
@@ -562,7 +552,6 @@ fn cmd_search(args: &[String]) -> Result<(), String> {
         matching.len()
     );
     println!("  Total:    {:.2?}", scan_time + filter_time);
-    println!("  Buffer pool: {reads} reads, {writes} writes, {cached}/{capacity} cached");
     Ok(())
 }
 

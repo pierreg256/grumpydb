@@ -215,6 +215,39 @@ impl GrumpyDb {
         }
         Ok(())
     }
+
+    /// Migrates all documents from this v1 `GrumpyDb` into a v2 `Database` collection.
+    ///
+    /// Reads every document via `scan(..)` and inserts them into the target
+    /// database/collection. The original v1 data is not modified.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` — The target `Database` to insert documents into
+    /// * `collection` — The collection name within that database
+    ///
+    /// # Returns
+    ///
+    /// The number of documents migrated.
+    pub fn migrate_to_database(
+        &mut self,
+        target: &mut crate::database::Database,
+        collection: &str,
+    ) -> Result<u64> {
+        // Ensure the target collection exists
+        if !target.list_collections().contains(&collection) {
+            target.create_collection(collection)?;
+        }
+
+        let all = self.scan(..)?;
+        let count = all.len() as u64;
+
+        for (key, value) in all {
+            target.insert(collection, key, value)?;
+        }
+
+        Ok(count)
+    }
 }
 
 #[cfg(test)]
@@ -558,5 +591,42 @@ mod tests {
         assert_eq!(db.document_count(), 1);
         db.delete(&key).unwrap();
         assert_eq!(db.document_count(), 0);
+    }
+
+    #[test]
+    fn test_migrate_to_database() {
+        let dir = TempDir::new().unwrap();
+        let v1_path = dir.path().join("v1");
+        let v2_path = dir.path().join("v2");
+
+        // Create v1 database with some docs
+        let mut v1 = GrumpyDb::open(&v1_path).unwrap();
+        for i in 0u128..100 {
+            v1.insert(
+                Uuid::from_u128(i),
+                Value::Object(BTreeMap::from([
+                    ("name".into(), Value::String(format!("doc_{i}"))),
+                    ("idx".into(), Value::Integer(i as i64)),
+                ])),
+            )
+            .unwrap();
+        }
+        assert_eq!(v1.document_count(), 100);
+
+        // Migrate to v2 database
+        let mut v2 = crate::database::Database::open(&v2_path).unwrap();
+        let migrated = v1.migrate_to_database(&mut v2, "imported").unwrap();
+        assert_eq!(migrated, 100);
+
+        // Verify all docs are in v2
+        assert_eq!(v2.document_count("imported").unwrap(), 100);
+        let val = v2.get("imported", &Uuid::from_u128(42)).unwrap().unwrap();
+        assert_eq!(
+            val.as_object().unwrap().get("name"),
+            Some(&Value::String("doc_42".into()))
+        );
+
+        v1.close().unwrap();
+        v2.close().unwrap();
     }
 }
