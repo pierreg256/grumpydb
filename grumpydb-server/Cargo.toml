@@ -5,10 +5,14 @@ edition = "2024"
 rust-version = "1.85"
 description = "GrumpyDB networked server — TCP/TLS, JWT auth, RBAC"
 license = "MIT"
+repository = "https://github.com/pierreg256/grumpydb"
+homepage = "https://github.com/pierreg256/grumpydb"
+keywords = ["database", "server", "grumpydb", "tcp", "tls"]
+categories = ["database", "network-programming"]
 
 [dependencies]
-grumpydb = { path = ".." }
-grumpydb-protocol = { path = "../grumpydb-protocol" }
+grumpydb = { path = "..", version = "4" }
+grumpydb-protocol = { path = "../grumpydb-protocol", version = "1" }
 tokio = { version = "1", features = ["full"] }
 tokio-rustls = "0.26"
 rustls = "0.23"

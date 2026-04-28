@@ -5,9 +5,13 @@ edition = "2024"
 rust-version = "1.85"
 description = "Rust client driver for GrumpyDB — TCP/TLS, JWT auth, async CRUD"
 license = "MIT"
+repository = "https://github.com/pierreg256/grumpydb"
+homepage = "https://github.com/pierreg256/grumpydb"
+keywords = ["database", "client", "driver", "grumpydb", "async"]
+categories = ["database", "network-programming"]
 
 [dependencies]
-grumpydb-protocol = { path = "../grumpydb-protocol" }
+grumpydb-protocol = { path = "../grumpydb-protocol", version = "1" }
 tokio = { version = "1", features = ["net", "io-util", "rt", "macros"] }
 tokio-rustls = "0.26"
 rustls = "0.23"

@@ -5,6 +5,10 @@ edition = "2024"
 rust-version = "1.85"
 description = "Wire protocol (RESP-like) for GrumpyDB — shared between server and client drivers"
 license = "MIT"
+repository = "https://github.com/pierreg256/grumpydb"
+homepage = "https://github.com/pierreg256/grumpydb"
+keywords = ["database", "protocol", "resp", "grumpydb"]
+categories = ["database", "network-programming"]
 
 [dependencies]
 thiserror = "2"
