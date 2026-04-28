@@ -352,12 +352,11 @@ fn parse_kv_array(resp: Response) -> Result<Vec<(String, serde_json::Value)>, Cl
         Response::Array(items) => {
             let mut result = Vec::with_capacity(items.len());
             for item in items {
-                if let Response::Bulk(Some(data)) = item {
-                    if let Some((key, json_str)) = data.split_once(' ') {
-                        if let Ok(val) = serde_json::from_str(json_str) {
-                            result.push((key.to_string(), val));
-                        }
-                    }
+                if let Response::Bulk(Some(data)) = item
+                    && let Some((key, json_str)) = data.split_once(' ')
+                    && let Ok(val) = serde_json::from_str(json_str)
+                {
+                    result.push((key.to_string(), val));
                 }
             }
             Ok(result)

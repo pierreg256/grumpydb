@@ -1,7 +1,8 @@
 //! Storage engine: orchestrates all subsystems to provide CRUD operations.
 //!
 //! `GrumpyDb` is a thin wrapper over a single [`Collection`] with WAL logging.
-//! All data page access goes through the collection's [`BufferPool`].
+//! All data page access goes through the collection's buffer pool
+//! ([`crate::buffer::pool::BufferPool`]).
 
 use std::path::Path;
 use uuid::Uuid;

@@ -275,11 +275,11 @@ fn parse_bool(chars: &mut Chars) -> Result<Value, String> {
 fn parse_null(chars: &mut Chars) -> Result<Value, String> {
     let mut word = String::new();
     for _ in 0..4 {
-        if let Some(&c) = chars.peek() {
-            if c.is_ascii_alphabetic() {
-                word.push(c);
-                chars.next();
-            }
+        if let Some(&c) = chars.peek()
+            && c.is_ascii_alphabetic()
+        {
+            word.push(c);
+            chars.next();
         }
     }
     if word == "null" {

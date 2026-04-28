@@ -217,10 +217,10 @@ impl Collection {
                 Bound::Unbounded => {}
             }
 
-            if let Bound::Excluded(start_key) = range.start_bound() {
-                if entry.key == *start_key {
-                    continue;
-                }
+            if let Bound::Excluded(start_key) = range.start_bound()
+                && entry.key == *start_key
+            {
+                continue;
             }
 
             let raw = self.read_tuple(entry.page_id, entry.slot_id)?;

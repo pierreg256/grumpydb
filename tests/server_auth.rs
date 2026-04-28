@@ -50,8 +50,10 @@ refresh_token_ttl_secs = 60
         .await
         .expect("probe connect");
 
-    // Get a fresh login (which yields a new pair of tokens), then sleep again
-    // and ensure the access token bound to the previous step has expired.
+    // Get a fresh login (which yields a new pair of tokens), then sleep
+    // well past the TTL boundary. Note: JWT `exp` has 1-second resolution,
+    // so we sleep ≥ 2 × TTL to be sure that current time is strictly
+    // greater than the encoded expiry second.
     let login_resp = probe
         .raw_execute(&format!(
             "LOGIN {} {} {}",
@@ -65,7 +67,7 @@ refresh_token_ttl_secs = 60
         }
         other => panic!("unexpected login: {other:?}"),
     };
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
 
     let mut second = GrumpyClient::connect("127.0.0.1", server.addr.port(), false)
         .await

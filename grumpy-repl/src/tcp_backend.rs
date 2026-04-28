@@ -90,20 +90,20 @@ fn format_response(resp: &Response) -> String {
                 .iter()
                 .map(|s| {
                     // Try "uuid json" format from SCAN/QUERY results
-                    if let Some((key, json_str)) = s.split_once(' ') {
-                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
-                            let mut obj = serde_json::Map::new();
-                            obj.insert(
-                                "_id".to_string(),
-                                serde_json::Value::String(key.to_string()),
-                            );
-                            if let serde_json::Value::Object(fields) = val {
-                                for (k, v) in fields {
-                                    obj.insert(k, v);
-                                }
+                    if let Some((key, json_str)) = s.split_once(' ')
+                        && let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str)
+                    {
+                        let mut obj = serde_json::Map::new();
+                        obj.insert(
+                            "_id".to_string(),
+                            serde_json::Value::String(key.to_string()),
+                        );
+                        if let serde_json::Value::Object(fields) = val {
+                            for (k, v) in fields {
+                                obj.insert(k, v);
                             }
-                            return serde_json::Value::Object(obj);
                         }
+                        return serde_json::Value::Object(obj);
                     }
                     serde_json::Value::String(s.clone())
                 })

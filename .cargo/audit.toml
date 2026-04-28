@@ -1,0 +1,6 @@
+[advisories]
+# Transitive dependency via rustls/tokio-rustls. The crate is "unmaintained"
+# (RUSTSEC-2025-0134) but not vulnerable. Migration to rustls-pki-types'
+# PemObject API is tracked separately and depends on rustls/tokio-rustls
+# upstream pulling the dep themselves.
+ignore = ["RUSTSEC-2025-0134"]

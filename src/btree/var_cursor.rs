@@ -71,10 +71,10 @@ impl VarBTree {
 
         let mut results = Vec::new();
         while let Some(item) = cursor.next_entry(&mut self.pm)? {
-            if let Some(end_key) = end {
-                if item.key.as_slice() >= end_key {
-                    break;
-                }
+            if let Some(end_key) = end
+                && item.key.as_slice() >= end_key
+            {
+                break;
             }
             results.push(VarCursorEntry {
                 key: item.key,

@@ -5,8 +5,8 @@ use grumpydb::Value;
 /// Returns true if the document matches the filter.
 ///
 /// Each key in the filter is checked against the document:
-/// - `{ age: 30 }` → doc["age"] == 30
-/// - `{ "address.city": "Paris" }` → doc["address"]["city"] == "Paris"
+/// - `{ age: 30 }` → `doc["age"] == 30`
+/// - `{ "address.city": "Paris" }` → `doc["address"]["city"] == "Paris"`
 /// - `{}` → matches everything
 pub fn matches_filter(doc: &Value, filter: &Value) -> bool {
     let Some(filter_obj) = filter.as_object() else {
