@@ -1,4 +1,4 @@
-//! # GrumpyShell — Interactive GrumpyDB REPL
+//! # grumpy-repl — Interactive GrumpyDB REPL
 //!
 //! A JavaScript-like shell for exploring GrumpyDB interactively.
 //! Documents are JSON objects, commands follow a familiar `db.collection.method()` syntax.
@@ -7,12 +7,12 @@
 //!
 //! ```bash
 //! # Embedded mode (direct disk access, no server needed)
-//! cargo run --example grumpysh                                        # launch REPL
-//! cargo run --example grumpysh -- --data ./mydata                     # custom data dir
-//! cargo run --example grumpysh -- --eval "use test; db.users.count()" # one-shot
+//! cargo run -p grumpy-repl                                        # launch REPL
+//! cargo run -p grumpy-repl -- --data ./mydata                     # custom data dir
+//! cargo run -p grumpy-repl -- --eval "use test; db.users.count()" # one-shot
 //!
 //! # Connected mode (TCP client to a running GrumpyDB server)
-//! cargo run --example grumpysh -- --host localhost --port 6380 --tenant acme --user alice
+//! cargo run -p grumpy-repl -- --host localhost --port 6380 --tenant acme --user alice
 //! ```
 
 mod filter;
@@ -26,7 +26,7 @@ use std::path::PathBuf;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let mut data_dir = PathBuf::from(".grumpysh_data");
+    let mut data_dir = PathBuf::from(".grumpy_repl_data");
     let mut eval_cmd: Option<String> = None;
     let mut host: Option<String> = None;
     let mut port: u16 = 6380;
@@ -85,10 +85,10 @@ fn main() {
             "--no-tls" => use_tls = false,
             "--embedded" => embedded = true,
             "--help" | "-h" => {
-                println!("GrumpyShell — Interactive GrumpyDB REPL\n");
-                println!("Usage: grumpysh [OPTIONS]\n");
+                println!("grumpy-repl — Interactive GrumpyDB REPL\n");
+                println!("Usage: grumpy-repl [OPTIONS]\n");
                 println!("Embedded mode (default if no --host):");
-                println!("  --data <dir>       Data directory (default: .grumpysh_data)");
+                println!("  --data <dir>       Data directory (default: .grumpy_repl_data)");
                 println!("  --embedded         Force embedded mode\n");
                 println!("Connected mode (TCP to a GrumpyDB server):");
                 println!("  --host <host>      Server hostname");
@@ -160,9 +160,9 @@ fn main() {
 
     // Interactive mode with rustyline
     if connected_mode {
-        println!("GrumpyShell v{} (connected mode)", env!("CARGO_PKG_VERSION"));
+        println!("grumpy-repl v{} (connected mode)", env!("CARGO_PKG_VERSION"));
     } else {
-        println!("GrumpyShell v{} (embedded mode)", env!("CARGO_PKG_VERSION"));
+        println!("grumpy-repl v{} (embedded mode)", env!("CARGO_PKG_VERSION"));
     }
     println!("Type 'help' for commands, 'exit' to quit.\n");
 
@@ -175,7 +175,7 @@ fn main() {
     };
 
     // Load history
-    let history_path = dirs_home().join(".grumpysh_history");
+    let history_path = dirs_home().join(".grumpy_repl_history");
     let _ = rl.load_history(&history_path);
 
     loop {

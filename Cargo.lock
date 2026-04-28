@@ -304,19 +304,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "grumpydb"
-version = "4.0.0"
+name = "grumpy-repl"
+version = "4.1.0"
 dependencies = [
- "crc32fast",
+ "grumpydb",
  "grumpydb-client",
  "grumpydb-protocol",
- "parking_lot",
- "rand",
  "rustyline",
  "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "grumpydb"
+version = "4.1.0"
+dependencies = [
+ "crc32fast",
+ "parking_lot",
+ "rand",
  "tempfile",
  "thiserror",
- "tokio",
  "uuid",
 ]
 

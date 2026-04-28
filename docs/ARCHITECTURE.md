@@ -12,7 +12,7 @@ GrumpyDB is an embedded storage engine (library crate) that persists schema-less
 - **Write-Ahead Log** in `wal.log` for durability
 - **LRU Buffer Pool** for in-memory caching
 - **SWMR** (Single-Writer, Multi-Reader) concurrency
-- **GrumpyShell** interactive REPL for exploring databases
+- **grumpy-repl** interactive REPL for exploring databases
 
 ## 2. Page Format (8 KiB)
 
@@ -730,21 +730,21 @@ All names (collections, indexes) are validated: `[a-z0-9_]{1,64}`, no path separ
 
 On `Database::open()`, existing collections are discovered by scanning subdirectories for `data.db` files. No separate catalogue file is needed.
 
-## 15. GrumpyShell — Interactive REPL
+## 15. grumpy-repl — Interactive REPL
 
-`examples/grumpysh/` provides a JavaScript-like shell for exploring GrumpyDB interactively.
+The `grumpy-repl` workspace crate (binary `grumpy-repl`) provides a JavaScript-like shell for exploring GrumpyDB interactively.
 
 ### 15.1 Usage
 
 ```bash
 # Embedded mode (direct disk access, no server needed)
-cargo run --example grumpysh                           # launch REPL
-cargo run --example grumpysh -- --data ./mydata        # custom data dir
-cargo run --example grumpysh -- --eval "use test; db.users.count()"  # one-shot
+cargo run -p grumpy-repl                           # launch REPL
+cargo run -p grumpy-repl -- --data ./mydata        # custom data dir
+cargo run -p grumpy-repl -- --eval "use test; db.users.count()"  # one-shot
 
 # Connected mode (TCP client to a running GrumpyDB server)
-cargo run --example grumpysh -- --host localhost --port 6380 --tenant acme --user alice
-cargo run --example grumpysh -- --host localhost --no-tls --tenant acme --user admin --password admin
+cargo run -p grumpy-repl -- --host localhost --port 6380 --tenant acme --user alice
+cargo run -p grumpy-repl -- --host localhost --no-tls --tenant acme --user admin --password admin
 ```
 
 ### 15.2 Commands
@@ -782,7 +782,7 @@ help                                       // command reference
 | `filter.rs` | Client-side document matching for `find({ field: value })` |
 | `tcp_backend.rs` | TCP backend: wraps `grumpydb-client` with `tokio::Runtime::block_on()` for synchronous shell |
 
-Relaxed JSON: unquoted keys, single/double quotes, trailing commas. Uses `rustyline` for line editing and persistent history (`~/.grumpysh_history`).
+Relaxed JSON: unquoted keys, single/double quotes, trailing commas. Uses `rustyline` for line editing and persistent history (`~/.grumpy_repl_history`).
 
 ## 16. Server & Client (Multi-Tenant)
 
@@ -1207,19 +1207,19 @@ await client.close();
 
 Zero runtime dependencies — only Node built-ins (`node:net`, `node:tls`, `node:crypto`). Test runner: `vitest` (dev only). Requires Node ≥ 18.
 
-### 19.7 GrumpyShell v2 (`examples/grumpysh`)
+### 19.7 grumpy-repl v2 (`grumpy-repl/`)
 
-Dual-mode REPL — connected (TCP via `grumpydb-client`) by default, embedded (direct disk access) with `--embedded`.
+Dual-mode REPL workspace crate — connected (TCP via `grumpydb-client`) when `--host` is given, embedded (direct disk access) otherwise (or with `--embedded`).
 
 ```bash
 # Embedded
-cargo run --example grumpysh
-cargo run --example grumpysh -- --embedded --data ./mydata
+cargo run -p grumpy-repl
+cargo run -p grumpy-repl -- --embedded --data ./mydata
 
 # Connected (TCP)
-cargo run --example grumpysh -- --host localhost --port 6380 \
+cargo run -p grumpy-repl -- --host localhost --port 6380 \
     --tenant acme --user alice --password s3cr3t
-cargo run --example grumpysh -- --host localhost --no-tls \
+cargo run -p grumpy-repl -- --host localhost --no-tls \
     --tenant _system --user admin --password admin
 ```
 
@@ -1234,7 +1234,7 @@ grumpydb (engine)
 grumpydb-server  ──────► grumpydb-protocol ◄────── grumpydb-client
    │                                                    │
    ▼                                                    ▼
-[binary: tcp listener,                          [embedded in grumpysh
+[binary: tcp listener,                          [embedded in grumpy-repl
  auth store, RBAC,                               connected mode and
  SharedServer]                                   user applications]
 

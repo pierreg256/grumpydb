@@ -1,4 +1,4 @@
-//! TCP backend: translates GrumpyShell commands to the GrumpyDB wire protocol
+//! TCP backend: translates grumpy-repl commands to the GrumpyDB wire protocol
 //! via the `grumpydb-client` driver.
 
 use grumpydb_client::{ClientError, GrumpyClient};

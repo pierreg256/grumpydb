@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-04-28
+
+Minor release: the interactive REPL is promoted from an example to a first-class workspace crate published on crates.io as `grumpy-repl 4.1.0`. No engine API changes. Only `grumpydb` (4.0.0 → 4.1.0) and the new `grumpy-repl` crate are published in this release; `grumpydb-protocol`, `grumpydb-server`, and `grumpydb-client` are unchanged.
+
+### Changed
+- **REPL promoted to first-class workspace crate**: the interactive shell formerly known as `GrumpyShell` (under `examples/grumpysh/`) has been moved to a dedicated workspace member crate `grumpy-repl/` (binary `grumpy-repl`, version 4.1.0). Sources `main.rs`, `repl.rs`, `parser.rs`, `filter.rs`, `json_parser.rs`, `tcp_backend.rs` were moved with `git mv` from `examples/grumpysh/` to `grumpy-repl/src/`.
+- Workspace `Cargo.toml` `members` now lists `grumpy-repl`. Dev-dependencies `rustyline`, `serde_json`, `grumpydb-client`, `grumpydb-protocol`, and `tokio` were removed from the root crate (only used by the old example).
+- CLI display strings, default data directory, and rustyline history file were renamed:
+  - `GrumpyShell` → `grumpy-repl` (printed banners, help text, doc-comments)
+  - `.grumpysh_data` → `.grumpy_repl_data` (default data dir for embedded mode)
+  - `~/.grumpysh_history` → `~/.grumpy_repl_history` (rustyline history)
+  - Usage examples switched from `cargo run --example grumpysh` to `cargo run -p grumpy-repl`
+- `.gitignore` now ignores `.grumpy_repl_data/` (kept `.grumpysh_data/` for backward compatibility).
+- Documentation (`README.md`, `CONTRIBUTING.md`, `docs/ARCHITECTURE.md`, `docs/IMPLEMENTATION_PLAN_V2.md`, `docs/IMPLEMENTATION_PLAN_V3.md`, `grumpydb-client/src/lib.rs`) updated to reflect the new crate name and binary invocation.
+- `grumpydb` bumped 4.0.0 → **4.1.0** (workspace re-shuffle, no engine API change).
+- `grumpy-repl` first publication at **4.1.0** (kept aligned with the root crate version).
+
 ## [4.0.0] - 2026-04-28
 
 Major release: networked multi-tenant server with authentication and RBAC. Closes phases 16–23 of the v3 plan (client interface).

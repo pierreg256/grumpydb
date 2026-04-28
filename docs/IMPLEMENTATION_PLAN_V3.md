@@ -8,7 +8,7 @@ Transform GrumpyDB from an embedded engine into a **networked, secured, multi-te
 
 ```
 ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│  Rust Driver  │    │   TS Driver   │    │  grumpysh v2  │
+│  Rust Driver  │    │   TS Driver   │    │   grumpy-repl  │
 │  grumpydb-    │    │  @grumpydb/   │    │  (TCP client)  │
 │  client       │    │  client       │    │               │
 └──────┬───────┘    └──────┬───────┘    └──────┬───────┘
@@ -431,8 +431,9 @@ grumpydb/                              ← workspace root
 │   ├── server/
 │   └── wal/
 │
+├── grumpy-repl/                       ← Phase 22: REPL promoted to workspace crate (TCP + embedded)
+│
 ├── examples/
-│   ├── grumpysh/                      ← Phase 22: shell becomes TCP client
 │   └── taskman/
 │
 └── docs/
@@ -453,7 +454,7 @@ Phase 18: Session & RBAC          ███████████████�
 Phase 19: TCP Server              ████████████████████  Done     — tokio listener, TLS, handler
 Phase 20: Rust Driver             ████████████████████  Done     — grumpydb-client crate
 Phase 21: TypeScript Driver       ████████████████████  Done     — @grumpydb/client npm package
-Phase 22: GrumpyShell v2          ████████████████████  Done     — dual mode: connected (TCP) + embedded
+Phase 22: grumpy-repl (v2)        ████████████████████  Done     — dual mode: connected (TCP) + embedded; promoted to workspace crate
 Phase 23: Polish & Documentation  ███████████████░░░░░  Partial  — workspace compiles, 444 tests, 0 clippy warnings, docs synced; CI/Docker/e2e formels reportés
 ```
 
@@ -466,7 +467,7 @@ Phase 16 (protocol)
   │             └──→ Phase 19 (TCP server)
   │                    ├──→ Phase 20 (Rust driver)
   │                    ├──→ Phase 21 (TS driver)
-  │                    ├──→ Phase 22 (grumpysh v2)
+  │                    ├──→ Phase 22 (grumpy-repl)
   │                    └──→ Phase 23 (polish)
   ├──→ Phase 20 (Rust driver uses protocol crate)
   └──→ Phase 21 (TS driver re-implements protocol in TypeScript)
@@ -1081,13 +1082,13 @@ await client.close();
 
 ---
 
-## Phase 22: GrumpyShell v2
+## Phase 22: grumpy-repl (formerly GrumpyShell v2)
 
-> **Status: Done** — Dual mode shell: connected (TCP) and embedded (direct disk). E2E tested with LOGIN, USE, CRUD, SCAN, COUNT, collections listing over TCP.
+> **Status: Done** — Dual mode shell: connected (TCP) and embedded (direct disk). E2E tested with LOGIN, USE, CRUD, SCAN, COUNT, collections listing over TCP. Subsequently promoted from `examples/grumpysh/` to the dedicated workspace crate `grumpy-repl/` (binary `grumpy-repl`).
 
 ### Objective
 
-Transform the existing `grumpysh` REPL from an embedded-mode shell into a
+Transform the existing REPL from an embedded-mode shell into a
 TCP client that connects to a running GrumpyDB server. Retains the same
 JavaScript-like syntax.
 
@@ -1098,7 +1099,7 @@ Two modes:
 - **Embedded mode** (`--embedded`): direct access, no network (backward compat)
 
 ```
-$ grumpysh --host localhost --port 6380 --tenant acme --user alice
+$ cargo run -p grumpy-repl -- --host localhost --port 6380 --tenant acme --user alice
 Password: ****
 Connected to GrumpyDB 4.0.0 at localhost:6380 (TLS)
 Authenticated as alice@acme
@@ -1112,7 +1113,7 @@ Inserted: a3b4c5d6-...
 
 ### Tasks
 
-#### 22.1 CLI arguments update (`examples/grumpysh/main.rs`)
+#### 22.1 CLI arguments update (`grumpy-repl/src/main.rs`)
 
 - [x] `--host <host>` — server hostname (default: localhost)
 - [x] `--port <port>` — server port (default: 6380)
@@ -1123,7 +1124,7 @@ Inserted: a3b4c5d6-...
 - [x] `--embedded` — direct embedded mode (existing behavior)
 - [x] `--data <dir>` — data directory (embedded mode only)
 
-#### 22.2 TCP backend (`examples/grumpysh/tcp_backend.rs` + `repl.rs`)
+#### 22.2 TCP backend (`grumpy-repl/src/tcp_backend.rs` + `repl.rs`)
 
 - [x] `TcpBackend` struct wrapping `GrumpyClient` with `tokio::runtime::Runtime::block_on()` for synchronous shell
 - [x] `Repl` struct has `tcp: Option<TcpBackend>` field — routes to `execute_tcp()` or `execute_embedded()` based on mode
@@ -1144,7 +1145,7 @@ Inserted: a3b4c5d6-...
 
 ### Validation criteria Phase 22
 
-- [x] `cargo run --example grumpysh -- --host localhost` connects to server
+- [x] `cargo run -p grumpy-repl -- --host localhost` connects to server
 - [x] All existing shell commands work through TCP (INSERT, GET, DELETE, COUNT, SCAN/find, CREATE COLLECTION, LIST COLLECTIONS)
 - [x] `--embedded` mode preserves backward compatibility
 - [x] Password prompting works (interactive input when not provided via CLI)
@@ -1155,7 +1156,7 @@ Inserted: a3b4c5d6-...
 
 ## Phase 23: Polish & Documentation
 
-> **Status: Partial** — Workspace compiles, clippy passes (0 warnings), 444 tests pass across all crates (296 engine + 70 protocol + 60 server + 12 stress + 4 client + 1 doc + 1 grumpysh integration). Documentation fully synced (README, ARCHITECTURE, CLAUDE, CONTRIBUTING, plans). Formal e2e integration tests, TypeScript driver tests harness, CI pipeline, and Docker image deferred.
+> **Status: Partial** — Workspace compiles, clippy passes (0 warnings), 444 tests pass across all crates (296 engine + 70 protocol + 60 server + 12 stress + 4 client + 1 doc + 1 grumpy-repl integration). Documentation fully synced (README, ARCHITECTURE, CLAUDE, CONTRIBUTING, plans). Formal e2e integration tests, TypeScript driver tests harness, CI pipeline, and Docker image deferred.
 
 ### Objective
 
@@ -1290,7 +1291,7 @@ grumpydb-client (new — library)
 @grumpydb/client (new — npm package)
   └── protocol, connection, auth, client, database, types, errors
 
-examples/grumpysh (updated — now TCP client)
+grumpy-repl (workspace crate — TCP client + embedded)
   └── depends on: grumpydb-client (connected mode) or grumpydb (embedded mode)
 ```
 
@@ -1306,7 +1307,7 @@ examples/grumpysh (updated — now TCP client)
 | 19 | 4.0.0-beta.1 | TCP server functional |
 | 20 | 4.0.0-beta.2 | Rust driver |
 | 21 | 4.0.0-beta.3 | TypeScript driver |
-| 22 | 4.0.0-rc.1 | GrumpyShell v2 |
+| 22 | 4.0.0-rc.1 | grumpy-repl (formerly GrumpyShell v2) |
 | 23 | 4.0.0 | Release |
 
 Phase 16 starts the 4.0.0 cycle — the transition from embedded-only to

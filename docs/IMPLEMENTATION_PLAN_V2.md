@@ -72,7 +72,7 @@ Phase 9:  Generic B+Tree       ████████████████�
 Phase 10: Collection            ████████████████████  Done    — extract from engine
 Phase 11: Secondary Indexes     ████████████████████  Done    — sortable encoding
 Phase 12: Database              ████████████████████  Done    — multi-collection + WAL
-Phase 12b: GrumpyShell          ████████████████████  Done    — interactive JS-like REPL
+Phase 12b: GrumpyShell          ████████████████████  Done    — interactive JS-like REPL (later promoted to `grumpy-repl/` workspace crate)
 Phase 12c: Document References  ████████████████████  Done    — cross-collection refs
 Phase 13: Client & Server       ████████████████████  Done    — multi-tenant
 Phase 14: Concurrency v2        ████████████████████  Done    — per-database SWMR
@@ -476,9 +476,11 @@ for `data.db` files. Index metadata is managed at the Collection level.
 
 ## Phase 12b: GrumpyShell — Interactive REPL
 
+> **Note:** Originally implemented under `examples/grumpysh/`. Subsequently promoted to a first-class workspace crate at `grumpy-repl/` (binary `grumpy-repl`). All paths and commands below have been updated to reflect the current location.
+
 ### Objective
 
-Build an interactive shell (`examples/grumpysh/`) with JavaScript-like syntax
+Build an interactive shell (`grumpy-repl/`) with JavaScript-like syntax
 and JSON documents. This is the primary tool for **exploring, debugging, and
 demonstrating** GrumpyDB features interactively.
 
@@ -595,21 +597,21 @@ json_value    := json_object | json_array | STRING | NUMBER | BOOL | NULL
 
 ### Tasks
 
-#### 12b.1 JSON parser (`examples/grumpysh/json_parser.rs`)
+#### 12b.1 JSON parser (`grumpy-repl/src/json_parser.rs`)
 
 - [x] Parse relaxed JSON (unquoted keys, single quotes, trailing commas)
 - [x] Convert to `grumpydb::Value`
 - [x] Pretty-print `Value` as JSON with indentation via `to_json_string()`
 - [x] Tests: parse objects, arrays, nested, numbers, strings, booleans, null, edge cases (11 tests)
 
-#### 12b.2 Command parser (`examples/grumpysh/parser.rs`)
+#### 12b.2 Command parser (`grumpy-repl/src/parser.rs`)
 
 - [x] Tokenizer: identifiers, strings, numbers, punctuation
 - [x] Parse `use`, `db.method()`, `db.collection.method()`, `help`, `exit`, `clear`
 - [x] `Command` enum representing all possible operations
 - [x] Error messages for invalid syntax
 
-#### 12b.3 REPL engine (`examples/grumpysh/repl.rs`)
+#### 12b.3 REPL engine (`grumpy-repl/src/repl.rs`)
 
 - [x] Read-eval-print loop with `rustyline` (line editing, history)
 - [x] State: current database path, open `Database` handle
@@ -617,17 +619,17 @@ json_value    := json_object | json_array | STRING | NUMBER | BOOL | NULL
 - [x] Execute `Command` → call appropriate `Database` / `Collection` method
 - [x] Format results as pretty JSON
 - [x] Error handling: display errors, don't crash
-- [x] History file: `~/.grumpysh_history`
+- [x] History file: `~/.grumpy_repl_history`
 
-#### 12b.4 CLI entry point (`examples/grumpysh/main.rs`)
+#### 12b.4 CLI entry point (`grumpy-repl/src/main.rs`)
 
-- [x] `cargo run --example grumpysh` → launch REPL
-- [x] `cargo run --example grumpysh -- --data ./mydata` → custom data directory
-- [x] `cargo run --example grumpysh -- --eval "use test; db.users.count()"` → one-shot execution
+- [x] `cargo run -p grumpy-repl` → launch REPL
+- [x] `cargo run -p grumpy-repl -- --data ./mydata` → custom data directory
+- [x] `cargo run -p grumpy-repl -- --eval "use test; db.users.count()"` → one-shot execution
 - [x] `--help` flag for usage information
 - [x] Module docs with usage examples
 
-#### 12b.5 Filter matching (`examples/grumpysh/filter.rs`)
+#### 12b.5 Filter matching (`grumpy-repl/src/filter.rs`)
 
 - [x] `matches_filter(doc: &Value, filter: &Value) → bool` — client-side document matching
 - [x] Equality match: `{ age: 30 }` → doc.age == 30
@@ -642,7 +644,7 @@ json_value    := json_object | json_array | STRING | NUMBER | BOOL | NULL
 
 ### Validation criteria Phase 12b
 
-- [x] `cargo run --example grumpysh` launches a working REPL
+- [x] `cargo run -p grumpy-repl` launches a working REPL
 - [x] Can create collections, insert/query/delete JSON documents
 - [x] `find({ field: value })` filtering works
 - [x] Secondary index create/query/drop works
@@ -696,7 +698,7 @@ impl Database {
 `resolve_deep` uses a `HashSet<(String, Uuid)>` visited set to detect
 cycles and returns `GrumpyError::CyclicReference` if one is found.
 
-#### GrumpyShell syntax
+#### grumpy-repl syntax
 
 ```js
 // Insert a document with a reference
@@ -740,13 +742,13 @@ db.orders.resolveDeep("order-uuid", 5)    // recursive (max 5 levels)
 - [x] New error: `GrumpyError::CyclicReference`
 - [x] Tests: resolve simple ref, resolve nested refs, cycle detection, missing target (4 tests)
 
-#### 12c.5 GrumpyShell: JSON parser update (`examples/grumpysh/json_parser.rs`)
+#### 12c.5 grumpy-repl: JSON parser update (`grumpy-repl/src/json_parser.rs`)
 
 - [x] Parse `$ref("collection", "uuid")` syntax → `Value::Ref(collection, uuid)`
 - [x] Pretty-print `Ref` as `$ref("collection", "uuid")`
 - [x] Tests: parse $ref, round-trip display
 
-#### 12c.6 GrumpyShell: parser + REPL update (`examples/grumpysh/parser.rs`, `repl.rs`)
+#### 12c.6 grumpy-repl: parser + REPL update (`grumpy-repl/src/parser.rs`, `repl.rs`)
 
 - [x] New commands: `Resolve(collection, id)`, `ResolveDeep(collection, id, Option<usize>)`
 - [x] Parse `db.<coll>.resolve("id")` and `db.<coll>.resolveDeep("id"[, depth])`
@@ -759,7 +761,7 @@ db.orders.resolveDeep("order-uuid", 5)    // recursive (max 5 levels)
 - [x] `resolve_ref` follows a reference to the target document
 - [x] `resolve_deep` recursively resolves nested refs (depth-limited)
 - [x] Cyclic references detected and reported as error
-- [x] GrumpyShell: `$ref()` syntax works in insert, display, and resolve commands
+- [x] grumpy-repl: `$ref()` syntax works in insert, display, and resolve commands
 - [x] All existing tests pass (regression)
 - [x] `cargo clippy -- -D warnings` passes
 - [x] 266 unit tests, 0 clippy warnings
@@ -946,7 +948,7 @@ error (no deps)
                             → engine (database)                               ← REFACTORED (compat)
                               → lib.rs (exports all)
 
-examples/grumpysh/                                                             ← NEW: REPL
+grumpy-repl/                                                                   ← NEW: REPL workspace crate (originally examples/grumpysh/)
   main.rs → repl.rs → parser.rs + json_parser.rs + filter.rs
   depends on: grumpydb (Database, Collection, Value)
   extra dep: rustyline (line editing + history)
@@ -961,7 +963,7 @@ examples/grumpysh/                                                             �
 | 9 | 1.1.0 | Generic B+Tree |
 | 10 | 1.2.0 | Collection extracted |
 | 11 | 1.3.0 | Secondary indexes |
-| 12 | 2.0.0 | Database (multi-collection) — **breaking** || 12b | 2.0.1 | GrumpyShell REPL || 13 | 2.1.0 | Client & Server |
+| 12 | 2.0.0 | Database (multi-collection) — **breaking** || 12b | 2.0.1 | grumpy-repl (formerly GrumpyShell) REPL || 13 | 2.1.0 | Client & Server |
 | 14 | 2.2.0 | Concurrency v2 |
 | 15 | 3.0.0 | Polish & Migration |
 

@@ -18,7 +18,7 @@ cargo doc --workspace --no-deps     # Generate docs
 
 # Run a specific binary
 cargo run -p grumpydb-server -- --no-tls --data ./data
-cargo run --example grumpysh
+cargo run -p grumpy-repl
 cargo run --example taskman -- help
 
 # TypeScript driver (drivers/typescript/)
@@ -60,11 +60,13 @@ grumpydb/                       # workspace root
 ├── grumpydb-client/            # Async Rust client driver
 │   └── src/{lib,connection,error}.rs
 │
+├── grumpy-repl/                # Interactive REPL binary (dual-mode: embedded + TCP)
+│   └── src/{main,repl,parser,filter,json_parser,tcp_backend}.rs
+│
 ├── drivers/typescript/         # @grumpydb/client npm package (Node ≥ 18)
 │   └── src/{index,client,database,connection,protocol,auth,types,errors}.ts
 │
 ├── examples/
-│   ├── grumpysh/               # Dual-mode REPL (embedded + TCP)
 │   └── taskman/                # Demo task manager (embedded engine)
 │
 ├── tests/                      # Integration tests (engine + concurrency)
@@ -133,8 +135,8 @@ Use `tempfile::TempDir` for any test involving disk I/O.
 | `parking_lot` | Fast RwLock/Mutex for SWMR concurrency |
 | `tempfile` | Temporary directories for tests |
 | `rand` | Random data generation for tests |
-| `rustyline` | Line editing for GrumpyShell REPL (dev) |
-| `serde_json` | JSON serialization for GrumpyShell (dev) |
+| `rustyline` | Line editing for grumpy-repl (binary crate) |
+| `serde_json` | JSON serialization for grumpy-repl (binary crate) |
 
 ### Workspace crates
 
@@ -144,3 +146,4 @@ Use `tempfile::TempDir` for any test involving disk I/O.
 | `grumpydb-protocol` | RESP-like wire protocol (commands, responses, parser) |
 | `grumpydb-server` | TCP+TLS server binary (tokio, JWT auth, RBAC) |
 | `grumpydb-client` | Async Rust client driver |
+| `grumpy-repl` | Interactive REPL shell binary (embedded + TCP) |

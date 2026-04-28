@@ -121,7 +121,7 @@ impl GrumpyClient {
     }
 
     /// Execute a raw protocol command and return the response.
-    /// Used by grumpysh TCP backend for direct command forwarding.
+    /// Used by the `grumpy-repl` TCP backend for direct command forwarding.
     pub async fn raw_execute(&mut self, cmd: &str) -> Result<Response, ClientError> {
         self.conn.execute(cmd).await
     }

@@ -1,0 +1,25 @@
+[package]
+name = "grumpy-repl"
+version = "4.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Interactive REPL shell for GrumpyDB (embedded + TCP modes)"
+license = "MIT"
+repository = "https://github.com/pierreg256/grumpydb"
+homepage = "https://github.com/pierreg256/grumpydb"
+readme = "README.md"
+keywords = ["database", "repl", "shell", "grumpydb", "cli"]
+categories = ["command-line-utilities", "database"]
+
+[[bin]]
+name = "grumpy-repl"
+path = "src/main.rs"
+
+[dependencies]
+grumpydb = { path = "..", version = "4.1" }
+grumpydb-client = { path = "../grumpydb-client", version = "1" }
+grumpydb-protocol = { path = "../grumpydb-protocol", version = "1" }
+uuid = { version = "1", features = ["v4", "serde"] }
+rustyline = "15"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }

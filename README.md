@@ -15,7 +15,7 @@ GrumpyDB stores schema-less JSON-like documents on disk with B+Tree indexing, pa
 ### Embedded — no server needed
 
 ```bash
-cargo run --example grumpysh
+cargo run -p grumpy-repl
 ```
 
 ```js
@@ -55,7 +55,7 @@ cargo build -p grumpydb-server
 target/debug/grumpydb-server --data ./data --no-tls
 
 # Terminal 2: Connect with the shell
-cargo run --example grumpysh -- \
+cargo run -p grumpy-repl -- \
   --host localhost --port 6380 \
   --tenant _system --user admin --password admin
 ```
@@ -141,18 +141,18 @@ let count = db.document_count("users").unwrap();
 
 ---
 
-## GrumpyShell
+## grumpy-repl
 
 An interactive REPL with JavaScript-like syntax, relaxed JSON (unquoted keys, single quotes, trailing commas), and line editing with history.
 
 ```bash
 # Embedded (no server)
-cargo run --example grumpysh
-cargo run --example grumpysh -- --data ./mydata
-cargo run --example grumpysh -- --eval "use test; db.users.count()"
+cargo run -p grumpy-repl
+cargo run -p grumpy-repl -- --data ./mydata
+cargo run -p grumpy-repl -- --eval "use test; db.users.count()"
 
 # Connected (TCP)
-cargo run --example grumpysh -- --host localhost --tenant acme --user alice --password s3cr3t
+cargo run -p grumpy-repl -- --host localhost --tenant acme --user alice --password s3cr3t
 ```
 
 ### Commands
@@ -173,7 +173,7 @@ cargo run --example grumpysh -- --host localhost --tenant acme --user alice --pa
 ### Architecture
 
 ```
-Clients (grumpysh, Rust driver, TypeScript driver, nc/telnet)
+Clients (grumpy-repl, Rust driver, TypeScript driver, nc/telnet)
     │
     │  TCP + TLS 1.3 (rustls)
     │  RESP-like text protocol

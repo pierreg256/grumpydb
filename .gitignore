@@ -18,3 +18,4 @@ Thumbs.db
 
 # Test Data Files
 .grumpysh_data/
+.grumpy_repl_data/

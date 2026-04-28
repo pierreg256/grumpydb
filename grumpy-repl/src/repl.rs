@@ -1,4 +1,4 @@
-//! REPL engine: read-eval-print loop for GrumpyShell.
+//! REPL engine: read-eval-print loop for grumpy-repl.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -463,7 +463,7 @@ fn resolve_one_level(db: &mut Database, value: &Value) -> grumpydb::Result<Value
 
 fn help_text(topic: Option<&str>) -> String {
     match topic {
-        None => r#"GrumpyShell — Interactive GrumpyDB REPL
+        None => r#"grumpy-repl — Interactive GrumpyDB REPL
 
 DATABASE:
   use <name>                            Open/create a database

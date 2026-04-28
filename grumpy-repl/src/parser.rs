@@ -1,10 +1,10 @@
-//! Command parser: tokenizes and parses GrumpyShell commands.
+//! Command parser: tokenizes and parses grumpy-repl commands.
 
 use grumpydb::Value;
 
 use super::json_parser::parse_json;
 
-/// A parsed GrumpyShell command.
+/// A parsed grumpy-repl command.
 #[derive(Debug)]
 pub enum Command {
     /// `use <database>`
