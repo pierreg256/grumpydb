@@ -5,5 +5,8 @@
 
 pub mod auth;
 pub mod config;
+pub mod http;
+pub mod limits;
 pub mod session;
+pub mod snapshot;
 pub mod tcp;

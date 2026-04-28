@@ -89,17 +89,18 @@ Add GrumpyDB to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-grumpydb = "3.1"
+grumpydb = "4"
 ```
 
 ### Single-collection (simple key-value)
 
 ```rust
-use grumpydb::{GrumpyDb, Value};
+use grumpydb::{Database, Value};
 use uuid::Uuid;
 use std::collections::BTreeMap;
 
-let mut db = GrumpyDb::open(std::path::Path::new("./mydb")).unwrap();
+let mut db = Database::open(std::path::Path::new("./mydb")).unwrap();
+db.create_collection("docs").unwrap();
 
 let key = Uuid::new_v4();
 let doc = Value::Object(BTreeMap::from([
@@ -107,11 +108,15 @@ let doc = Value::Object(BTreeMap::from([
     ("age".into(), Value::Integer(30)),
 ]));
 
-db.insert(key, doc).unwrap();
-let result = db.get(&key).unwrap();
+db.insert("docs", key, doc).unwrap();
+let result = db.get("docs", &key).unwrap();
 assert!(result.is_some());
 db.close().unwrap();
 ```
+
+> **Note**: the legacy `GrumpyDb` single-collection wrapper is **deprecated in
+> v5** and will be removed in v6. New code should use `Database` (with the
+> `_default` collection if a single collection is enough).
 
 ### Multi-collection with secondary indexes
 
@@ -294,6 +299,36 @@ LIST USERS @acme
 | `read_write` | INSERT, GET, UPDATE, DELETE, SCAN, QUERY |
 | `read_only` | GET, SCAN, QUERY |
 
+### HTTP endpoints (observability)
+
+The server runs a small HTTP server on a separate port (default
+`0.0.0.0:6381`) for orchestrators and Prometheus. **No authentication**
+on these endpoints by design — they are meant for k8s probes and
+metrics scraping. Set `bind = ""` in the `[http]` section of the config
+to disable the HTTP server entirely.
+
+```bash
+# Liveness — process is up
+curl -s http://localhost:6381/healthz
+# (200 OK)
+
+# Readiness — TCP listener has bound
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:6381/readyz
+# 200 (or 503 during early startup)
+
+# Prometheus metrics
+curl -s http://localhost:6381/metrics | head -20
+```
+
+Initial metric catalog (every series is described up-front):
+`grumpydb_connections_active`, `grumpydb_commands_total{cmd,result}`,
+`grumpydb_command_duration_seconds{cmd}`,
+`grumpydb_login_failures_total{reason}`,
+`grumpydb_rate_limit_hits_total{kind}`, plus
+`grumpydb_buffer_pool_pages{state}` and `grumpydb_wal_records_total`
+(described in v5, will start moving once the engine grows the
+corresponding hooks).
+
 ---
 
 ## Client Drivers
@@ -364,7 +399,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full technical details.
 
 ```bash
 cargo build --workspace          # Build everything
-cargo test --workspace           # Run all tests (~445)
+cargo test --workspace           # Run all tests (~515)
 cargo clippy --workspace -- -D warnings  # Lint
 cargo doc --workspace --no-deps  # Generate docs
 ```
@@ -380,6 +415,77 @@ The `examples/taskman/` directory is a complete task manager CLI demonstrating e
 ```bash
 cargo run --example taskman -- help
 ```
+
+---
+
+## Running with Docker
+
+A `docker compose` stack ships server + Prometheus + Grafana for local
+development. **Demo only — not production.**
+
+```bash
+# Set the bootstrap password for the first-start admin user
+cp .env.example .env
+# (edit .env and pick a strong password)
+
+# Server only
+docker compose up -d server
+docker compose logs -f server
+
+# Connect with the REPL (uses --profile repl so it's opt-in)
+docker compose run --rm repl --host server --tenant _system --user admin \
+  --password "$(grep ^GRUMPYDB_BOOTSTRAP_PASSWORD .env | cut -d= -f2-)"
+
+# Full stack with Prometheus (:9090) + Grafana (:3000, admin/admin)
+docker compose up -d
+```
+
+Multi-arch builds via `docker buildx`:
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t grumpydb-server:dev -f Dockerfile.server .
+```
+
+The `server` container also exposes the observability HTTP server on
+port 6381 — `/healthz`, `/readyz`, `/metrics`. Prometheus is
+pre-configured to scrape it (see `docker/prometheus.yml`); Grafana
+ships with the Prometheus datasource provisioned (login `admin`/`admin`
+on first run).
+
+## Backup & Restore
+
+The `grumpydb-server` binary ships `snapshot` and `restore`
+subcommands that produce/consume a single `tar.gz` archive (with a
+checksummed `snapshot.json` manifest at the root). Local destinations
+are always available; cloud destinations are gated by Cargo features.
+
+```bash
+# Local (no extra features required)
+cargo run -p grumpydb-server -- snapshot --data ./data ./backup.tar.gz
+cargo run -p grumpydb-server -- restore  --data ./data ./backup.tar.gz
+# Restore refuses to overwrite a non-empty data dir without --force:
+cargo run -p grumpydb-server -- restore  --data ./data ./backup.tar.gz --force
+
+# AWS S3 (requires --features cloud-aws; uses the standard AWS credential chain)
+cargo run -p grumpydb-server --features cloud-aws -- \
+    snapshot --data ./data s3://my-bucket/grumpydb/2026-04-28.tar.gz
+cargo run -p grumpydb-server --features cloud-aws -- \
+    restore  --data ./data s3://my-bucket/grumpydb/2026-04-28.tar.gz
+
+# Azure Blob (requires --features cloud-azure; uses DefaultAzureCredential
+# or AZURE_STORAGE_CONNECTION_STRING)
+cargo run -p grumpydb-server --features cloud-azure -- \
+    snapshot --data ./data az://my-container/grumpydb/2026-04-28.tar.gz
+cargo run -p grumpydb-server --features cloud-azure -- \
+    restore  --data ./data az://my-container/grumpydb/2026-04-28.tar.gz --force
+```
+
+> **v5 semantics**: `snapshot` holds the database write lock for the
+> duration of the file copy (writers block, readers continue). MVCC in
+> v6 will offer point-in-time consistency without blocking writers.
+> Restore verifies every file's SHA-256 against the manifest and aborts
+> on mismatch.
 
 ## Performance
 

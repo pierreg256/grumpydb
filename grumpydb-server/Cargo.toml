@@ -30,6 +30,42 @@ parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 futures = "0.3"
+governor = "0.6"
+nonzero_ext = "0.3"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["http1", "tokio", "server", "service"] }
+http-body-util = "0.1"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
+tar = "0.4"
+flate2 = "1"
+sha2 = "0.10"
+hex = "0.4"
+
+# Optional cloud SDKs (gated by features below).
+aws-config = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+aws-sdk-s3 = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+azure_core = { version = "0.21", optional = true }
+azure_identity = { version = "0.21", optional = true }
+azure_storage = { version = "0.21", optional = true }
+azure_storage_blobs = { version = "0.21", optional = true }
+tokio-util = { version = "0.7", optional = true, features = ["io"] }
+
+[features]
+default = []
+cloud-aws = ["dep:aws-config", "dep:aws-sdk-s3", "dep:tokio-util"]
+cloud-azure = [
+    "dep:azure_core",
+    "dep:azure_identity",
+    "dep:azure_storage",
+    "dep:azure_storage_blobs",
+    "dep:tokio-util",
+]
 
 [dev-dependencies]
 tempfile = "3"
+grumpydb-client = { path = "../grumpydb-client" }
+grumpydb-testing = { path = "../grumpydb-testing" }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }

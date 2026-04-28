@@ -203,3 +203,80 @@ async fn test_e2e_role_enforcement() {
         other => panic!("expected error response for read_only INSERT, got: {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn test_e2e_login_rate_limited() {
+    // Configure a low failed-login threshold so the test runs quickly.
+    // Disable the loopback bypass so the limiter actually fires when the
+    // test client connects from `127.0.0.1`.
+    let cfg_dir = tempfile::TempDir::new().unwrap();
+    let cfg_path = cfg_dir.path().join("grumpydb.toml");
+    std::fs::write(
+        &cfg_path,
+        r#"
+[limits]
+failed_logins_per_min_per_ip = 3
+bypass_loopback = false
+"#,
+    )
+    .unwrap();
+    let cfg_str = cfg_path.to_str().unwrap();
+    let server = TestServer::spawn_with_extra_args(&["--config", cfg_str]).await;
+
+    let mut client = GrumpyClient::connect("127.0.0.1", server.addr.port(), false)
+        .await
+        .expect("connect");
+
+    let mut invalid_credentials = 0;
+    let mut rate_limited = 0;
+    let mut other_errors: Vec<String> = Vec::new();
+    let mut transitioned_to_rate_limit = false;
+
+    for _ in 0..10 {
+        let resp = client
+            .raw_execute(&format!(
+                "LOGIN {} {} wrong-password",
+                server.admin_tenant, server.admin_user
+            ))
+            .await
+            .expect("login attempt");
+        match resp {
+            Response::Error(msg) => {
+                let lower = msg.to_lowercase();
+                if lower.contains("rate limited") || lower.contains("retry after") {
+                    rate_limited += 1;
+                    transitioned_to_rate_limit = true;
+                } else if lower.contains("invalid credentials") {
+                    invalid_credentials += 1;
+                } else {
+                    other_errors.push(msg);
+                }
+            }
+            other => panic!("unexpected non-error login response: {other:?}"),
+        }
+    }
+
+    assert!(
+        other_errors.is_empty(),
+        "unexpected error responses: {other_errors:?}"
+    );
+    // The first three failed logins must come back as plain "invalid
+    // credentials" — they are below the threshold of 3 and so must not be
+    // pre-empted by the rate limiter.
+    assert!(
+        invalid_credentials >= 3,
+        "expected at least 3 invalid-credentials before any backoff, got {invalid_credentials}"
+    );
+    // Once we cross the threshold the backoff must kick in for AT LEAST one
+    // attempt. (Backoff doubles per failure past threshold, capped at 60s,
+    // so even a slow runner can't drain the entire window.)
+    assert!(
+        transitioned_to_rate_limit && rate_limited >= 1,
+        "expected at least one rate-limited response, got invalid={invalid_credentials} rate_limited={rate_limited}"
+    );
+    assert_eq!(
+        invalid_credentials + rate_limited,
+        10,
+        "all 10 responses must be accounted for"
+    );
+}

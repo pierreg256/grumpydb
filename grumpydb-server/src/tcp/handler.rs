@@ -1,6 +1,7 @@
 //! Per-connection handler: read commands, authorize, execute, respond.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -14,21 +15,26 @@ use grumpydb_protocol::{Command, MAX_LINE_LENGTH, PROTOCOL_VERSION, Response, pa
 
 use crate::auth::role::{ResourceScope, RoleAssignment, RoleName};
 use crate::auth::store::AuthStore;
+use crate::limits::Limits;
 use crate::session::SessionContext;
 
 /// Handle a single client connection (plaintext or TLS).
 pub async fn handle_connection<S>(
     stream: S,
+    peer: SocketAddr,
     auth_store: Arc<parking_lot::RwLock<AuthStore>>,
     shared_server: SharedServer,
+    limits: Arc<Limits>,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
 {
+    let peer_ip = peer.ip();
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     let mut session = SessionContext::new();
     let mut consecutive_errors: u32 = 0;
+    let mut consecutive_rate_limits: u32 = 0;
 
     // Send banner
     let banner = format!("+GRUMPYDB {PROTOCOL_VERSION}\r\n");
@@ -43,6 +49,25 @@ where
         if bytes_read == 0 {
             break; // EOF
         }
+
+        // Per-IP command rate limit. Token-bucket refill is continuous, so a
+        // bursty-but-bounded client stays well under the cap.
+        if !limits.try_take_command(peer_ip) {
+            tracing::warn!(peer = %peer, "command rate-limited");
+            metrics::counter!(
+                "grumpydb_rate_limit_hits_total",
+                "kind" => "command"
+            )
+            .increment(1);
+            write_resp(&mut writer, &Response::Error("rate limited".into())).await?;
+            consecutive_rate_limits += 1;
+            if consecutive_rate_limits > 10 {
+                tracing::warn!(peer = %peer, "closing: too many consecutive rate-limit hits");
+                break;
+            }
+            continue;
+        }
+        consecutive_rate_limits = 0;
 
         if line.len() > MAX_LINE_LENGTH {
             write_resp(&mut writer, &Response::Error("line too long".into())).await?;
@@ -89,6 +114,34 @@ where
             continue;
         }
 
+        // Per-IP failed-login backoff: if this IP has been flooded with bad
+        // logins, refuse all LOGIN attempts until the cooldown elapses.
+        if matches!(command, Command::Login { .. })
+            && let Some(retry_after) = limits.login_backoff(peer_ip)
+        {
+            tracing::warn!(
+                peer = %peer,
+                retry_after_secs = retry_after.as_secs(),
+                "login rate-limited (failed-login backoff)"
+            );
+            metrics::counter!(
+                "grumpydb_login_failures_total",
+                "reason" => "rate_limited"
+            )
+            .increment(1);
+            metrics::counter!(
+                "grumpydb_rate_limit_hits_total",
+                "kind" => "login"
+            )
+            .increment(1);
+            let msg = format!(
+                "rate limited (login: retry after {}s)",
+                retry_after.as_secs().max(1)
+            );
+            write_resp(&mut writer, &Response::Error(msg)).await?;
+            continue;
+        }
+
         // Authorize
         if let Err(e) = session.authorize(&command) {
             tracing::warn!(error = %e, "authorization denied");
@@ -113,12 +166,47 @@ where
             Response::Error(format!("internal error (corruption): {msg}"))
         });
         let elapsed_us = started.elapsed().as_micros() as u64;
+        let elapsed_secs = started.elapsed().as_secs_f64();
+        let result_label = match &response {
+            Response::Error(_) => "error",
+            _ => "ok",
+        };
+        metrics::counter!(
+            "grumpydb_commands_total",
+            "cmd" => cmd_name,
+            "result" => result_label
+        )
+        .increment(1);
+        metrics::histogram!(
+            "grumpydb_command_duration_seconds",
+            "cmd" => cmd_name
+        )
+        .record(elapsed_secs);
         match &response {
             Response::Error(e) => {
                 tracing::warn!(elapsed_us, error = %e, "command failed");
             }
             _ => tracing::debug!(elapsed_us, "command ok"),
         }
+
+        // Track LOGIN outcomes for the failed-login backoff. We treat any
+        // `Response::Error` here as a credential failure — wrong password,
+        // unknown user, hash error all collapse to the same generic error
+        // by design (anti-enumeration).
+        if matches!(command, Command::Login { .. }) {
+            match &response {
+                Response::Error(_) => {
+                    metrics::counter!(
+                        "grumpydb_login_failures_total",
+                        "reason" => "invalid_credentials"
+                    )
+                    .increment(1);
+                    limits.record_failed_login(peer_ip);
+                }
+                _ => limits.record_successful_login(peer_ip),
+            }
+        }
+
         write_resp(&mut writer, &response).await?;
     }
 

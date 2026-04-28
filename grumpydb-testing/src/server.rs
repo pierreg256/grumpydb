@@ -18,6 +18,9 @@ use tokio::time::{Instant, sleep};
 pub struct TestServer {
     /// Address the server is listening on (`127.0.0.1:<port>`).
     pub addr: SocketAddr,
+    /// Address of the observability HTTP server
+    /// (`/healthz`, `/readyz`, `/metrics`).
+    pub http_addr: SocketAddr,
     /// Temporary data directory used by the server.
     pub data_dir: PathBuf,
     /// Bootstrap admin tenant (always `_system`).
@@ -45,7 +48,9 @@ impl TestServer {
         let tmp = TempDir::new().expect("create tempdir");
         let data_dir = tmp.path().to_path_buf();
         let port = pick_free_port();
+        let http_port = pick_free_port();
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let http_addr: SocketAddr = format!("127.0.0.1:{http_port}").parse().unwrap();
         let admin_password = random_password(32);
         let bin = locate_server_binary();
 
@@ -55,6 +60,8 @@ impl TestServer {
             .arg("--no-tls")
             .arg("--bind")
             .arg(addr.to_string())
+            .arg("--http-bind")
+            .arg(http_addr.to_string())
             .arg("--bootstrap-password")
             .arg(&admin_password)
             .arg("--log-format")
@@ -74,6 +81,7 @@ impl TestServer {
 
         let server = Self {
             addr,
+            http_addr,
             data_dir,
             admin_tenant: "_system",
             admin_user: "admin",
@@ -115,6 +123,8 @@ impl TestServer {
             .arg("--no-tls")
             .arg("--bind")
             .arg(self.addr.to_string())
+            .arg("--http-bind")
+            .arg(self.http_addr.to_string())
             .arg("--log-format")
             .arg("text")
             .stdout(Stdio::null())

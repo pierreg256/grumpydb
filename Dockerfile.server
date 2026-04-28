@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1.7
+# Multi-stage Dockerfile for GrumpyDB server.
+# For multi-arch builds:
+#   docker buildx build --platform linux/amd64,linux/arm64 -t grumpydb-server:dev -f Dockerfile.server .
+# For single-arch:
+#   docker build -t grumpydb-server:dev -f Dockerfile.server .
+
+# Stage 1: Builder
+FROM rust:1.88-bookworm AS builder
+
+WORKDIR /workspace
+
+# Copy the workspace. We deliberately copy by member rather than a single
+# `COPY . .` so .dockerignore exclusions stay tight.
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY grumpydb-server ./grumpydb-server
+COPY grumpydb-client ./grumpydb-client
+COPY grumpydb-protocol ./grumpydb-protocol
+COPY grumpydb-testing ./grumpydb-testing
+COPY grumpy-repl ./grumpy-repl
+
+# Build with cache mounts for faster rebuilds. BuildKit is required.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/workspace/target \
+    cargo build --release --bin grumpydb-server -p grumpydb-server \
+    && cp /workspace/target/release/grumpydb-server /usr/local/bin/grumpydb-server
+
+# Stage 2: Distroless runtime (~30 MB, ships only libc + the binary)
+FROM gcr.io/distroless/cc-debian12:nonroot
+
+WORKDIR /data
+COPY --from=builder /usr/local/bin/grumpydb-server /usr/local/bin/grumpydb-server
+
+EXPOSE 6380 6381
+VOLUME ["/data"]
+
+ENTRYPOINT ["/usr/local/bin/grumpydb-server"]
+CMD ["--data", "/data", "--no-tls", "--bind", "0.0.0.0:6380", "--log-format", "json"]

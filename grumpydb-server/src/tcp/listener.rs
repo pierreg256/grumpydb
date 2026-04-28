@@ -2,8 +2,9 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::{Instrument, info_span};
@@ -12,6 +13,8 @@ use grumpydb::SharedServer;
 
 use crate::auth::store::AuthStore;
 use crate::config::ServerConfig;
+use crate::http::HttpState;
+use crate::limits::{AcquireConnError, Limits, LimitsConfig};
 use crate::tcp::handler::handle_connection;
 
 /// Start the TCP server and listen for connections.
@@ -19,10 +22,21 @@ pub async fn listen(
     config: &ServerConfig,
     auth_store: Arc<parking_lot::RwLock<AuthStore>>,
     shared_server: SharedServer,
+    http_state: Arc<HttpState>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(&config.server.bind).await?;
-    let connection_count = Arc::new(AtomicUsize::new(0));
-    let max_connections = config.server.max_connections;
+
+    // Per-IP rate limits and connection caps.
+    let mut limits_cfg: LimitsConfig = (&config.limits).into();
+    // Honour the legacy `[server].max_connections` as an upper bound on the
+    // global connection cap, so existing deployments aren't suddenly held
+    // back by a higher new default.
+    if config.server.max_connections > 0 {
+        limits_cfg.max_conns_global = limits_cfg
+            .max_conns_global
+            .min(config.server.max_connections);
+    }
+    let limits = Arc::new(Limits::new(limits_cfg));
 
     let tls_acceptor = if config.tls.enabled {
         Some(build_tls_acceptor(config)?)
@@ -33,38 +47,57 @@ pub async fn listen(
     tracing::info!(
         bind = %config.server.bind,
         tls = config.tls.enabled,
-        max_connections,
+        max_conns_global = limits.config().max_conns_global,
+        max_conns_per_ip = limits.config().max_conns_per_ip,
+        commands_per_sec_per_ip = limits.config().commands_per_sec_per_ip,
         "GrumpyDB server listening on {} (TLS: {})",
         config.server.bind,
         config.tls.enabled
     );
 
+    // Signal HTTP `/readyz` that we are now accepting connections.
+    http_state.ready.store(true, Ordering::Release);
+
     loop {
         tokio::select! {
             accept_result = listener.accept() => {
-                let (tcp_stream, addr) = accept_result?;
+                let (mut tcp_stream, addr) = accept_result?;
 
-                if connection_count.load(Ordering::Relaxed) >= max_connections {
-                    tracing::warn!(peer = %addr, "connection limit reached, rejecting");
-                    let _ = tcp_stream.try_write(b"-ERR server busy\r\n");
+                if let Err(reason) = limits.try_acquire_conn_with_reason(addr.ip()) {
+                    tracing::warn!(peer = %addr, ?reason, "rate limited (too many connections)");
+                    let kind = match reason {
+                        AcquireConnError::Global => "conn_global",
+                        AcquireConnError::PerIp => "conn_per_ip",
+                    };
+                    metrics::counter!(
+                        "grumpydb_rate_limit_hits_total",
+                        "kind" => kind
+                    )
+                    .increment(1);
+                    let _ = tcp_stream
+                        .write_all(b"-ERR rate limited (too many connections from your IP)\r\n")
+                        .await;
+                    let _ = tcp_stream.shutdown().await;
                     continue;
                 }
 
-                let count = connection_count.clone();
+                metrics::gauge!("grumpydb_connections_active").increment(1.0);
+
                 let auth = auth_store.clone();
                 let server = shared_server.clone();
                 let acceptor = tls_acceptor.clone();
+                let limits_for_conn = limits.clone();
+                let peer_ip = addr.ip();
 
                 let span = info_span!("connection", peer = %addr, tls = acceptor.is_some());
 
                 tokio::spawn(async move {
-                    count.fetch_add(1, Ordering::Relaxed);
-                    tracing::debug!(active = count.load(Ordering::Relaxed), "connection accepted");
+                    tracing::debug!("connection accepted");
 
                     let result = if let Some(acceptor) = acceptor {
                         match acceptor.accept(tcp_stream).await {
                             Ok(tls_stream) => {
-                                handle_connection(tls_stream, auth, server).await
+                                handle_connection(tls_stream, addr, auth, server, limits_for_conn.clone()).await
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "TLS handshake failed");
@@ -72,13 +105,14 @@ pub async fn listen(
                             }
                         }
                     } else {
-                        handle_connection(tcp_stream, auth, server).await
+                        handle_connection(tcp_stream, addr, auth, server, limits_for_conn.clone()).await
                     };
 
                     if let Err(e) = result {
                         tracing::debug!(error = %e, "connection error");
                     }
-                    count.fetch_sub(1, Ordering::Relaxed);
+                    limits_for_conn.release_conn(peer_ip);
+                    metrics::gauge!("grumpydb_connections_active").decrement(1.0);
                     tracing::debug!("connection closed");
                 }.instrument(span));
             }

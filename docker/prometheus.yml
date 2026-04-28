@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: grumpydb
+    static_configs:
+      - targets: ["server:6381"]
+    metrics_path: /metrics
+    # NOTE: This scrape will fail until Phase 36 (HTTP metrics endpoint) lands.
+    # Expected error: "connection refused" on port 6381. Once Phase 36 is
+    # implemented, metrics will appear at http://localhost:9090.

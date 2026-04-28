@@ -1,4 +1,4 @@
-//! Secondary index: maps field values to document UUIDs via a VarBTree.
+//! Secondary index: maps field values to document UUIDs via a `BTree<Vec<u8>>`.
 //!
 //! A secondary index stores composite keys `(encoded_field_value, uuid)` in a
 //! variable-key B+Tree. This enables fast exact-match lookups and range queries
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
-use crate::btree::var_tree::VarBTree;
+use crate::btree::BTree;
 use crate::document::value::Value;
 use crate::error::Result;
 
@@ -29,12 +29,12 @@ pub struct IndexDefinition {
     pub field_path: String,
 }
 
-/// A secondary index backed by a VarBTree.
+/// A secondary index backed by a `BTree<Vec<u8>>`.
 pub struct SecondaryIndex {
     /// Index definition.
     pub def: IndexDefinition,
     /// The underlying variable-key B+Tree.
-    btree: VarBTree,
+    btree: BTree<Vec<u8>>,
     /// Path to the .idx file.
     path: PathBuf,
 }
@@ -43,7 +43,7 @@ impl SecondaryIndex {
     /// Creates a new secondary index.
     pub fn create(dir: &Path, def: IndexDefinition) -> Result<Self> {
         let idx_path = dir.join(format!("idx_{}.idx", def.name));
-        let btree = VarBTree::create(&idx_path, INDEX_MAX_KEY_SIZE)?;
+        let btree = BTree::<Vec<u8>>::create_with(&idx_path, INDEX_MAX_KEY_SIZE)?;
         Ok(Self {
             def,
             btree,
@@ -54,7 +54,7 @@ impl SecondaryIndex {
     /// Opens an existing secondary index.
     pub fn open(dir: &Path, def: IndexDefinition) -> Result<Self> {
         let idx_path = dir.join(format!("idx_{}.idx", def.name));
-        let btree = VarBTree::open(&idx_path)?;
+        let btree = BTree::<Vec<u8>>::open(&idx_path)?;
         Ok(Self {
             def,
             btree,
@@ -135,7 +135,7 @@ impl SecondaryIndex {
         let def = self.def.clone();
         // Remove old file
         let _ = std::fs::remove_file(&self.path);
-        self.btree = VarBTree::create(&self.path, INDEX_MAX_KEY_SIZE)?;
+        self.btree = BTree::<Vec<u8>>::create_with(&self.path, INDEX_MAX_KEY_SIZE)?;
         self.def = def;
 
         for (uuid, doc) in docs {

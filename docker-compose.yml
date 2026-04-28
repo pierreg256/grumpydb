@@ -1,0 +1,69 @@
+# Docker Compose for GrumpyDB local development.
+#
+# ⚠️  THIS IS FOR DEMO / LOCAL DEVELOPMENT ONLY — NOT FOR PRODUCTION.
+#
+# Quick start:
+#   cp .env.example .env
+#   # edit .env to set GRUMPYDB_BOOTSTRAP_PASSWORD
+#   docker compose up -d server
+#   docker compose run --rm repl --host server --tenant _system \
+#     --user admin --password "$GRUMPYDB_BOOTSTRAP_PASSWORD"
+#
+# Note: Prometheus + Grafana scraping will fail until Phase 36 of the v5 plan
+# (HTTP /healthz, /readyz, /metrics endpoints) is implemented. The healthcheck
+# below is intentionally tolerant via `start_period: 60s`.
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: grumpydb-server:dev
+    restart: unless-stopped
+    ports:
+      - "6380:6380"
+      - "6381:6381"
+    volumes:
+      - grumpydb-data:/data
+    environment:
+      GRUMPYDB_BOOTSTRAP_PASSWORD: "${GRUMPYDB_BOOTSTRAP_PASSWORD:?Set GRUMPYDB_BOOTSTRAP_PASSWORD in .env}"
+    healthcheck:
+      # Will fail until Phase 36 implements /healthz on port 6381.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:6381/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+
+  repl:
+    build:
+      context: .
+      dockerfile: Dockerfile.repl
+    image: grumpydb-repl:dev
+    profiles: ["repl"]
+    network_mode: service:server
+    tty: true
+    stdin_open: true
+
+volumes:
+  grumpydb-data: {}

@@ -6,11 +6,12 @@
 //! # Example
 //!
 //! ```no_run
-//! use grumpydb::{GrumpyDb, Value};
+//! use grumpydb::{Database, Value};
 //! use uuid::Uuid;
 //! use std::collections::BTreeMap;
 //!
-//! let mut db = GrumpyDb::open(std::path::Path::new("./my_database")).unwrap();
+//! let mut db = Database::open(std::path::Path::new("./my_database")).unwrap();
+//! db.create_collection("docs").unwrap();
 //!
 //! let key = Uuid::new_v4();
 //! let value = Value::Object(BTreeMap::from([
@@ -18,9 +19,9 @@
 //!     ("version".into(), Value::Integer(1)),
 //! ]));
 //!
-//! db.insert(key, value).unwrap();
+//! db.insert("docs", key, value).unwrap();
 //!
-//! let doc = db.get(&key).unwrap();
+//! let doc = db.get("docs", &key).unwrap();
 //! assert!(doc.is_some());
 //! db.close().unwrap();
 //! ```
@@ -46,11 +47,18 @@ pub mod page;
 pub mod server;
 pub mod wal;
 
+// Concurrency primitives. `SharedDb` is the SWMR wrapper for the deprecated
+// `GrumpyDb`; prefer `SharedDatabase` (multi-collection) for new code.
+#[allow(deprecated)]
 pub use concurrency::lock_manager::SharedDb;
 pub use concurrency::shared::{SharedDatabase, SharedServer};
 pub use database::Database;
 pub use document::value::Value;
-pub use engine::{CompactResult, GrumpyDb};
+pub use engine::CompactResult;
+// `GrumpyDb` is deprecated in v5 and removed in v6 — kept here for the
+// deprecation cycle. New code should use `Database`.
+#[allow(deprecated)]
+pub use engine::GrumpyDb;
 pub use error::{GrumpyError, Result};
 pub use index::IndexDefinition;
 pub use server::GrumpyServer;

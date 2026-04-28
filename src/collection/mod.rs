@@ -53,7 +53,7 @@ pub struct Collection {
     /// Buffer pool wrapping the data page manager (LRU cache).
     pub(crate) data_pool: BufferPool,
     /// Primary B+Tree index: UUID → (PageId, SlotId).
-    pub(crate) btree: BTree,
+    pub(crate) btree: BTree<Uuid>,
     /// Page ID of the current data page being filled.
     current_data_page: u32,
     /// Secondary indexes.
@@ -76,9 +76,9 @@ impl Collection {
         let mut data_pm = PageManager::new(&data_path)?;
 
         let btree = if index_exists {
-            BTree::open(&index_path)?
+            BTree::<Uuid>::open(&index_path)?
         } else {
-            BTree::create(&index_path)?
+            BTree::<Uuid>::create(&index_path)?
         };
 
         let current_data_page = if data_exists {

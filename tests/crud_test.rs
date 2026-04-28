@@ -1,4 +1,10 @@
 //! Integration tests for GrumpyDB CRUD operations.
+//!
+//! These tests target the legacy `GrumpyDb` single-collection wrapper which
+//! is deprecated in v5 and removed in v6 — `Database` is the new API. The
+//! file-level `#![allow(deprecated)]` keeps the tests compiling under
+//! `-D warnings` until v6.
+#![allow(deprecated)]
 
 use grumpydb::{GrumpyDb, GrumpyError, Value};
 use std::collections::BTreeMap;

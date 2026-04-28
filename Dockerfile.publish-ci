@@ -1,0 +1,14 @@
+# syntax=docker/dockerfile:1.7
+# Minimal image for `cargo publish` from a clean CI environment.
+# Used by .github/workflows/release.yml (which does not yet exist — placeholder
+# scaffolding for the v5 release pipeline).
+
+FROM rust:1.88-bookworm
+
+WORKDIR /workspace
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates pkg-config libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+ENTRYPOINT ["/bin/bash"]

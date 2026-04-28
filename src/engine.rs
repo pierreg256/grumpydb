@@ -3,6 +3,14 @@
 //! `GrumpyDb` is a thin wrapper over a single [`Collection`] with WAL logging.
 //! All data page access goes through the collection's buffer pool
 //! ([`crate::buffer::pool::BufferPool`]).
+//!
+//! **DEPRECATED in v5:** the type [`GrumpyDb`] is kept for one major-version
+//! cycle and will be removed in v6. New code should use
+//! [`crate::Database`] (with the `_default` collection if a single-collection
+//! store is sufficient). All internal references in this module are wrapped
+//! with `#[allow(deprecated)]` to keep the deprecation warning visible to
+//! downstream consumers without spamming our own builds.
+#![allow(deprecated)]
 
 use std::path::Path;
 use uuid::Uuid;
@@ -35,6 +43,11 @@ const DEFAULT_POOL_CAPACITY: usize = 256;
 /// assert_eq!(db.get(&key).unwrap(), Some(Value::String("hello".into())));
 /// db.close().unwrap();
 /// ```
+#[deprecated(
+    since = "5.0.0",
+    note = "use `Database` (with the `_default` collection if you only need a \
+            single-collection store). `GrumpyDb` will be removed in v6."
+)]
 pub struct GrumpyDb {
     /// The underlying collection (data pages + primary index).
     collection: Collection,

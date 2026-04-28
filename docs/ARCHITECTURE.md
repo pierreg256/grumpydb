@@ -5,7 +5,7 @@
 GrumpyDB is an embedded storage engine (library crate) that persists schema-less documents on disk with:
 - **Page-based storage** of 8 KiB in `data.db`
 - **B+Tree index** in `primary.idx` for O(log n) access by UUID
-- **Secondary indexes** on document fields via VarBTree (`idx_*.idx`)
+- **Secondary indexes** on document fields via `BTree<Vec<u8>>` (`idx_*.idx`)
 - **Collection** abstraction encapsulating data pages + primary index + secondary indexes
 - **Database** layer managing multiple collections with shared WAL
 - **Server** layer for multi-tenant isolation (Client & Server)
@@ -140,9 +140,31 @@ Descent via `find_child()`: linear scan, first entry whose key > search_key → 
 - **Merge**: when a node falls below 40% occupancy, merge with a sibling
 - **Redistribution**: if the sibling has enough entries, redistribute instead of merging
 
-### 3.6 Variable-Key B+Tree (VarBTree)
+### 3.6 Variable-Key B+Tree (`BTree<Vec<u8>>`)
 
-A parallel B+Tree implementation supporting variable-length byte keys (up to 256 bytes), used for secondary indexes.
+**v5 (Phase 33)**: the fixed-key and variable-key B+Trees are now a
+single generic implementation parameterised by a `Key` trait. The
+variable-key flavour used by secondary indexes is `BTree<Vec<u8>>`; the
+primary-key flavour is `BTree<Uuid>`. The on-disk format is unchanged
+from v4 — existing databases continue to work.
+
+```rust
+pub trait Key: Ord + Clone {
+    fn encoded_len(&self) -> u16;
+    fn encode_to(&self, buf: &mut [u8]);
+    fn decode_from(buf: &[u8]) -> Result<Self>;
+    /// `Some(N)` for fixed-width keys (e.g. `Uuid` → `Some(16)`),
+    /// `None` for variable-width keys (e.g. `Vec<u8>`).
+    const FIXED_LEN: Option<u16>;
+}
+```
+
+The pre-v5 type alias `VarBTree` has been removed. Downstream code should
+use `BTree<Vec<u8>>` directly — `VarBTree` was never re-exported at the
+crate root, so this is not a semver break for external consumers.
+
+The variable-key flavour supports keys up to 256 bytes and is used by
+secondary indexes.
 
 #### Properties
 
@@ -421,6 +443,13 @@ impl Collection {
 
 `GrumpyDb` is a thin wrapper over a single `Collection` + `WalWriter`.
 
+> **Deprecated in v5 (Phase 34)**: `GrumpyDb` and its `SharedDb` SWMR
+> wrapper are annotated
+> `#[deprecated(since = "5.0.0", note = "use Database with the _default collection")]`
+> and will be **removed in v6**. New code should use `Database` (with the
+> `_default` collection if a single collection is enough). The type and
+> its methods are documented here for the deprecation cycle.
+
 ```rust
 pub struct GrumpyDb {
     collection: Collection,
@@ -655,7 +684,7 @@ pub struct IndexDefinition {
 
 pub struct SecondaryIndex {
     pub def: IndexDefinition,
-    btree: VarBTree,         // variable-key B+Tree (max key size: 160 bytes)
+    btree: BTree<Vec<u8>>,   // variable-key B+Tree (max key size: 160 bytes)
     path: PathBuf,
 }
 ```
@@ -1428,3 +1457,234 @@ cd fuzz && cargo +nightly fuzz run parse_command
   `--quick` run of all benches; not a regression gate).
 - **`.github/workflows/fuzz.yml`** — weekly schedule + manual dispatch,
   runs each fuzz target for 5 minutes by default.
+
+
+## 22. Rate Limiting (v5 P2)
+
+The `grumpydb-server` enforces three layers of rate limiting at the
+network edge to make brute-force impractical without breaking
+legitimate clients. The implementation lives in
+`grumpydb-server/src/limits.rs` and is configured by the new `[limits]`
+section of the server TOML config (`LimitsSection` → `LimitsConfig`).
+
+### 22.1 Per-IP token bucket (commands)
+Built on `governor 0.6` + `nonzero_ext 0.3`. Each remote IP has its
+own `RateLimiter` instance:
+- `commands_per_sec_per_ip` (default **100**) — sustained rate.
+- `commands_burst_per_ip` (default **200**) — burst capacity.
+
+A blocked command is responded to with a `RateLimited` error and
+counted under `grumpydb_rate_limit_hits_total{kind="command"}`.
+
+### 22.2 Per-IP failed-login back-off
+After `failed_logins_per_min_per_ip` (default **5**) bad logins from
+the same IP within a one-minute window, subsequent attempts from that
+IP are delayed with exponential back-off: **1 s, 2 s, 4 s, 8 s, 16 s,
+32 s, capped at 60 s**. The state is held in a `parking_lot::Mutex`
+keyed by IP. Hits are counted under
+`grumpydb_login_failures_total{reason}` and
+`grumpydb_rate_limit_hits_total{kind="login"}`.
+
+### 22.3 Connection caps
+Enforced inside `tcp/listener.rs` at accept time:
+- `max_conns_per_ip` (default **100**) — per-IP simultaneous accepts.
+- `max_conns_global` (default **10 000**) — across the entire process.
+
+Refused connections are dropped immediately and counted; healthy peers
+keep their existing connections.
+
+### 22.4 Loopback bypass
+The `bypass_loopback` flag (default **`true`**) exempts loopback
+addresses (`127.0.0.0/8`, `::1`) from all three limiters. This keeps
+the development experience and the in-process integration tests fast.
+
+> **Production note**: deployments that expose loopback to untrusted
+> callers (for example shared-host/PaaS scenarios) must set
+> `bypass_loopback = false`. The integration test
+> `test_e2e_login_rate_limited` in `tests/server_auth.rs` exercises the
+> non-bypassed path end-to-end.
+
+### 22.5 Defaults summary
+
+```toml
+[limits]
+commands_per_sec_per_ip       = 100
+commands_burst_per_ip         = 200
+failed_logins_per_min_per_ip  = 5
+max_conns_per_ip              = 100
+max_conns_global              = 10_000
+bypass_loopback               = true
+```
+
+
+## 23. Observability HTTP Endpoints (v5 P2)
+
+The `grumpydb-server` runs a tiny `hyper 1.x` HTTP server on a separate
+port (default `0.0.0.0:6381`, configurable via the `[http]` section).
+This server is dedicated to operator/monitoring traffic — it is **not**
+the database protocol, which keeps running on its TCP/TLS port.
+
+### 23.1 Endpoints
+
+| Method + path | Status | Body |
+|---------------|--------|------|
+| `GET /healthz` | `200 OK` | Process is alive (the HTTP server itself is up). Used as a Docker `HEALTHCHECK`. |
+| `GET /readyz`  | `200 OK` once the TCP listener has bound, else `503 Service Unavailable`. | Suitable for k8s readiness probes. |
+| `GET /metrics` | `200 OK` with `Content-Type: text/plain; version=0.0.4` | Prometheus exposition format. |
+| anything else  | `404 Not Found` | — |
+
+`HttpState::ready` is an `AtomicBool` flipped (`Release`) by the TCP
+listener once `TcpListener::bind` succeeds. `/readyz` reads it with
+`Acquire`.
+
+### 23.2 Metric catalog (initial set)
+
+Every series is **DESCRIBED** at process start in
+`http::init_metrics()` so a fresh `/metrics` call lists every series
+even before the first event:
+
+| Metric | Type | Wired in | Notes |
+|--------|------|----------|-------|
+| `grumpydb_connections_active` | gauge | `tcp/listener.rs` (accept/release) | — |
+| `grumpydb_commands_total{cmd,result}` | counter | `tcp/handler.rs` around `execute_command` | — |
+| `grumpydb_command_duration_seconds{cmd}` | histogram | same site | seconds |
+| `grumpydb_buffer_pool_pages{state}` | gauge | **described only** in v5 | TODO: hook into the engine's buffer pool |
+| `grumpydb_wal_records_total` | counter | **described only** in v5 | TODO: hook into the WAL writer |
+| `grumpydb_login_failures_total{reason}` | counter | login back-off path | — |
+| `grumpydb_rate_limit_hits_total{kind}` | counter | command + login limiters | `kind` ∈ `{"command","login","conn_per_ip","conn_global"}` |
+
+The two engine-side metrics still emit zero — they will start moving
+once the engine grows the corresponding hooks. They are listed
+up-front so dashboards can be built today and stop showing "no data".
+
+### 23.3 Configuration
+
+```toml
+[http]
+bind = "0.0.0.0:6381"   # empty string disables the HTTP server entirely
+```
+
+### 23.4 No authentication, by design
+
+The HTTP endpoints have **no authentication** in v5. The reasoning:
+- `/healthz` and `/readyz` must be reachable by orchestrators
+  (Kubernetes probes, Docker healthcheck) before any user exists.
+- `/metrics` is consumed by Prometheus, which has no shared secret with
+  the server.
+
+This matches the standard practice for sidecar observability ports.
+TODO logged for **v6**: consider opt-in basic-auth or IP allowlisting
+for `/metrics`.
+
+### 23.5 Test harness integration
+
+`grumpydb-testing::TestServer` exposes the HTTP listener address as
+`http_addr: SocketAddr`. End-to-end coverage lives in
+`tests/server_http.rs` (`test_e2e_health_endpoints` and friends).
+
+
+## 24. Backup & Restore (v5 P2)
+
+The `grumpydb-server` binary ships two new subcommands for taking and
+restoring full database snapshots. The implementation lives in
+`grumpydb-server/src/snapshot.rs` and is reachable via the URL-scheme
+dispatcher `Location::parse(&str)`.
+
+### 24.1 CLI
+
+```bash
+grumpydb-server snapshot --data <dir> <DEST>
+grumpydb-server restore  --data <dir> <SRC> [--force]
+```
+
+`<DEST>` and `<SRC>` are URLs:
+
+| Scheme | Backend | Cargo feature |
+|--------|---------|---------------|
+| `<path>` (no scheme) | Local filesystem | always available |
+| `s3://bucket/key` | AWS S3 (`aws-sdk-s3 1.x`) | `cloud-aws` |
+| `az://container/blob` | Azure Blob (`azure_storage_blobs 0.21`) | `cloud-azure` |
+
+Cloud backends are gated by their feature flag — building without them
+keeps the binary lean and free of AWS/Azure SDK transitive deps.
+
+### 24.2 Cloud authentication
+
+Credentials never appear on the command line — only the URL does:
+
+- **AWS**: standard credential chain (env, shared profile, EC2/ECS
+  instance role) via `aws-config`.
+- **Azure**: `DefaultAzureCredential` chain (env, managed identity, CLI
+  login) via `azure_identity`. Falls back to a connection string read
+  from `AZURE_STORAGE_CONNECTION_STRING` when explicitly set.
+
+### 24.3 Archive format
+
+A snapshot is a **gzipped tar archive** containing every relevant file
+under the data directory, plus a manifest at the archive root:
+
+```
+backup.tar.gz
+├── snapshot.json               (= MANIFEST_FILENAME)
+├── _auth/secret.key
+├── _auth/users.dat
+├── <tenant>/<database>/wal.log
+└── <tenant>/<database>/<collection>/{data.db, primary.idx, idx_*.idx}
+```
+
+`snapshot.json` (`MANIFEST_VERSION = 1`):
+
+```json
+{
+  "version": 1,
+  "created_at": "<RFC3339 UTC>",
+  "grumpydb_version": "<crate version at snapshot time>",
+  "files": [
+    { "path": "<relative path>", "size": <bytes>, "sha256": "<hex>" },
+    ...
+  ]
+}
+```
+
+Restore verifies every file's SHA-256 against the manifest and aborts
+with a `ChecksumMismatch` error on the first discrepancy.
+
+### 24.4 Online snapshot semantics (v5)
+
+`snapshot::snapshot()` holds the **`SharedDatabase` write lock** for
+the entire archive copy. Writers block for the duration; readers
+continue normally. This is the simplest correct semantics on top of the
+current SWMR model.
+
+> v6 will introduce MVCC read snapshots (Phase 41), at which point
+> `snapshot()` will be able to take a point-in-time consistent view
+> without blocking writers.
+
+### 24.5 Restore safety
+
+`restore` refuses to write into a non-empty data directory unless
+`--force` is passed. This is a guard against accidentally clobbering a
+live deployment.
+
+### 24.6 Build matrix
+
+The four feature combinations are exercised in CI and locally:
+
+```bash
+cargo build --workspace
+cargo build --workspace --features grumpydb-server/cloud-aws
+cargo build --workspace --features grumpydb-server/cloud-azure
+cargo build --workspace --features grumpydb-server/cloud-aws,grumpydb-server/cloud-azure
+```
+
+All four also pass `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### 24.7 Testing
+
+- **9 unit tests** in `grumpydb-server/src/snapshot.rs` — manifest
+  round-trip, checksum mismatch detection, URL parsing, etc.
+- **`tests/snapshot_e2e.rs`** — full snapshot → wipe → restore
+  round-trip via `TestServer`, asserts that all data is identical.
+- **`tests/snapshot_aws.rs`** and **`tests/snapshot_azure.rs`** —
+  cloud round-trips, marked `#[ignore]` (require live cloud
+  credentials; opt-in with `cargo test -- --ignored`).

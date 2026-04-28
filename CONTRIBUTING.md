@@ -9,12 +9,17 @@
 
 ```bash
 cargo build --workspace             # Build all crates
-cargo test --workspace              # All tests (~486 across all workspace crates)
+cargo test --workspace              # All tests (~515 across all workspace crates)
 cargo test --lib                    # Unit tests only (current crate)
 cargo test --test '*'               # Integration tests only
 cargo clippy --workspace --all-targets -- -D warnings  # Lint (strict, zero warnings)
 cargo fmt --all -- --check          # Check formatting
 cargo doc --workspace --no-deps     # Generate docs
+
+# Optional cloud SDK feature flags (used by snapshot/restore — see below).
+cargo build --workspace --features grumpydb-server/cloud-aws
+cargo build --workspace --features grumpydb-server/cloud-azure
+cargo build --workspace --features grumpydb-server/cloud-aws,grumpydb-server/cloud-azure
 
 # Benchmarks (criterion). HTML reports land under target/criterion/report/.
 cargo bench                         # All benches: engine + protocol
@@ -39,6 +44,25 @@ cargo run -p grumpydb-server -- --no-tls --data ./data \
 # RUST_LOG is honored, e.g. RUST_LOG=grumpydb_server=debug.
 cargo run -p grumpy-repl
 cargo run --example taskman -- help
+
+# Snapshot / restore subcommands (Phase 38). Local destination always
+# available; s3:// requires the cloud-aws feature, az:// requires
+# cloud-azure. The server must be stopped (snapshot/restore operate on
+# files directly in v5).
+cargo run -p grumpydb-server -- snapshot --data ./data ./backup.tar.gz
+cargo run -p grumpydb-server -- restore  --data ./data ./backup.tar.gz
+cargo run -p grumpydb-server --features cloud-aws -- \
+    snapshot --data ./data s3://my-bucket/grumpydb/2026-04-28.tar.gz
+cargo run -p grumpydb-server --features cloud-azure -- \
+    restore  --data ./data az://my-container/grumpydb/2026-04-28.tar.gz --force
+
+# Docker stack (Phase 37): server + Prometheus + Grafana.
+# Requires GRUMPYDB_BOOTSTRAP_PASSWORD set in .env (copy from .env.example).
+docker compose up -d                           # full stack
+docker compose up -d server                    # server only
+docker compose --profile repl run --rm repl \
+    --host server --tenant _system --user admin \
+    --password "$(grep ^GRUMPYDB_BOOTSTRAP_PASSWORD .env | cut -d= -f2-)"
 
 # TypeScript driver (drivers/typescript/)
 cd drivers/typescript && npm install && npm test && npm run build
@@ -74,6 +98,9 @@ grumpydb/                       # workspace root
 ├── grumpydb-server/            # TCP/TLS server binary + library
 │   └── src/
 │       ├── lib.rs main.rs config.rs
+│       ├── limits.rs                       # governor token bucket + login backoff + conn caps
+│       ├── http.rs                         # /healthz /readyz /metrics (hyper 1.x, port 6381)
+│       ├── snapshot.rs                     # tar.gz snapshot/restore (local + s3:// + az://)
 │       ├── auth/{user,role,jwt,store}.rs   # argon2, JWT HS256, AuthStore
 │       ├── session/mod.rs                  # SessionContext + RBAC enforcer
 │       └── tcp/{listener,handler}.rs       # tokio + tokio-rustls
@@ -116,8 +143,20 @@ grumpydb/                       # workspace root
 │   ├── stress_test.rs          # Concurrency stress
 │   ├── server_e2e.rs           # TCP end-to-end (8 tests, uses TestServer)
 │   ├── server_concurrency.rs   # 50 concurrent clients × 100 ops
-│   ├── server_auth.rs          # Expired/tampered tokens, role enforcement
+│   ├── server_auth.rs          # Expired/tampered tokens, role enforcement, login rate limit
+│   ├── server_http.rs          # /healthz /readyz /metrics e2e (Phase 36)
+│   ├── snapshot_e2e.rs         # snapshot → restore round-trip via TestServer (Phase 38)
 │   └── crash_recovery.rs       # 6 crash-and-restart scenarios
+│
+├── Dockerfile.server           # Multi-stage: rust:1.88 builder → distroless runtime (~30 MB)
+├── Dockerfile.repl             # Same builder, ships grumpy-repl
+├── Dockerfile.publish-ci       # CI bash image used for crates.io publication
+├── docker-compose.yml          # server + prometheus + grafana + repl (profile-gated)
+├── docker/
+│   ├── prometheus.yml                              # scrape config for server:6381
+│   └── grafana/provisioning/datasources/prometheus.yml
+├── .env.example                # GRUMPYDB_BOOTSTRAP_PASSWORD template
+├── .dockerignore               # Excludes target/, docs/, examples/, fixtures/...
 │
 └── docs/
     ├── ARCHITECTURE.md
@@ -197,6 +236,21 @@ Every push to `master` and every PR is validated by GitHub Actions
 | `futures` | `FutureExt::catch_unwind` for panic isolation in `grumpydb-server` |
 | `tracing` | Structured logging spans + events in `grumpydb-server` |
 | `tracing-subscriber` (`env-filter`, `json`) | JSON log subscriber, `RUST_LOG` env-filter |
+| `governor` | Token-bucket rate limiter (per-IP) in `grumpydb-server::limits` |
+| `nonzero_ext` | `nonzero!` macro feeding `governor`'s `NonZeroU32` quotas |
+| `hyper` (1.x) | Tiny HTTP server for `/healthz`, `/readyz`, `/metrics` (port 6381) |
+| `hyper-util` | `TokioExecutor` glue for `hyper 1.x` server runtime |
+| `metrics` | Counter / gauge / histogram facade used throughout `grumpydb-server` |
+| `metrics-exporter-prometheus` | Prometheus exposition format renderer for `/metrics` |
+| `tar` | Tar archive read/write for snapshot/restore tooling |
+| `flate2` | Gzip codec wrapping the tar streams |
+| `sha2` | SHA-256 per-file checksums in `snapshot.json` |
+| `hex` | Hex encoding of the SHA-256 digests in the manifest |
+| `aws-sdk-s3` *(optional, feature `cloud-aws`)* | S3 backend for snapshot/restore |
+| `aws-config` *(optional, feature `cloud-aws`)* | Standard AWS credential chain |
+| `azure_storage` *(optional, feature `cloud-azure`)* | Azure Blob storage core types |
+| `azure_storage_blobs` *(optional, feature `cloud-azure`)* | Azure Blob backend for snapshot/restore |
+| `azure_identity` *(optional, feature `cloud-azure`)* | `DefaultAzureCredential` chain |
 
 ### Workspace crates
 

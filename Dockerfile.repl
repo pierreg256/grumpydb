@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1.7
+# Dockerfile for the grumpy-repl interactive shell.
+# Usage:
+#   docker compose run --rm repl --host server --tenant _system --user admin --password <pw>
+
+FROM rust:1.88-bookworm AS builder
+
+WORKDIR /workspace
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY grumpy-repl ./grumpy-repl
+COPY grumpydb-client ./grumpydb-client
+COPY grumpydb-protocol ./grumpydb-protocol
+COPY grumpydb-testing ./grumpydb-testing
+COPY grumpydb-server ./grumpydb-server
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/workspace/target \
+    cargo build --release --bin grumpy-repl -p grumpy-repl \
+    && cp /workspace/target/release/grumpy-repl /usr/local/bin/grumpy-repl
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+
+COPY --from=builder /usr/local/bin/grumpy-repl /usr/local/bin/grumpy-repl
+
+ENTRYPOINT ["/usr/local/bin/grumpy-repl"]

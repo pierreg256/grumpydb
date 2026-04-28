@@ -3,6 +3,12 @@
 //! Wraps a `GrumpyDb` in an `Arc<RwLock>` to allow safe concurrent access
 //! from multiple threads. Readers get shared access (non-blocking between
 //! each other), writers get exclusive access.
+//!
+//! **DEPRECATED in v5:** [`SharedDb`] wraps the deprecated [`GrumpyDb`].
+//! Use [`crate::SharedDatabase`] instead. The internal `#[allow(deprecated)]`
+//! suppresses our own build noise; downstream consumers still see the
+//! deprecation warning when they import [`SharedDb`].
+#![allow(deprecated)]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -46,6 +52,11 @@ use crate::error::Result;
 /// let value = db.get(&key).unwrap();
 /// assert!(value.is_some());
 /// ```
+#[deprecated(
+    since = "5.0.0",
+    note = "use `SharedDatabase` instead. `SharedDb` will be removed in v6 \
+            together with the underlying `GrumpyDb` wrapper."
+)]
 #[derive(Clone)]
 pub struct SharedDb {
     inner: Arc<RwLock<GrumpyDb>>,

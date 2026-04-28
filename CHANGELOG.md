@@ -172,6 +172,159 @@ This unreleased section tracks Stream O of the v5 plan
 - `cargo fmt --all -- --check` clean
 - All 4 fuzz targets build and run cleanly (no crashes after 20 s of each).
 
+### v5 stream — Architecture (P2)
+
+This unreleased subsection tracks Stream A of the v5 plan
+([docs/IMPLEMENTATION_PLAN_V4.md](docs/IMPLEMENTATION_PLAN_V4.md)). Phases
+33–38 are landed in `master` but no version bump or crates.io publication yet.
+
+#### Phase 33 — Unify B+Tree on a generic `Key` trait
+- New `btree::Key` trait in `src/btree/key.rs` with `encoded_len`,
+  `encode_to`, `decode_from`, and the associated constant
+  `FIXED_LEN: Option<u16>`. Implementations for `Uuid`
+  (`FIXED_LEN = Some(16)`) and `Vec<u8>` (`FIXED_LEN = None`).
+- Single generic `BTreeNode<K>`, `BTree<K>`, `BTreeCursor<K>` replace
+  the previous duplicated pairs (`node.rs`+`var_node.rs`,
+  `ops.rs`+`var_ops.rs`, `cursor.rs`+`var_cursor.rs`).
+- Files **deleted**: `src/btree/var_node.rs`, `src/btree/var_ops.rs`,
+  `src/btree/var_cursor.rs`, `src/btree/var_tree.rs`.
+- LoC reduction: `src/btree/` went from ~3 500 to 2 581 lines (**−26 %**).
+- **On-disk format unchanged** — existing databases keep working
+  (verified by the crash-recovery integration tests).
+- Public API change: `VarBTree` no longer exists; its replacement is
+  `BTree<Vec<u8>>`. It was never re-exported at the crate root, so no
+  semver impact for downstream users.
+
+#### Phase 34 — Deprecate `GrumpyDb` wrapper
+- `GrumpyDb` and `SharedDb` are now annotated
+  `#[deprecated(since = "5.0.0", note = "use Database with the _default collection")]`
+  — kept for one major-version cycle, scheduled for removal in v6.
+- Internal usage sites (the impls themselves, the `pub use` in
+  `src/lib.rs`, `tests/crud_test.rs`, the engine's own concurrency
+  wrapper) are silenced via `#[allow(deprecated)]` so we don't spam our
+  own builds. **Downstream consumers still see the deprecation warning**
+  when they import the type.
+- README "Single-collection (simple key-value)" example was rewritten to
+  use `Database` instead of `GrumpyDb`. A note documents the deprecation
+  and the v6 removal.
+- Doc-comment example in `src/lib.rs` switched to `Database`.
+
+#### Phase 35 — Rate limiting & connection caps
+- New `grumpydb-server/src/limits.rs` module with `Limits` and
+  `LimitsConfig`. Uses `governor 0.6` + `nonzero_ext 0.3`.
+- New `[limits]` TOML section in the server config with serde defaults
+  for: `commands_per_sec_per_ip` (100), `commands_burst_per_ip` (200),
+  `failed_logins_per_min_per_ip` (5), `max_conns_per_ip` (100),
+  `max_conns_global` (10 000), and **`bypass_loopback` (default `true`)**.
+- Per-IP token bucket for commands; per-IP exponential back-off for
+  failed logins (1 s, 2 s, 4 s, 8 s, 16 s, 32 s, capped at 60 s); per-IP
+  and global connection caps enforced at accept time.
+- **Loopback bypass is on by default** — production deployments that
+  expose loopback to untrusted callers should set
+  `bypass_loopback = false`.
+- Wired into `tcp/listener.rs` (connection accept) and
+  `tcp/handler.rs` (command rate limit + login back-off).
+- New integration test `test_e2e_login_rate_limited` in
+  `tests/server_auth.rs` (uses `bypass_loopback = false`).
+
+#### Phase 36 — HTTP endpoints (`/healthz`, `/readyz`, `/metrics`)
+- New `grumpydb-server/src/http.rs` module — a tiny `hyper 1.x` server
+  on a separate port (default `0.0.0.0:6381`).
+- Endpoints:
+  - `GET /healthz` → `200` (process alive).
+  - `GET /readyz` → `200` once the TCP listener has bound, else `503`.
+  - `GET /metrics` → Prometheus exposition format
+    (`text/plain; version=0.0.4`).
+  - Anything else → `404`.
+- Metrics catalog (initial set, all DESCRIBED in `init_metrics`):
+  - `grumpydb_connections_active` (gauge) — wired in listener
+    accept/release.
+  - `grumpydb_commands_total{cmd,result}` (counter) — wired in handler
+    around `execute_command`.
+  - `grumpydb_command_duration_seconds{cmd}` (histogram) — same site.
+  - `grumpydb_buffer_pool_pages{state}` (gauge) — DESCRIBED, value
+    stays at `0` until a future engine-side hook lands.
+  - `grumpydb_wal_records_total` (counter) — same status.
+  - `grumpydb_login_failures_total{reason}` (counter) — wired.
+  - `grumpydb_rate_limit_hits_total{kind}` (counter) — wired.
+- New `[http]` section in server config with `bind` field — empty string
+  disables the HTTP server entirely.
+- `grumpydb-testing/src/server.rs` `TestServer` extended with
+  `http_addr: SocketAddr`.
+- New integration test file `tests/server_http.rs`
+  (`test_e2e_health_endpoints` and friends).
+- **No authentication on the HTTP endpoints in v5 by design** (so
+  Prometheus and k8s probes can scrape without bootstrap). TODO logged
+  for v6 to consider basic-auth or IP allowlisting.
+
+#### Phase 37 — Docker + docker-compose
+- New files at the repo root: `Dockerfile.server` (multi-stage with
+  `rust:1.88-bookworm` builder + distroless `cc-debian12:nonroot`
+  runtime, ~30 MB), `Dockerfile.repl`, `Dockerfile.publish-ci` (CI bash
+  image used to publish to crates.io).
+- New `docker-compose.yml` with services `server` (healthcheck on
+  `/healthz`, now functional thanks to Phase 36),
+  `prometheus` (`prom/prometheus:v3.1.0`), `grafana`
+  (`grafana/grafana:11.4.0`), and `repl` (profile-gated via
+  `--profile repl`).
+- `docker/prometheus.yml` (scrape config for `server:6381`),
+  `docker/grafana/provisioning/datasources/prometheus.yml`.
+- `.env.example` with `GRUMPYDB_BOOTSTRAP_PASSWORD`. `docker-compose`
+  refuses to start without it via `${VAR:?msg}` interpolation.
+- `.dockerignore` excluding test fixtures, docs, examples, etc.
+- README "Running with Docker" section near the Server section.
+- All images pinned to explicit tags — no `:latest` anywhere.
+- Multi-arch build instructions in `Dockerfile.server` header.
+
+#### Phase 38 — Snapshot & restore tooling
+- New `grumpydb-server/src/snapshot.rs` module exposing `snapshot()`
+  and `restore()` plus a `Location` enum.
+- New CLI subcommands parsed manually before the server-mode dispatch
+  in `main.rs`:
+  - `grumpydb-server snapshot --data <dir> <DEST>`
+  - `grumpydb-server restore --data <dir> <SRC> [--force]`
+- Destinations / sources:
+  - **Local** filesystem path — always available.
+  - **`s3://bucket/key`** — AWS S3 via `aws-sdk-s3 1.x`, behind feature
+    `cloud-aws`. Uses the standard AWS credential chain (env, profile,
+    instance role).
+  - **`az://container/blob`** — Azure Blob Storage via
+    `azure_storage_blobs 0.21`, behind feature `cloud-azure`. Uses
+    `DefaultAzureCredential` with fallback to
+    `AZURE_STORAGE_CONNECTION_STRING`.
+- **Tar.gz archive** containing a `snapshot.json` manifest with version
+  (`MANIFEST_VERSION = 1`), timestamp, GrumpyDB version, and a per-file
+  SHA-256 checksum. Restore verifies every checksum and aborts on
+  mismatch.
+- Restore refuses to write into a non-empty data dir without `--force`.
+- **Online snapshot semantics**: holds the `SharedDatabase` write lock
+  for the duration of the file copy (blocks writers, reads continue).
+  v6 with MVCC will offer point-in-time consistency.
+- New deps (root): `tar`, `flate2`, `sha2`, `hex`. Optional cloud SDKs
+  are gated by features (`aws-sdk-s3` + `aws-config` for `cloud-aws`;
+  `azure_storage` + `azure_storage_blobs` + `azure_identity` for
+  `cloud-azure`).
+- New tests: 9 unit tests in `snapshot.rs`, integration test
+  `tests/snapshot_e2e.rs` (round-trip via `TestServer`), plus
+  `tests/snapshot_aws.rs` and `tests/snapshot_azure.rs` (`#[ignore]`d,
+  require live cloud credentials).
+
+### Validation (P2 stream)
+- `cargo build --workspace` clean (default features)
+- `cargo build --workspace --features grumpydb-server/cloud-aws` clean
+- `cargo build --workspace --features grumpydb-server/cloud-azure` clean
+- `cargo build --workspace --features grumpydb-server/cloud-aws,grumpydb-server/cloud-azure`
+  clean
+- `cargo test --workspace` — **515 tests pass** (was 497 at the end of
+  P1; net +18: −1 from B+Tree merge, +1 rate-limit e2e, +4 HTTP unit,
+  +2 HTTP e2e, +9 snapshot unit, +1 snapshot e2e, +others)
+- `cargo clippy --workspace --all-targets -- -D warnings` clean
+  (default + all cloud features)
+- `cargo fmt --all -- --check` clean
+- `RUSTDOCFLAGS="-Dwarnings" cargo doc --workspace --no-deps` clean
+- `RUSTDOCFLAGS="-Dwarnings" cargo doc --workspace --no-deps --features grumpydb-server/cloud-aws,grumpydb-server/cloud-azure`
+  clean
+
 ## [4.1.0] - 2026-04-28
 
 Minor release: the interactive REPL is promoted from an example to a first-class workspace crate published on crates.io as `grumpy-repl 4.1.0`. No engine API changes. Only `grumpydb` (4.0.0 → 4.1.0) and the new `grumpy-repl` crate are published in this release; `grumpydb-protocol`, `grumpydb-server`, and `grumpydb-client` are unchanged.

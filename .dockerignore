@@ -1,0 +1,39 @@
+# Build artifacts and caches
+target/
+.git/
+.github/
+*.log
+
+# Documentation
+docs/
+README.md
+CHANGELOG.md
+CLAUDE.md
+CONTRIBUTING.md
+
+# Tests, benches, examples, fuzzing
+tests/
+benches/
+examples/
+fuzz/
+.cargo/audit.toml
+
+# Local data
+data/
+.grumpysh_data/
+.grumpy_repl_data/
+
+# Docker files (don't copy into build context)
+Dockerfile*
+docker-compose*
+.env
+.env.*
+docker/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
