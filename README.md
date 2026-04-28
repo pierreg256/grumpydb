@@ -5,6 +5,7 @@
 # GrumpyDB
 
 [![CI](https://github.com/pierreg256/grumpydb/actions/workflows/ci.yml/badge.svg)](https://github.com/pierreg256/grumpydb/actions/workflows/ci.yml)
+[![Fuzz](https://github.com/pierreg256/grumpydb/actions/workflows/fuzz.yml/badge.svg)](https://github.com/pierreg256/grumpydb/actions/workflows/fuzz.yml)
 [![crates.io](https://img.shields.io/crates/v/grumpydb.svg)](https://crates.io/crates/grumpydb)
 [![docs.rs](https://docs.rs/grumpydb/badge.svg)](https://docs.rs/grumpydb)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -379,6 +380,33 @@ The `examples/taskman/` directory is a complete task manager CLI demonstrating e
 ```bash
 cargo run --example taskman -- help
 ```
+
+## Performance
+
+Headline numbers from `cargo bench --bench engine --bench protocol -- --quick` on a
+MacBook Pro (Apple Silicon, default build profile, debug-assertions off, single-threaded
+synchronous workload). Reproduce with `cargo bench`.
+
+| Operation | Throughput |
+|---|---|
+| INSERT small doc (~50 B)              | ~235 ops/s    |
+| INSERT medium doc (~500 B)            | ~234 ops/s    |
+| INSERT large doc (4 KB, overflow)     | ~225 ops/s    |
+| GET by UUID (warm buffer pool)        | ~223 K ops/s  |
+| GET by UUID (cold reopen)             | ~217 K ops/s  |
+| SCAN full collection (10 K docs)      | ~2.42 M docs/s|
+| Index exact-match query               | ~17.7 K ops/s |
+| Index range query (~50-key window)    | ~836 ranges/s |
+| Protocol — parse simple command       | ~11.7 M ops/s |
+| Protocol — parse 1 KB INSERT          | ~6.5 GiB/s    |
+| Protocol — serialize 100-bulk array   | ~9.2 M elem/s |
+
+Each INSERT performs a WAL write + fsync, which dominates write throughput; batching
+multiple writes into a single transaction (planned in v5) is expected to lift this by
+~10×. Reads after the first warm-up are served from the buffer pool.
+
+Full HTML reports land in `target/criterion/report/index.html` after running
+`cargo bench`.
 
 ## License
 

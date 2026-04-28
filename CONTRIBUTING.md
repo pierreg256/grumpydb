@@ -9,12 +9,25 @@
 
 ```bash
 cargo build --workspace             # Build all crates
-cargo test --workspace              # All tests (~468 across all workspace crates)
+cargo test --workspace              # All tests (~486 across all workspace crates)
 cargo test --lib                    # Unit tests only (current crate)
 cargo test --test '*'               # Integration tests only
 cargo clippy --workspace --all-targets -- -D warnings  # Lint (strict, zero warnings)
 cargo fmt --all -- --check          # Check formatting
 cargo doc --workspace --no-deps     # Generate docs
+
+# Benchmarks (criterion). HTML reports land under target/criterion/report/.
+cargo bench                         # All benches: engine + protocol
+cargo bench --bench engine          # Engine-only benches
+cargo bench --bench protocol        # Protocol-only benches
+cargo bench -- --quick              # Quick smoke run (used by CI's bench-smoke)
+
+# Fuzzing (requires `cargo install cargo-fuzz` and a nightly toolchain).
+# The fuzz/ crate is intentionally excluded from the workspace.
+cd fuzz && cargo +nightly fuzz run parse_command
+cd fuzz && cargo +nightly fuzz run value_codec_roundtrip
+cd fuzz && cargo +nightly fuzz run wal_record_decode
+cd fuzz && cargo +nightly fuzz run response_serialize
 
 # Run a specific binary
 # Note: the server requires --bootstrap-password on the FIRST start
@@ -22,6 +35,8 @@ cargo doc --workspace --no-deps     # Generate docs
 # the same data directory do not need it.
 cargo run -p grumpydb-server -- --no-tls --data ./data \
     --bootstrap-password "dev-only-password"
+# Optional server flags: --log-format json|text (default: json, or text on a TTY).
+# RUST_LOG is honored, e.g. RUST_LOG=grumpydb_server=debug.
 cargo run -p grumpy-repl
 cargo run --example taskman -- help
 
@@ -69,15 +84,40 @@ grumpydb/                       # workspace root
 ├── grumpy-repl/                # Interactive REPL binary (dual-mode: embedded + TCP)
 │   └── src/{main,repl,parser,filter,json_parser,tcp_backend}.rs
 │
+├── grumpydb-testing/           # Internal test harness crate (publish = false).
+│   └── src/{lib,server}.rs     # TestServer: spawns the real server binary,
+│                               #   random port + tempdir + auto-kill on Drop;
+│                               #   exposes crash() (SIGKILL) and restart()
+│                               #   for crash-recovery tests.
+│
 ├── drivers/typescript/         # @grumpydb/client npm package (Node ≥ 18)
 │   └── src/{index,client,database,connection,protocol,auth,types,errors}.ts
 │
 ├── examples/
 │   └── taskman/                # Demo task manager (embedded engine)
 │
-├── tests/                      # Integration tests (engine + concurrency)
-│   ├── crud_test.rs
-│   └── stress_test.rs
+├── benches/                    # Criterion benchmarks (cargo bench)
+│   ├── engine.rs               # 8 benches: insert (small/medium/4 KB), get,
+│   │                           #   scan, index exact/range
+│   └── protocol.rs             # 3 benches: parse simple cmd, parse 1 KB INSERT,
+│                               #   serialize 100-bulk array
+│
+├── fuzz/                       # cargo-fuzz targets (excluded from workspace)
+│   ├── Cargo.toml
+│   ├── corpus/<target>/        # Seed corpora
+│   └── fuzz_targets/
+│       ├── parse_command.rs        # Protocol parser
+│       ├── value_codec_roundtrip.rs # Document codec encode/decode stability
+│       ├── wal_record_decode.rs    # WAL record decoder
+│       └── response_serialize.rs   # Protocol response serializer
+│
+├── tests/                      # Integration tests
+│   ├── crud_test.rs            # Engine CRUD
+│   ├── stress_test.rs          # Concurrency stress
+│   ├── server_e2e.rs           # TCP end-to-end (8 tests, uses TestServer)
+│   ├── server_concurrency.rs   # 50 concurrent clients × 100 ops
+│   ├── server_auth.rs          # Expired/tampered tokens, role enforcement
+│   └── crash_recovery.rs       # 6 crash-and-restart scenarios
 │
 └── docs/
     ├── ARCHITECTURE.md
@@ -151,9 +191,12 @@ Every push to `master` and every PR is validated by GitHub Actions
 | `parking_lot` | Fast RwLock/Mutex for SWMR concurrency |
 | `tempfile` | Temporary directories for tests |
 | `rand` | Random data generation for tests |
+| `criterion` | Benchmark harness (`benches/engine.rs`, `benches/protocol.rs`) |
 | `rustyline` | Line editing for grumpy-repl (binary crate) |
 | `serde_json` | JSON serialization for grumpy-repl (binary crate) |
 | `futures` | `FutureExt::catch_unwind` for panic isolation in `grumpydb-server` |
+| `tracing` | Structured logging spans + events in `grumpydb-server` |
+| `tracing-subscriber` (`env-filter`, `json`) | JSON log subscriber, `RUST_LOG` env-filter |
 
 ### Workspace crates
 
@@ -161,6 +204,7 @@ Every push to `master` and every PR is validated by GitHub Actions
 |-------|--------|
 | `grumpydb` | Core storage engine (library) |
 | `grumpydb-protocol` | RESP-like wire protocol (commands, responses, parser) |
-| `grumpydb-server` | TCP+TLS server binary (tokio, JWT auth, RBAC) |
+| `grumpydb-server` | TCP+TLS server binary (tokio, JWT auth, RBAC, structured tracing) |
 | `grumpydb-client` | Async Rust client driver |
 | `grumpy-repl` | Interactive REPL shell binary (embedded + TCP) |
+| `grumpydb-testing` | Internal test harness (`TestServer`); `publish = false`, never released |

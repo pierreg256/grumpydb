@@ -77,6 +77,101 @@ bump or crates.io publication yet.
   `GRUMPYDB_BOOTSTRAP_PASSWORD`) on first start**, otherwise the server
   refuses to start with a clear `BootstrapRefused` error.
 
+### v5 stream — Observability (P1)
+
+This unreleased section tracks Stream O of the v5 plan
+([docs/IMPLEMENTATION_PLAN_V4.md](docs/IMPLEMENTATION_PLAN_V4.md)). Phases
+27–32 are landed in `master` but no version bump or crates.io publication yet.
+
+#### Phase 27 — `tracing` instrumentation
+- `grumpydb-server` now produces structured **JSON logs by default**; emits
+  text format when stdout is a TTY or when `--log-format text` is passed.
+- New CLI flag `--log-format json|text` on the server binary; `RUST_LOG` is
+  honored (env-filter).
+- `tracing-subscriber` features bumped to `["env-filter", "json"]`.
+- TCP listener wraps every accept in `info_span!("connection", peer, tls)`.
+- TCP handler wraps every command in `info_span!("command", cmd, user, tenant)`,
+  emits `elapsed_us` on completion, and logs auth events (login success/failure,
+  token refresh, token verify) with structured fields.
+- New helper `command_name(&Command) -> &'static str` for stable, low-cardinality
+  command labels.
+
+#### Phase 28 — TCP end-to-end integration tests
+- New private workspace member crate **`grumpydb-testing/`** (NOT published,
+  `publish = false`) with a `TestServer` struct that spawns the actual
+  `grumpydb-server` binary on a random port with a tempdir, kills it on `Drop`.
+- New integration tests at workspace root:
+  - `tests/server_e2e.rs` — login/whoami, create db/coll, full CRUD cycle,
+    index query, count, token refresh, invalid creds, unauthorized command
+    (8 tests).
+  - `tests/server_concurrency.rs` — 50 concurrent clients × 100 ops each.
+  - `tests/server_auth.rs` — expired token, tampered token, role enforcement
+    (3 tests).
+- **Two real bugs surfaced and fixed during this phase**:
+  - `Command::Token(_)` and `Command::Refresh(_)` were missing from
+    `Command::is_pre_auth()` — meant `TOKEN`/`REFRESH` commands required prior
+    authentication, a chicken-and-egg situation. Fixed in
+    `grumpydb-protocol/src/command.rs`.
+  - `Command::ListIndexes` was returning an empty `[]` placeholder. Now it
+    properly returns the collection's index names.
+- **Public API addition**: new
+  `SharedDatabase::list_indexes(&str) -> Result<Vec<String>>` method
+  (minor-version-worthy on its own).
+
+#### Phase 29 — Crash recovery integration tests
+- `TestServer` extended with `crash()` (SIGKILL) and `restart()` (respawn on
+  the same data dir + port).
+- New `tests/crash_recovery.rs` with 6 scenarios: post-FLUSH crash, no-flush
+  crash, mid-insert partial crash, crash during index creation, crash during
+  compaction, repeated crash recovery loop.
+- All 6 pass green and stable across multiple runs (~6 s wall total).
+
+#### Phase 30 — Criterion benchmarks
+- Added `criterion = { version = "0.5", features = ["html_reports"] }` to
+  root `[dev-dependencies]`.
+- New **`benches/engine.rs`** (8 benchmarks): insert (small/medium/4 KB
+  overflow), get (cached/cold), scan, index exact + range queries.
+- New **`benches/protocol.rs`** (3 benchmarks): parse simple commands,
+  parse 1 KB INSERT, serialize 100-bulk array.
+- README has a new "Performance" section with measured numbers from a
+  MacBook Pro Apple Silicon run.
+- New `bench-smoke` job in `.github/workflows/ci.yml` runs benches in
+  `--quick` mode on every CI build (compile + minimal run; not regression
+  detection).
+- Notable insight from the bench (documented in the README): insert
+  throughput is ~230 ops/s steady-state because every CRUD opens a fresh
+  WAL transaction with fsync.
+
+#### Phase 31 — Fuzzing with `cargo-fuzz`
+- New **`fuzz/`** directory (excluded from the workspace via
+  `exclude = ["fuzz"]` in root `[workspace]`) with 4 fuzz targets:
+  - `parse_command` — protocol parser.
+  - `value_codec_roundtrip` — document binary codec encode/decode stability.
+  - `wal_record_decode` — WAL record decoder.
+  - `response_serialize` — protocol response serializer.
+- Each smoke-fuzzed locally for 20 s — millions of iterations, no panics.
+- One real fuzzer-found issue (NaN inequality in a test assertion) was fixed
+  in the fuzz target itself (not in the codec).
+- New **`.github/workflows/fuzz.yml`** — weekly schedule + manual dispatch,
+  runs each target for 5 minutes by default.
+
+#### Phase 32 — Workspace version alignment
+- New **`[workspace.package]`** table in root `Cargo.toml` with shared
+  `version`, `edition`, `rust-version`, `license`, `repository`, `homepage`.
+- Member crates inherit shared fields via `field.workspace = true`.
+- `grumpydb` (root) and `grumpy-repl` use `version.workspace = true`.
+- Sibling crates (`grumpydb-protocol`, `grumpydb-client`, `grumpydb-server`)
+  keep an explicit `version = "1.0.0"` for now — they will be aligned to v5
+  at the v5 release commit (Phase 43).
+
+### Validation (P1 stream)
+- `cargo build --workspace` clean
+- `cargo test --workspace` — **486 tests pass** (was 468 after P0;
+  +6 crash recovery, +12 e2e/concurrency/auth)
+- `cargo clippy --workspace --all-targets -- -D warnings` clean
+- `cargo fmt --all -- --check` clean
+- All 4 fuzz targets build and run cleanly (no crashes after 20 s of each).
+
 ## [4.1.0] - 2026-04-28
 
 Minor release: the interactive REPL is promoted from an example to a first-class workspace crate published on crates.io as `grumpy-repl 4.1.0`. No engine API changes. Only `grumpydb` (4.0.0 → 4.1.0) and the new `grumpy-repl` crate are published in this release; `grumpydb-protocol`, `grumpydb-server`, and `grumpydb-client` are unchanged.

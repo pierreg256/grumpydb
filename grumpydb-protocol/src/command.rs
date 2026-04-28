@@ -282,8 +282,21 @@ impl Command {
     }
 
     /// Returns `true` if this command is allowed before authentication.
+    ///
+    /// `Token` and `Refresh` belong here because they are themselves the means
+    /// to authenticate a session: a freshly opened connection must be able to
+    /// resume a session by submitting a previously issued access token, and
+    /// must be able to swap an expired access token for a new one without
+    /// going through full `LOGIN` again.
     pub fn is_pre_auth(&self) -> bool {
-        matches!(self, Command::Login { .. } | Command::Ping | Command::Quit)
+        matches!(
+            self,
+            Command::Login { .. }
+                | Command::Ping
+                | Command::Quit
+                | Command::Token(_)
+                | Command::Refresh(_)
+        )
     }
 }
 

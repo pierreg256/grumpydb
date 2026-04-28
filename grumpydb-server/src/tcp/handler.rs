@@ -56,6 +56,7 @@ where
         let command = match parse_command(&line) {
             Ok(cmd) => cmd,
             Err(e) => {
+                tracing::warn!(error = %e, "command parse failed");
                 write_resp(&mut writer, &Response::Error(e.to_string())).await?;
                 consecutive_errors += 1;
                 if consecutive_errors > 10 {
@@ -66,9 +67,18 @@ where
         };
 
         consecutive_errors = 0;
+        let cmd_name = command_name(&command);
+        let cmd_span = tracing::info_span!(
+            "command",
+            cmd = cmd_name,
+            user = session.username().ok().unwrap_or("-"),
+            tenant = session.tenant().ok().unwrap_or("-"),
+        );
+        let _enter = cmd_span.enter();
 
         // QUIT
         if matches!(command, Command::Quit) {
+            tracing::info!("client requested quit");
             write_resp(&mut writer, &Response::Ok("BYE".into())).await?;
             break;
         }
@@ -81,12 +91,14 @@ where
 
         // Authorize
         if let Err(e) = session.authorize(&command) {
+            tracing::warn!(error = %e, "authorization denied");
             write_resp(&mut writer, &Response::Error(e.to_string())).await?;
             continue;
         }
 
         // Execute (with panic isolation: a corrupt page or bug in the engine
         // must not tear down the entire server. Surface as Corruption error.)
+        let started = std::time::Instant::now();
         let response = AssertUnwindSafe(execute_command(
             &command,
             &mut session,
@@ -97,13 +109,60 @@ where
         .await
         .unwrap_or_else(|panic_payload| {
             let msg = panic_message(&panic_payload);
-            tracing::error!(panic = %msg, ?command, "engine panic caught");
+            tracing::error!(panic = %msg, "engine panic caught");
             Response::Error(format!("internal error (corruption): {msg}"))
         });
+        let elapsed_us = started.elapsed().as_micros() as u64;
+        match &response {
+            Response::Error(e) => {
+                tracing::warn!(elapsed_us, error = %e, "command failed");
+            }
+            _ => tracing::debug!(elapsed_us, "command ok"),
+        }
         write_resp(&mut writer, &response).await?;
     }
 
     Ok(())
+}
+
+/// Returns a stable string identifier for a command (for tracing fields).
+fn command_name(cmd: &Command) -> &'static str {
+    match cmd {
+        Command::Login { .. } => "LOGIN",
+        Command::Token(_) => "TOKEN",
+        Command::Refresh(_) => "REFRESH",
+        Command::WhoAmI => "WHOAMI",
+        Command::Use(_) => "USE",
+        Command::Ping => "PING",
+        Command::Quit => "QUIT",
+        Command::CreateDatabase(_) => "CREATE_DATABASE",
+        Command::DropDatabase(_) => "DROP_DATABASE",
+        Command::ListDatabases => "LIST_DATABASES",
+        Command::CreateCollection(_) => "CREATE_COLLECTION",
+        Command::DropCollection(_) => "DROP_COLLECTION",
+        Command::ListCollections => "LIST_COLLECTIONS",
+        Command::Insert { .. } => "INSERT",
+        Command::Get { .. } => "GET",
+        Command::Update { .. } => "UPDATE",
+        Command::Delete { .. } => "DELETE",
+        Command::Scan { .. } => "SCAN",
+        Command::CreateIndex { .. } => "CREATE_INDEX",
+        Command::DropIndex { .. } => "DROP_INDEX",
+        Command::ListIndexes(_) => "LIST_INDEXES",
+        Command::Query { .. } => "QUERY",
+        Command::QueryRange { .. } => "QUERY_RANGE",
+        Command::Compact(_) => "COMPACT",
+        Command::Flush => "FLUSH",
+        Command::Count(_) => "COUNT",
+        Command::CreateUser { .. } => "CREATE_USER",
+        Command::DropUser(_) => "DROP_USER",
+        Command::ListUsers(_) => "LIST_USERS",
+        Command::Grant { .. } => "GRANT",
+        Command::Revoke { .. } => "REVOKE",
+        Command::CreateTenant(_) => "CREATE_TENANT",
+        Command::DropTenant(_) => "DROP_TENANT",
+        Command::ListTenants => "LIST_TENANTS",
+    }
 }
 
 /// Extract a string description from a panic payload.
@@ -147,26 +206,47 @@ async fn execute_command(
                     }
                     // Ensure the tenant exists as a client in the engine
                     let _ = shared_server.create_client(tenant);
+                    tracing::info!(tenant = %tenant, user = %username, "login success");
                     Response::Ok(format!("TOKEN {access} {refresh}"))
                 }
-                Err(_) => Response::Error("invalid credentials".into()),
+                Err(e) => {
+                    tracing::warn!(
+                        tenant = %tenant,
+                        user = %username,
+                        error = %e,
+                        "login failed"
+                    );
+                    Response::Error("invalid credentials".into())
+                }
             }
         }
         Command::Token(token) => {
             let store = auth_store.read();
             match store.verify_token(token) {
                 Ok(claims) => {
+                    let user = claims.sub.clone();
+                    let tenant = claims.tenant.clone();
                     session.set_claims(claims);
+                    tracing::info!(tenant = %tenant, user = %user, "session resumed via token");
                     Response::Ok("OK".into())
                 }
-                Err(e) => Response::Error(e.to_string()),
+                Err(e) => {
+                    tracing::warn!(error = %e, "token verification failed");
+                    Response::Error(e.to_string())
+                }
             }
         }
         Command::Refresh(refresh_token) => {
             let store = auth_store.read();
             match store.refresh_access_token(refresh_token) {
-                Ok(new_access) => Response::Ok(format!("TOKEN {new_access}")),
-                Err(e) => Response::Error(e.to_string()),
+                Ok(new_access) => {
+                    tracing::info!("access token refreshed");
+                    Response::Ok(format!("TOKEN {new_access}"))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "token refresh failed");
+                    Response::Error(e.to_string())
+                }
             }
         }
         Command::WhoAmI => match session.claims() {
@@ -321,9 +401,11 @@ async fn execute_command(
             s(db.drop_index(collection, index_name))?;
             Ok(Response::Ok("OK".into()))
         }),
-        Command::ListIndexes(_collection) => {
-            with_db(session, shared_server, |_db| Ok(Response::Array(vec![])))
-        }
+        Command::ListIndexes(collection) => with_db(session, shared_server, |db| {
+            let names = s(db.list_indexes(collection))?;
+            let items: Vec<Response> = names.into_iter().map(|n| Response::Bulk(Some(n))).collect();
+            Ok(Response::Array(items))
+        }),
         Command::Query {
             collection,
             index_name,

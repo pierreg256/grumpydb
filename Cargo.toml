@@ -1,15 +1,28 @@
 [workspace]
-members = [".", "grumpydb-protocol", "grumpydb-server", "grumpydb-client", "grumpy-repl"]
+members = [".", "grumpydb-protocol", "grumpydb-server", "grumpydb-client", "grumpy-repl", "grumpydb-testing"]
+exclude = ["fuzz"]
 
-[package]
-name = "grumpydb"
+# Shared metadata for all workspace members (Phase 32 v5 alignment).
+# Members inherit any of these via `field.workspace = true`. The
+# `version` field here is the canonical workspace version: bumping it
+# here cascades to every member that uses `version.workspace = true`.
+[workspace.package]
 version = "4.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "A disk-based object storage engine with B+Tree indexing and page-based storage"
 license = "MIT"
 repository = "https://github.com/pierreg256/grumpydb"
 homepage = "https://github.com/pierreg256/grumpydb"
+
+[package]
+name = "grumpydb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A disk-based object storage engine with B+Tree indexing and page-based storage"
 documentation = "https://docs.rs/grumpydb"
 readme = "README.md"
 keywords = ["database", "storage-engine", "btree", "embedded", "key-value"]
@@ -25,3 +38,17 @@ parking_lot = "0.12"
 [dev-dependencies]
 tempfile = "3"
 rand = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+serde_json = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+grumpydb-client = { path = "grumpydb-client" }
+grumpydb-protocol = { path = "grumpydb-protocol" }
+grumpydb-testing = { path = "grumpydb-testing" }
+
+[[bench]]
+name = "engine"
+harness = false
+
+[[bench]]
+name = "protocol"
+harness = false

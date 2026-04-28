@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
-use tracing;
+use tracing::{Instrument, info_span};
 
 use grumpydb::SharedServer;
 
@@ -31,6 +31,9 @@ pub async fn listen(
     };
 
     tracing::info!(
+        bind = %config.server.bind,
+        tls = config.tls.enabled,
+        max_connections,
         "GrumpyDB server listening on {} (TLS: {})",
         config.server.bind,
         config.tls.enabled
@@ -42,7 +45,7 @@ pub async fn listen(
                 let (tcp_stream, addr) = accept_result?;
 
                 if connection_count.load(Ordering::Relaxed) >= max_connections {
-                    tracing::warn!("Connection limit reached, rejecting {addr}");
+                    tracing::warn!(peer = %addr, "connection limit reached, rejecting");
                     let _ = tcp_stream.try_write(b"-ERR server busy\r\n");
                     continue;
                 }
@@ -52,9 +55,11 @@ pub async fn listen(
                 let server = shared_server.clone();
                 let acceptor = tls_acceptor.clone();
 
+                let span = info_span!("connection", peer = %addr, tls = acceptor.is_some());
+
                 tokio::spawn(async move {
                     count.fetch_add(1, Ordering::Relaxed);
-                    tracing::debug!("Connection from {addr}");
+                    tracing::debug!(active = count.load(Ordering::Relaxed), "connection accepted");
 
                     let result = if let Some(acceptor) = acceptor {
                         match acceptor.accept(tcp_stream).await {
@@ -62,7 +67,7 @@ pub async fn listen(
                                 handle_connection(tls_stream, auth, server).await
                             }
                             Err(e) => {
-                                tracing::warn!("TLS handshake failed from {addr}: {e}");
+                                tracing::warn!(error = %e, "TLS handshake failed");
                                 Ok(())
                             }
                         }
@@ -71,21 +76,21 @@ pub async fn listen(
                     };
 
                     if let Err(e) = result {
-                        tracing::debug!("Connection {addr} error: {e}");
+                        tracing::debug!(error = %e, "connection error");
                     }
                     count.fetch_sub(1, Ordering::Relaxed);
-                    tracing::debug!("Connection {addr} closed");
-                });
+                    tracing::debug!("connection closed");
+                }.instrument(span));
             }
             _ = tokio::signal::ctrl_c() => {
-                tracing::info!("Received shutdown signal, stopping...");
+                tracing::info!("received shutdown signal, stopping...");
                 break;
             }
         }
     }
 
     // Graceful shutdown: close the shared server
-    tracing::info!("Flushing data and shutting down...");
+    tracing::info!("flushing data and shutting down...");
     Ok(())
 }
 

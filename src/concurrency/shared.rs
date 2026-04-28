@@ -107,6 +107,13 @@ impl SharedDatabase {
         self.inner.write().drop_index(collection, index_name)
     }
 
+    /// Lists all secondary indexes on a collection (returns owned names).
+    pub fn list_indexes(&self, collection: &str) -> Result<Vec<String>> {
+        let mut guard = self.inner.write();
+        let coll = guard.collection(collection)?;
+        Ok(coll.list_indexes().iter().map(|d| d.name.clone()).collect())
+    }
+
     /// Queries a secondary index by exact value.
     pub fn query(
         &self,

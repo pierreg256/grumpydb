@@ -1,0 +1,49 @@
+[package]
+name = "grumpydb-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+grumpydb = { path = ".." }
+grumpydb-protocol = { path = "../grumpydb-protocol" }
+uuid = { version = "1", features = ["v4"] }
+
+# Standalone — do NOT include this in the parent workspace.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "parse_command"
+path = "fuzz_targets/parse_command.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "value_codec_roundtrip"
+path = "fuzz_targets/value_codec_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wal_record_decode"
+path = "fuzz_targets/wal_record_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "response_serialize"
+path = "fuzz_targets/response_serialize.rs"
+test = false
+doc = false
+bench = false

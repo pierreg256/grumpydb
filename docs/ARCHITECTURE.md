@@ -900,6 +900,9 @@ impl SharedDatabase {
     pub fn delete(&self, collection: &str, key: &Uuid) -> Result<()>;
     pub fn scan(&self, collection: &str, range: impl RangeBounds<Uuid>) -> Result<Vec<(Uuid, Value)>>;
 
+    // Index introspection (added in v5 P1, used by `LIST INDEXES` over the wire).
+    pub fn list_indexes(&self, collection: &str) -> Result<Vec<String>>;
+
     // Index, resolve, maintenance...
     pub fn close(self) -> Result<()>;
 }
@@ -1302,3 +1305,126 @@ grumpydb-server  ──────► grumpydb-protocol ◄────── g
 drivers/typescript (@grumpydb/client)
    └── reimplements protocol in TypeScript, no Rust dep
 ```
+
+
+## 20. Observability (v5 P1)
+
+The `grumpydb-server` binary emits **structured logs via [`tracing`]** so
+that operators can pipe events into log aggregators (jq, Loki, Datadog,
+Splunk…) without parsing free-form text.
+
+### 20.1 Output formats
+- **JSON by default** (one event per line, suitable for `| jq`).
+- **Text** (human-readable) when stdout is detected as a TTY, or when forced
+  via the new CLI flag `--log-format text`.
+- The format is selectable explicitly: `--log-format json|text`.
+- The standard `RUST_LOG` environment variable is honored via
+  `tracing-subscriber`'s `EnvFilter`, e.g.
+  `RUST_LOG=grumpydb_server=debug,tokio=warn`.
+
+### 20.2 Span hierarchy
+Every emitted event is enclosed in nested spans:
+
+```
+connection                                  ← per TCP/TLS accept
+  ├─ peer  = "127.0.0.1:54321"
+  └─ tls   = true | false
+
+  └─► command                               ← per request
+        ├─ cmd     = "INSERT" | "GET" | …    (stable label, low cardinality)
+        ├─ user    = "<authenticated user>" | absent for pre-auth commands
+        ├─ tenant  = "<client name>"        | absent for pre-auth commands
+        └─ elapsed_us = <integer>           ← emitted on completion
+```
+
+The stable `cmd` label comes from a small helper
+`command_name(&Command) -> &'static str` so that downstream metrics
+backends see a fixed cardinality.
+
+### 20.3 Notable events
+- **Auth events** at `info`: `login` (success/failure), `token_refresh`,
+  `token_verify`. All carry structured fields (no PII in the payload).
+- **Error events** at `warn`/`error`: every `GrumpyError` returned to a
+  client is logged inside its `command` span, so the surrounding
+  `connection` and `command` context is preserved.
+- **Panic isolation events** (Phase 25): if a command handler panics,
+  `tracing::error!` records the payload before the connection is closed
+  cleanly with `Response::Error("internal error (corruption): …")`.
+
+### 20.4 Dependencies and configuration
+- `tracing-subscriber` is configured with the features
+  `["env-filter", "json"]`.
+- The default subscriber filter applies if `RUST_LOG` is unset.
+- Trace-ID propagation in protocol responses (an optional `X-Trace-Id`
+  field) is **not yet implemented**; tracked as future work for v6.
+
+[`tracing`]: https://docs.rs/tracing
+
+
+## 21. Testing
+
+GrumpyDB combines four layers of tests, all run on every CI build:
+
+### 21.1 Unit tests
+Co-located in each `.rs` file under `#[cfg(test)] mod tests`. They cover
+isolated logic: page slot insertion, B+Tree node splits, WAL record
+encoding, JSON parsing, RBAC predicates, etc.
+
+```bash
+cargo test --lib            # current crate
+cargo test --workspace --lib
+```
+
+### 21.2 Integration tests (workspace `tests/`)
+| File | Purpose |
+|------|---------|
+| `tests/crud_test.rs` | End-to-end engine CRUD against the `grumpydb` library. |
+| `tests/stress_test.rs` | Concurrency stress against the engine (SWMR). |
+| `tests/server_e2e.rs` | Full client → server → engine → response loop, 8 tests. Uses `TestServer` to spawn the real `grumpydb-server` binary on a random port. |
+| `tests/server_concurrency.rs` | 50 concurrent clients × 100 ops each. |
+| `tests/server_auth.rs` | Expired token, tampered token, role enforcement (3 tests). |
+| `tests/crash_recovery.rs` | 6 crash-and-restart scenarios using `TestServer::crash()` (SIGKILL) + `TestServer::restart()`: post-FLUSH crash, no-flush crash, mid-insert partial crash, crash during index creation, crash during compaction, repeated crash recovery loop. |
+
+The server-spawning helper lives in the internal crate
+**`grumpydb-testing/`** (`publish = false`, never released). It exposes a
+`TestServer` struct that spawns the actual server binary on a random port
+with a tempdir, kills it on `Drop`, and provides `crash()` (SIGKILL) and
+`restart()` (respawn on the same data dir + port) for crash-recovery
+tests.
+
+### 21.3 Benchmarks (`benches/`)
+Criterion-based, with HTML reports under `target/criterion/report/`.
+- **`benches/engine.rs`** — 8 benchmarks: insert (small / medium / 4 KB
+  overflow), get (warm / cold reopen), scan, index exact + range queries.
+- **`benches/protocol.rs`** — 3 benchmarks: parse simple command, parse
+  1 KB `INSERT`, serialize 100-bulk array.
+
+```bash
+cargo bench                # all benches
+cargo bench -- --quick     # smoke run (used by CI)
+```
+
+Headline numbers are reproduced in the README's *Performance* section.
+
+### 21.4 Fuzzing (`fuzz/`, excluded from workspace)
+`cargo-fuzz` targets focused on the network-attackable surface. The
+`fuzz/` crate is intentionally excluded from the workspace so it does not
+pollute normal builds.
+
+| Target | Surface |
+|--------|---------|
+| `parse_command` | RESP-like protocol parser. |
+| `value_codec_roundtrip` | Document binary codec encode→decode stability. |
+| `wal_record_decode` | WAL record decoder. |
+| `response_serialize` | Protocol response serializer. |
+
+```bash
+cd fuzz && cargo +nightly fuzz run parse_command
+```
+
+### 21.5 CI workflows
+- **`.github/workflows/ci.yml`** — jobs `fmt`, `clippy`, `test` (matrix:
+  stable + 1.85 MSRV), `docs`, `audit`, **`bench-smoke`** (compile +
+  `--quick` run of all benches; not a regression gate).
+- **`.github/workflows/fuzz.yml`** — weekly schedule + manual dispatch,
+  runs each fuzz target for 5 minutes by default.

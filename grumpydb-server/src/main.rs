@@ -7,13 +7,40 @@ use grumpydb::SharedServer;
 use grumpydb_server::auth::store::AuthStore;
 use grumpydb_server::config::ServerConfig;
 use grumpydb_server::tcp::listener;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
-
-    // Parse CLI args (simple manual parsing)
     let args: Vec<String> = std::env::args().collect();
+
+    // Phase 27: structured logging with `tracing`.
+    // Format selection: --log-format json|text  (default: json in production-like
+    // contexts, text when stdout is a TTY for nicer dev output).
+    let log_format = get_arg(&args, "--log-format").unwrap_or_else(|| {
+        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+            "text".into()
+        } else {
+            "json".into()
+        }
+    });
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("grumpydb=info,grumpydb_server=info,tokio=warn"));
+
+    let registry = tracing_subscriber::registry().with(env_filter);
+    match log_format.as_str() {
+        "json" => registry
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_current_span(true)
+                    .with_span_list(false),
+            )
+            .init(),
+        _ => registry.with(tracing_subscriber::fmt::layer()).init(),
+    }
+
     let config_path = get_arg(&args, "--config").unwrap_or_else(|| "grumpydb.toml".into());
     let mut config = ServerConfig::load(&PathBuf::from(&config_path));
 
@@ -35,7 +62,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.tls.key_file = Some(key);
     }
 
-    tracing::info!("Data directory: {}", config.server.data_dir.display());
+    tracing::info!(
+        data_dir = %config.server.data_dir.display(),
+        bind = %config.server.bind,
+        tls = config.tls.enabled,
+        log_format = %log_format,
+        "starting GrumpyDB server"
+    );
 
     // Bootstrap password resolution (Phase 26): require an explicit password
     // for the first-ever start. After the initial admin exists on disk, this

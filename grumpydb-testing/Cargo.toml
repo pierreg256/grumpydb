@@ -1,0 +1,12 @@
+[package]
+name = "grumpydb-testing"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Internal end-to-end testing helpers for GrumpyDB. Not published."
+
+[dependencies]
+tempfile = "3"
+rand = "0.8"
+tokio = { version = "1", features = ["net", "time", "io-util", "rt", "macros"] }
