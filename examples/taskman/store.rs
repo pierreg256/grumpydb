@@ -53,12 +53,13 @@ impl TaskStore {
         }
 
         // Ensure the secondary index on "done" exists for fast filtering
-        let coll = db
-            .collection(TASKS_COLLECTION)
-            .map_err(|e| format!("Failed to get collection: {e}"))?;
-        let has_done_index = coll.list_indexes().iter().any(|d| d.name == "by_done");
+        let has_done_index = {
+            let coll = db
+                .collection(TASKS_COLLECTION)
+                .map_err(|e| format!("Failed to get collection: {e}"))?;
+            coll.list_indexes().iter().any(|d| d.name == "by_done")
+        };
         if !has_done_index {
-            drop(coll);
             db.create_index(TASKS_COLLECTION, "by_done", "done")
                 .map_err(|e| format!("Failed to create index: {e}"))?;
         }

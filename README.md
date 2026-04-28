@@ -4,6 +4,11 @@
 
 # GrumpyDB
 
+[![CI](https://github.com/pierreg256/grumpydb/actions/workflows/ci.yml/badge.svg)](https://github.com/pierreg256/grumpydb/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/grumpydb.svg)](https://crates.io/crates/grumpydb)
+[![docs.rs](https://docs.rs/grumpydb/badge.svg)](https://docs.rs/grumpydb)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **A document-oriented object database written in Rust.**
 
 GrumpyDB stores schema-less JSON-like documents on disk with B+Tree indexing, page-based storage, WAL durability, and multi-tenant isolation. It can be used as an **embedded library** (linked directly into your Rust app) or as a **standalone server** accessed over TCP+TLS with JWT authentication and role-based access control.
@@ -50,14 +55,15 @@ grumpy [myapp]> db.users.find({ age: 25 })
 ### Client/Server — multi-tenant with auth
 
 ```bash
-# Terminal 1: Start the server
+# Terminal 1: Start the server (first start requires --bootstrap-password)
 cargo build -p grumpydb-server
-target/debug/grumpydb-server --data ./data --no-tls
+target/debug/grumpydb-server --data ./data --no-tls \
+  --bootstrap-password "change-me-now"
 
 # Terminal 2: Connect with the shell
 cargo run -p grumpy-repl -- \
   --host localhost --port 6380 \
-  --tenant _system --user admin --password admin
+  --tenant _system --user admin --password "change-me-now"
 ```
 
 ```js
@@ -199,17 +205,37 @@ Clients (grumpy-repl, Rust driver, TypeScript driver, nc/telnet)
 ```bash
 cargo build -p grumpydb-server
 
-# Plaintext (dev)
-target/debug/grumpydb-server --data ./data --no-tls
+# Plaintext (dev) — first start REQUIRES --bootstrap-password
+target/debug/grumpydb-server --data ./data --no-tls \
+  --bootstrap-password "your-strong-password"
 
-# TLS (auto-generates self-signed cert)
-target/debug/grumpydb-server --data ./data
+# TLS (auto-generates self-signed cert) — first start REQUIRES --bootstrap-password
+target/debug/grumpydb-server --data ./data \
+  --bootstrap-password "your-strong-password"
 
 # With config file
-target/debug/grumpydb-server --config grumpydb.toml
+target/debug/grumpydb-server --config grumpydb.toml \
+  --bootstrap-password "your-strong-password"
+
+# Subsequent starts: no --bootstrap-password needed once users exist on disk
+target/debug/grumpydb-server --data ./data
 ```
 
-At first launch, a default admin is created: `admin` (password: `admin`) in tenant `_system`.
+You can also provide the bootstrap password via the environment variable
+`GRUMPYDB_BOOTSTRAP_PASSWORD` instead of the CLI flag.
+
+### First-start bootstrap
+
+On a brand-new data directory, the server creates a single `_system/admin`
+user with the password you supplied via `--bootstrap-password` (or
+`GRUMPYDB_BOOTSTRAP_PASSWORD`). If you start the server without providing one
+on a clean data directory, it refuses to start with
+`AuthError::BootstrapRefused` — there is no longer a silent `admin/admin`
+default.
+
+The auth secret (`<data_dir>/_auth/secret.key`) is created with mode `0600`
+on Unix; existing files with looser permissions are re-tightened with a
+warning logged on startup.
 
 ### Configuration (`grumpydb.toml`)
 
@@ -234,7 +260,7 @@ refresh_token_ttl_secs = 604800   # 7 days
 Connect as server admin via `nc localhost 6380`:
 
 ```
-LOGIN _system admin admin
+LOGIN _system admin <your-bootstrap-password>
 TOKEN <jwt>
 
 CREATE TENANT acme

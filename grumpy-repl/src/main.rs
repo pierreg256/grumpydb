@@ -127,9 +127,7 @@ fn main() {
 
         match tcp_backend::TcpBackend::connect(&host, port, use_tls, &tenant, &user, &password) {
             Ok(backend) => {
-                println!(
-                    "Connected to GrumpyDB at {host}:{port} (TLS: {use_tls})"
-                );
+                println!("Connected to GrumpyDB at {host}:{port} (TLS: {use_tls})");
                 println!("Authenticated as {user}@{tenant}\n");
                 repl::Repl::with_tcp_backend(backend)
             }
@@ -160,7 +158,10 @@ fn main() {
 
     // Interactive mode with rustyline
     if connected_mode {
-        println!("grumpy-repl v{} (connected mode)", env!("CARGO_PKG_VERSION"));
+        println!(
+            "grumpy-repl v{} (connected mode)",
+            env!("CARGO_PKG_VERSION")
+        );
     } else {
         println!("grumpy-repl v{} (embedded mode)", env!("CARGO_PKG_VERSION"));
     }

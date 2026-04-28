@@ -142,6 +142,7 @@ error (no internal dependencies)
 See `docs/IMPLEMENTATION_PLAN.md` for the full phased plan (phases 1–8: storage engine).
 See `docs/IMPLEMENTATION_PLAN_V2.md` for the v2 multi-tenant plan (phases 9–15: server, concurrency, shell).
 See `docs/IMPLEMENTATION_PLAN_V3.md` for the v3 client interface plan (phases 16–23: protocol, auth, TCP server, drivers).
+See `docs/IMPLEMENTATION_PLAN_V4.md` for the v5 hardening + distribution plan (phases 24–43: hardening, observability, architecture cleanup, RS256/JWKS, WAL-shipping replication, MVCC reads).
 See `docs/ARCHITECTURE.md` for in-depth technical details.
 
 ## Available skills

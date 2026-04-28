@@ -141,9 +141,11 @@ impl BTree {
 
     fn read_meta_from_buf(buf: &[u8; PAGE_SIZE]) -> BTreeMeta {
         BTreeMeta {
-            root_page_id: u32::from_le_bytes(buf[32..36].try_into().unwrap()),
-            height: u32::from_le_bytes(buf[36..40].try_into().unwrap()),
-            num_entries: u64::from_le_bytes(buf[40..48].try_into().unwrap()),
+            root_page_id: u32::from_le_bytes([buf[32], buf[33], buf[34], buf[35]]),
+            height: u32::from_le_bytes([buf[36], buf[37], buf[38], buf[39]]),
+            num_entries: u64::from_le_bytes([
+                buf[40], buf[41], buf[42], buf[43], buf[44], buf[45], buf[46], buf[47],
+            ]),
         }
     }
 }

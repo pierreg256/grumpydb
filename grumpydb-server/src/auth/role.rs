@@ -49,10 +49,7 @@ impl RoleName {
         match self {
             RoleName::ServerAdmin => true,
             RoleName::TenantAdmin => !matches!(action, Action::ManageServer),
-            RoleName::DbAdmin => matches!(
-                action,
-                Action::Read | Action::Write | Action::Admin
-            ),
+            RoleName::DbAdmin => matches!(action, Action::Read | Action::Write | Action::Admin),
             RoleName::ReadWrite => matches!(action, Action::Read | Action::Write),
             RoleName::ReadOnly => matches!(action, Action::Read),
         }
@@ -86,7 +83,10 @@ pub enum ResourceScope {
     /// All collections in a database.
     AllCollections { database: String },
     /// A specific collection.
-    Collection { database: String, collection: String },
+    Collection {
+        database: String,
+        collection: String,
+    },
 }
 
 impl ResourceScope {
@@ -110,9 +110,7 @@ impl ResourceScope {
             },
             ResourceScope::AllCollections { database } => match target {
                 ResourceScope::AllCollections { database: t } => database == t,
-                ResourceScope::Collection {
-                    database: td, ..
-                } => database == td,
+                ResourceScope::Collection { database: td, .. } => database == td,
                 _ => false,
             },
             ResourceScope::Collection {
@@ -216,9 +214,7 @@ mod tests {
         let server = ResourceScope::Server;
         assert!(server.covers(&ResourceScope::Server));
         assert!(server.covers(&ResourceScope::Tenant));
-        assert!(server.covers(&ResourceScope::Database {
-            name: "x".into()
-        }));
+        assert!(server.covers(&ResourceScope::Database { name: "x".into() }));
         assert!(server.covers(&ResourceScope::Collection {
             database: "x".into(),
             collection: "y".into()
@@ -230,9 +226,7 @@ mod tests {
         let tenant = ResourceScope::Tenant;
         assert!(!tenant.covers(&ResourceScope::Server));
         assert!(tenant.covers(&ResourceScope::Tenant));
-        assert!(tenant.covers(&ResourceScope::Database {
-            name: "x".into()
-        }));
+        assert!(tenant.covers(&ResourceScope::Database { name: "x".into() }));
         assert!(tenant.covers(&ResourceScope::Collection {
             database: "x".into(),
             collection: "y".into()

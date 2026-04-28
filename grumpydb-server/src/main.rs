@@ -37,12 +37,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Data directory: {}", config.server.data_dir.display());
 
+    // Bootstrap password resolution (Phase 26): require an explicit password
+    // for the first-ever start. After the initial admin exists on disk, this
+    // value is ignored.
+    //
+    //   --bootstrap-password <pw>      CLI flag
+    //   GRUMPYDB_BOOTSTRAP_PASSWORD    environment variable
+    //
+    // Refusing to bootstrap silently with `admin/admin` prevents the most
+    // common production foot-gun.
+    let bootstrap_password = get_arg(&args, "--bootstrap-password")
+        .or_else(|| std::env::var("GRUMPYDB_BOOTSTRAP_PASSWORD").ok());
+
     // Initialize auth store
     let auth_dir = config.server.data_dir.join("_auth");
     let auth_store = AuthStore::open(
         &auth_dir,
         config.auth.access_token_ttl_secs,
         config.auth.refresh_token_ttl_secs,
+        bootstrap_password.as_deref(),
     )?;
     let auth_store = Arc::new(parking_lot::RwLock::new(auth_store));
 

@@ -3,8 +3,8 @@
 //! Parses single-line text commands into [`Command`] variants.
 //! Commands are case-insensitive for the verb, case-sensitive for arguments.
 
-use crate::command::Command;
 use crate::MAX_LINE_LENGTH;
+use crate::command::Command;
 
 /// Error during command parsing.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -103,11 +103,7 @@ fn split_first_word(s: &str) -> (&str, &str) {
 }
 
 /// Require a non-empty argument.
-fn require_arg<'a>(
-    rest: &'a str,
-    command: &str,
-    arg_name: &str,
-) -> Result<&'a str, ProtocolError> {
+fn require_arg<'a>(rest: &'a str, command: &str, arg_name: &str) -> Result<&'a str, ProtocolError> {
     if rest.is_empty() {
         Err(ProtocolError::MissingArgument(format!(
             "{command} requires <{arg_name}>"
@@ -603,7 +599,10 @@ mod tests {
     #[test]
     fn test_parse_insert() {
         assert_eq!(
-            parse_command("INSERT users a3b4c5d6-1234-5678-9abc-def012345678 {\"name\":\"bob\"}\r\n").unwrap(),
+            parse_command(
+                "INSERT users a3b4c5d6-1234-5678-9abc-def012345678 {\"name\":\"bob\"}\r\n"
+            )
+            .unwrap(),
             Command::Insert {
                 collection: "users".into(),
                 key: "a3b4c5d6-1234-5678-9abc-def012345678".into(),
@@ -900,10 +899,7 @@ mod tests {
 
     #[test]
     fn test_parse_empty() {
-        assert!(matches!(
-            parse_command("\r\n"),
-            Err(ProtocolError::Empty)
-        ));
+        assert!(matches!(parse_command("\r\n"), Err(ProtocolError::Empty)));
         assert!(matches!(parse_command(""), Err(ProtocolError::Empty)));
     }
 

@@ -1,8 +1,8 @@
 //! TCP listener with optional TLS, connection accept loop, and graceful shutdown.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
@@ -89,19 +89,13 @@ pub async fn listen(
     Ok(())
 }
 
-fn build_tls_acceptor(
-    config: &ServerConfig,
-) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
+fn build_tls_acceptor(config: &ServerConfig) -> Result<TlsAcceptor, Box<dyn std::error::Error>> {
     let cert_path = config
         .tls
         .cert_file
         .as_deref()
         .unwrap_or("_auth/server.crt");
-    let key_path = config
-        .tls
-        .key_file
-        .as_deref()
-        .unwrap_or("_auth/server.key");
+    let key_path = config.tls.key_file.as_deref().unwrap_or("_auth/server.key");
 
     // Auto-generate self-signed cert if files don't exist
     if !Path::new(cert_path).exists() || !Path::new(key_path).exists() {

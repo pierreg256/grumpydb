@@ -588,8 +588,38 @@ pub enum GrumpyError {
 
     #[error("database not found: {0}")]
     DatabaseNotFound(String),
+
+    #[error("data corruption detected: {0}")]
+    Corruption(String),
+
+    #[error("invalid page offset: page {page}, offset {offset}")]
+    InvalidPageOffset { page: u32, offset: u16 },
+
+    #[error("invalid variable-length key: {0}")]
+    InvalidVarKey(String),
 }
 ```
+
+### 12.1 No-`unwrap` policy in the engine
+
+The engine crate (`src/`) enforces a "no panic in production" policy via a
+crate-level lint at the top of `src/lib.rs`:
+
+```rust
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::panic, clippy::expect_used))]
+```
+
+The lint is allowed inside `#[cfg(test)]` modules and doc-comment examples but
+fires on every production `unwrap()`, `expect()`, and `panic!` call.
+"Shouldn't happen" cases (malformed bytes on disk, invalid offsets, etc.)
+return one of the three new variants:
+
+- `Corruption(String)` for generic invariant violations.
+- `InvalidPageOffset { page, offset }` for out-of-range slot lookups.
+- `InvalidVarKey(String)` for malformed variable-length B+Tree keys.
+
+These bubble up through `?` and surface to the client as
+`Response::Error("data corruption detected: …")` over the wire.
 
 ## 13. Secondary Indexes
 
@@ -744,7 +774,7 @@ cargo run -p grumpy-repl -- --eval "use test; db.users.count()"  # one-shot
 
 # Connected mode (TCP client to a running GrumpyDB server)
 cargo run -p grumpy-repl -- --host localhost --port 6380 --tenant acme --user alice
-cargo run -p grumpy-repl -- --host localhost --no-tls --tenant acme --user admin --password admin
+cargo run -p grumpy-repl -- --host localhost --no-tls --tenant acme --user admin --password "<bootstrap-password>"
 ```
 
 ### 15.2 Commands
@@ -1068,7 +1098,30 @@ Default lifetimes: access 1 h, refresh 7 d (configurable). Secret key (32 random
       <tenant>__<username>.json      ← User record (argon2 hash + roles)
 ```
 
-A default `admin` user is bootstrapped in tenant `_system` with role `server_admin` (password `admin`) on first boot when `_auth/users/` is empty.
+A default `admin` user is bootstrapped in tenant `_system` with role
+`server_admin` only when:
+
+1. The auth directory `_auth/users/` is empty on startup, **and**
+2. A bootstrap password is supplied either via the CLI flag
+   `--bootstrap-password <pw>` or the environment variable
+   `GRUMPYDB_BOOTSTRAP_PASSWORD`.
+
+`AuthStore::open` takes that password as its 4th argument
+(`bootstrap_password: Option<&str>`). If users already exist on disk, the
+parameter is ignored. If no users exist on disk and no password is supplied,
+`AuthStore::open` returns `Err(AuthError::BootstrapRefused(...))` and the
+server refuses to start. The legacy silent `_system/admin/admin` default is
+gone.
+
+Bootstrap passwords shorter than 8 characters emit a warning. The
+`secret.key` file is created with mode `0600` on Unix; existing files with
+group/world bits are detected and re-tightened with a warning logged.
+
+`AuthError` variants: `HashError`, `InvalidCredentials`, `UserNotFound`,
+`UserAlreadyExists`, `JwtError`, `TokenExpired`, `InvalidToken`,
+`AccessDenied`, `NotAuthenticated`, `Io`, `ClockError` (for
+`SystemTime::now()` failures replacing former `unwrap()` sites), `ReadOnly`,
+`PasswordChangeRequired`, `BootstrapRefused`.
 
 **RBAC enforcer** (`grumpydb-server::session::SessionContext`):
 
@@ -1142,6 +1195,14 @@ Each connection is spawned in its own tokio task. The handler:
 3. Calls `session.authorize(&cmd)` (returns `-ERR access denied` on failure).
 4. Dispatches to `execute_command` which maps to `SharedServer` calls.
 5. Writes the `Response` back to the stream.
+
+**Panic isolation**: every `execute_command` invocation is wrapped in
+`AssertUnwindSafe(...).catch_unwind().await` (via the `futures` crate's
+`FutureExt`). If the engine panics on a corrupt page or document, the panic
+is caught, logged via `tracing::error!`, and the client receives
+`Response::Error("internal error (corruption): …")` instead of having its
+connection (and the whole server task) torn down. A panic on one
+connection cannot affect any other connection.
 
 **Tenant auto-provisioning**: a successful `LOGIN` for an existing user creates the matching tenant client directory if it does not yet exist. `USE <db>` similarly creates the database on demand (subject to RBAC).
 
@@ -1220,7 +1281,7 @@ cargo run -p grumpy-repl -- --embedded --data ./mydata
 cargo run -p grumpy-repl -- --host localhost --port 6380 \
     --tenant acme --user alice --password s3cr3t
 cargo run -p grumpy-repl -- --host localhost --no-tls \
-    --tenant _system --user admin --password admin
+    --tenant _system --user admin --password "<bootstrap-password>"
 ```
 
 `tcp_backend.rs` wraps `GrumpyClient` and uses `tokio::runtime::Runtime::block_on()` so the REPL itself stays synchronous. Parsed shell commands are translated to protocol command strings and dispatched via `client.raw_execute()`. Responses are pretty-printed (JSON formatting, arrays).

@@ -29,6 +29,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 parking_lot = "0.12"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+futures = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

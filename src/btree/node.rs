@@ -82,19 +82,16 @@ impl InternalNode {
     /// Deserializes an internal node from a page buffer.
     pub fn from_bytes(buf: &[u8; PAGE_SIZE]) -> Self {
         let header = PageHeader::read_from(buf);
-        let num_keys = u16::from_le_bytes(buf[32..34].try_into().unwrap());
-        let right_child = u32::from_le_bytes(buf[34..38].try_into().unwrap());
+        let num_keys = u16::from_le_bytes([buf[32], buf[33]]);
+        let right_child = u32::from_le_bytes([buf[34], buf[35], buf[36], buf[37]]);
 
         let mut entries = Vec::with_capacity(num_keys as usize);
         for i in 0..num_keys as usize {
             let base = 38 + i * INTERNAL_ENTRY_SIZE;
             let mut key = [0u8; KEY_SIZE];
             key.copy_from_slice(&buf[base..base + KEY_SIZE]);
-            let child_page_id = u32::from_le_bytes(
-                buf[base + KEY_SIZE..base + KEY_SIZE + 4]
-                    .try_into()
-                    .unwrap(),
-            );
+            let p = base + KEY_SIZE;
+            let child_page_id = u32::from_le_bytes([buf[p], buf[p + 1], buf[p + 2], buf[p + 3]]);
             entries.push(InternalEntry { key, child_page_id });
         }
 
@@ -275,25 +272,18 @@ impl LeafNode {
     /// Deserializes a leaf node from a page buffer.
     pub fn from_bytes(buf: &[u8; PAGE_SIZE]) -> Self {
         let header = PageHeader::read_from(buf);
-        let num_entries = u16::from_le_bytes(buf[32..34].try_into().unwrap());
-        let next_leaf = u32::from_le_bytes(buf[34..38].try_into().unwrap());
-        let prev_leaf = u32::from_le_bytes(buf[38..42].try_into().unwrap());
+        let num_entries = u16::from_le_bytes([buf[32], buf[33]]);
+        let next_leaf = u32::from_le_bytes([buf[34], buf[35], buf[36], buf[37]]);
+        let prev_leaf = u32::from_le_bytes([buf[38], buf[39], buf[40], buf[41]]);
 
         let mut entries = Vec::with_capacity(num_entries as usize);
         for i in 0..num_entries as usize {
             let base = 42 + i * LEAF_ENTRY_SIZE;
             let mut key = [0u8; KEY_SIZE];
             key.copy_from_slice(&buf[base..base + KEY_SIZE]);
-            let page_id = u32::from_le_bytes(
-                buf[base + KEY_SIZE..base + KEY_SIZE + 4]
-                    .try_into()
-                    .unwrap(),
-            );
-            let slot_id = u16::from_le_bytes(
-                buf[base + KEY_SIZE + 4..base + KEY_SIZE + 6]
-                    .try_into()
-                    .unwrap(),
-            );
+            let p = base + KEY_SIZE;
+            let page_id = u32::from_le_bytes([buf[p], buf[p + 1], buf[p + 2], buf[p + 3]]);
+            let slot_id = u16::from_le_bytes([buf[p + 4], buf[p + 5]]);
             entries.push(LeafEntry {
                 key,
                 page_id,

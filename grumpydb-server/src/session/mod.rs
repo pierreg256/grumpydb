@@ -4,8 +4,8 @@
 //! claims and the currently selected database. The `authorize()` method
 //! checks permissions before every command execution.
 
-use grumpydb_protocol::command::{Action, Resource};
 use grumpydb_protocol::Command;
+use grumpydb_protocol::command::{Action, Resource};
 
 use crate::auth::jwt::Claims;
 use crate::auth::role::ResourceScope;
@@ -80,10 +80,7 @@ impl SessionContext {
         }
 
         // Must be authenticated
-        let claims = self
-            .claims
-            .as_ref()
-            .ok_or(AuthError::NotAuthenticated)?;
+        let claims = self.claims.as_ref().ok_or(AuthError::NotAuthenticated)?;
 
         let action = command.required_action();
 
@@ -143,11 +140,7 @@ mod tests {
     use super::*;
     use crate::auth::role::{ResourceScope, RoleAssignment, RoleName};
 
-    fn make_claims(
-        username: &str,
-        tenant: &str,
-        roles: Vec<RoleAssignment>,
-    ) -> Claims {
+    fn make_claims(username: &str, tenant: &str, roles: Vec<RoleAssignment>) -> Claims {
         Claims {
             sub: username.into(),
             tenant: tenant.into(),
@@ -189,13 +182,15 @@ mod tests {
         // Not authenticated, but pre-auth commands work
         assert!(session.authorize(&Command::Ping).is_ok());
         assert!(session.authorize(&Command::Quit).is_ok());
-        assert!(session
-            .authorize(&Command::Login {
-                tenant: "t".into(),
-                username: "u".into(),
-                password: "p".into(),
-            })
-            .is_ok());
+        assert!(
+            session
+                .authorize(&Command::Login {
+                    tenant: "t".into(),
+                    username: "u".into(),
+                    password: "p".into(),
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -271,25 +266,31 @@ mod tests {
         ));
         session.set_database("mydb".into());
 
-        assert!(session
-            .authorize(&Command::Get {
-                collection: "u".into(),
-                key: "k".into()
-            })
-            .is_ok());
-        assert!(session
-            .authorize(&Command::Insert {
-                collection: "u".into(),
-                key: "k".into(),
-                value: "v".into()
-            })
-            .is_ok());
-        assert!(session
-            .authorize(&Command::Delete {
-                collection: "u".into(),
-                key: "k".into()
-            })
-            .is_ok());
+        assert!(
+            session
+                .authorize(&Command::Get {
+                    collection: "u".into(),
+                    key: "k".into()
+                })
+                .is_ok()
+        );
+        assert!(
+            session
+                .authorize(&Command::Insert {
+                    collection: "u".into(),
+                    key: "k".into(),
+                    value: "v".into()
+                })
+                .is_ok()
+        );
+        assert!(
+            session
+                .authorize(&Command::Delete {
+                    collection: "u".into(),
+                    key: "k".into()
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -328,19 +329,25 @@ mod tests {
         ));
         session.set_database("mydb".into());
 
-        assert!(session
-            .authorize(&Command::CreateCollection("users".into()))
-            .is_ok());
-        assert!(session
-            .authorize(&Command::DropCollection("users".into()))
-            .is_ok());
-        assert!(session
-            .authorize(&Command::CreateIndex {
-                collection: "u".into(),
-                index_name: "idx".into(),
-                field_path: "f".into()
-            })
-            .is_ok());
+        assert!(
+            session
+                .authorize(&Command::CreateCollection("users".into()))
+                .is_ok()
+        );
+        assert!(
+            session
+                .authorize(&Command::DropCollection("users".into()))
+                .is_ok()
+        );
+        assert!(
+            session
+                .authorize(&Command::CreateIndex {
+                    collection: "u".into(),
+                    index_name: "idx".into(),
+                    field_path: "f".into()
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -375,12 +382,16 @@ mod tests {
             }],
         ));
 
-        assert!(session
-            .authorize(&Command::CreateDatabase("newdb".into()))
-            .is_ok());
-        assert!(session
-            .authorize(&Command::DropDatabase("old".into()))
-            .is_ok());
+        assert!(
+            session
+                .authorize(&Command::CreateDatabase("newdb".into()))
+                .is_ok()
+        );
+        assert!(
+            session
+                .authorize(&Command::DropDatabase("old".into()))
+                .is_ok()
+        );
         assert!(session.authorize(&Command::ListDatabases).is_ok());
     }
 
@@ -415,19 +426,27 @@ mod tests {
         ));
         session.set_database("anydb".into());
 
-        assert!(session.authorize(&Command::CreateTenant("x".into())).is_ok());
+        assert!(
+            session
+                .authorize(&Command::CreateTenant("x".into()))
+                .is_ok()
+        );
         assert!(session.authorize(&Command::DropTenant("x".into())).is_ok());
         assert!(session.authorize(&Command::ListTenants).is_ok());
-        assert!(session
-            .authorize(&Command::CreateDatabase("x".into()))
-            .is_ok());
-        assert!(session
-            .authorize(&Command::Insert {
-                collection: "c".into(),
-                key: "k".into(),
-                value: "v".into()
-            })
-            .is_ok());
+        assert!(
+            session
+                .authorize(&Command::CreateDatabase("x".into()))
+                .is_ok()
+        );
+        assert!(
+            session
+                .authorize(&Command::Insert {
+                    collection: "c".into(),
+                    key: "k".into(),
+                    value: "v".into()
+                })
+                .is_ok()
+        );
     }
 
     #[test]
@@ -446,12 +465,14 @@ mod tests {
 
         // Allowed database
         session.set_database("allowed_db".into());
-        assert!(session
-            .authorize(&Command::Get {
-                collection: "u".into(),
-                key: "k".into()
-            })
-            .is_ok());
+        assert!(
+            session
+                .authorize(&Command::Get {
+                    collection: "u".into(),
+                    key: "k".into()
+                })
+                .is_ok()
+        );
 
         // Different database → denied
         session.set_database("other_db".into());
@@ -482,45 +503,47 @@ mod tests {
             vec![
                 RoleAssignment {
                     role: RoleName::ReadOnly,
-                    scope: ResourceScope::Database {
-                        name: "db1".into(),
-                    },
+                    scope: ResourceScope::Database { name: "db1".into() },
                 },
                 RoleAssignment {
                     role: RoleName::ReadWrite,
-                    scope: ResourceScope::Database {
-                        name: "db2".into(),
-                    },
+                    scope: ResourceScope::Database { name: "db2".into() },
                 },
             ],
         ));
 
         // Can read from db1
         session.set_database("db1".into());
-        assert!(session
-            .authorize(&Command::Get {
-                collection: "u".into(),
-                key: "k".into()
-            })
-            .is_ok());
+        assert!(
+            session
+                .authorize(&Command::Get {
+                    collection: "u".into(),
+                    key: "k".into()
+                })
+                .is_ok()
+        );
 
         // Cannot write to db1
-        assert!(session
-            .authorize(&Command::Insert {
-                collection: "u".into(),
-                key: "k".into(),
-                value: "v".into()
-            })
-            .is_err());
+        assert!(
+            session
+                .authorize(&Command::Insert {
+                    collection: "u".into(),
+                    key: "k".into(),
+                    value: "v".into()
+                })
+                .is_err()
+        );
 
         // Can write to db2
         session.set_database("db2".into());
-        assert!(session
-            .authorize(&Command::Insert {
-                collection: "u".into(),
-                key: "k".into(),
-                value: "v".into()
-            })
-            .is_ok());
+        assert!(
+            session
+                .authorize(&Command::Insert {
+                    collection: "u".into(),
+                    key: "k".into(),
+                    value: "v".into()
+                })
+                .is_ok()
+        );
     }
 }

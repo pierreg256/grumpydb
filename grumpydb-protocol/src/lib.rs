@@ -14,7 +14,7 @@ pub mod parser;
 pub mod response;
 
 pub use command::{Action, Command, Resource};
-pub use parser::{parse_command, ProtocolError};
+pub use parser::{ProtocolError, parse_command};
 pub use response::Response;
 
 /// Default TCP port for GrumpyDB.
@@ -37,7 +37,7 @@ mod tests {
     fn test_constants() {
         assert_eq!(DEFAULT_PORT, 6380);
         assert_eq!(PROTOCOL_VERSION, "4.0.0");
-        assert!(MAX_LINE_LENGTH > 0);
-        assert!(MAX_BULK_LENGTH > MAX_LINE_LENGTH);
+        const _: () = assert!(MAX_LINE_LENGTH > 0);
+        const _: () = assert!(MAX_BULK_LENGTH > MAX_LINE_LENGTH);
     }
 }

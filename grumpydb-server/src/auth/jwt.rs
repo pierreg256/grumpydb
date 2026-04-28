@@ -2,7 +2,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::role::RoleAssignment;
@@ -81,7 +81,7 @@ fn generate_token(
 ) -> Result<String, AuthError> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .map_err(|e| AuthError::ClockError(e.to_string()))?
         .as_secs();
 
     let claims = Claims {
@@ -242,15 +242,11 @@ mod tests {
             roles: vec![
                 RoleAssignment {
                     role: RoleName::ReadWrite,
-                    scope: ResourceScope::Database {
-                        name: "db1".into(),
-                    },
+                    scope: ResourceScope::Database { name: "db1".into() },
                 },
                 RoleAssignment {
                     role: RoleName::DbAdmin,
-                    scope: ResourceScope::Database {
-                        name: "db2".into(),
-                    },
+                    scope: ResourceScope::Database { name: "db2".into() },
                 },
             ],
             created_at: 0,

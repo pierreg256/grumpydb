@@ -1,14 +1,16 @@
 //! Per-connection handler: read commands, authorize, execute, respond.
 
 use std::collections::BTreeMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+use futures::FutureExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
 use grumpydb::concurrency::shared::SharedServer;
 use grumpydb::document::value::Value;
-use grumpydb_protocol::{parse_command, Command, Response, MAX_LINE_LENGTH, PROTOCOL_VERSION};
+use grumpydb_protocol::{Command, MAX_LINE_LENGTH, PROTOCOL_VERSION, Response, parse_command};
 
 use crate::auth::role::{ResourceScope, RoleAssignment, RoleName};
 use crate::auth::store::AuthStore;
@@ -83,13 +85,36 @@ where
             continue;
         }
 
-        // Execute
-        let response =
-            execute_command(&command, &mut session, &auth_store, &shared_server).await;
+        // Execute (with panic isolation: a corrupt page or bug in the engine
+        // must not tear down the entire server. Surface as Corruption error.)
+        let response = AssertUnwindSafe(execute_command(
+            &command,
+            &mut session,
+            &auth_store,
+            &shared_server,
+        ))
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|panic_payload| {
+            let msg = panic_message(&panic_payload);
+            tracing::error!(panic = %msg, ?command, "engine panic caught");
+            Response::Error(format!("internal error (corruption): {msg}"))
+        });
         write_resp(&mut writer, &response).await?;
     }
 
     Ok(())
+}
+
+/// Extract a string description from a panic payload.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
 }
 
 async fn write_resp<W: tokio::io::AsyncWrite + Unpin>(
@@ -296,9 +321,9 @@ async fn execute_command(
             s(db.drop_index(collection, index_name))?;
             Ok(Response::Ok("OK".into()))
         }),
-        Command::ListIndexes(_collection) => with_db(session, shared_server, |_db| {
-            Ok(Response::Array(vec![]))
-        }),
+        Command::ListIndexes(_collection) => {
+            with_db(session, shared_server, |_db| Ok(Response::Array(vec![])))
+        }
         Command::Query {
             collection,
             index_name,
@@ -382,7 +407,12 @@ async fn execute_command(
                 .into_iter()
                 .map(|u| {
                     let roles: Vec<String> = u.roles.iter().map(|r| r.role.to_string()).collect();
-                    Response::Bulk(Some(format!("{}@{}:{}", u.username, u.tenant, roles.join(","))))
+                    Response::Bulk(Some(format!(
+                        "{}@{}:{}",
+                        u.username,
+                        u.tenant,
+                        roles.join(",")
+                    )))
                 })
                 .collect();
             Response::Array(items)
@@ -477,9 +507,7 @@ async fn execute_command(
 /// Execute a closure with a SharedDatabase handle from the current session.
 fn with_db<F>(session: &SessionContext, shared_server: &SharedServer, f: F) -> Response
 where
-    F: FnOnce(
-        &grumpydb::concurrency::shared::SharedDatabase,
-    ) -> Result<Response, String>,
+    F: FnOnce(&grumpydb::concurrency::shared::SharedDatabase) -> Result<Response, String>,
 {
     let tenant = match session.tenant() {
         Ok(t) => t.to_string(),
@@ -525,11 +553,7 @@ fn split_tenant_user(input: &str, default_tenant: &str) -> (String, String) {
 ///
 /// Ambiguity rule for bare `name`: if a database is selected (via USE),
 /// it's a **collection** in that database. Otherwise it's a **database**.
-fn parse_resource(
-    input: &str,
-    session_tenant: &str,
-    current_db: Option<&str>,
-) -> ResourceScope {
+fn parse_resource(input: &str, session_tenant: &str, current_db: Option<&str>) -> ResourceScope {
     // Step 1: Split off @tenant suffix
     let (before_at, _tenant) = if let Some(at_pos) = input.rfind('@') {
         (&input[..at_pos], &input[at_pos + 1..])
@@ -593,9 +617,7 @@ fn json_to_value(json: &serde_json::Value) -> Value {
             }
         }
         serde_json::Value::String(s) => Value::String(s.clone()),
-        serde_json::Value::Array(arr) => {
-            Value::Array(arr.iter().map(json_to_value).collect())
-        }
+        serde_json::Value::Array(arr) => Value::Array(arr.iter().map(json_to_value).collect()),
         serde_json::Value::Object(obj) => {
             let mut map = BTreeMap::new();
             for (k, v) in obj {

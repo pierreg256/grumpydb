@@ -9,15 +9,19 @@
 
 ```bash
 cargo build --workspace             # Build all crates
-cargo test --workspace              # All tests (~445 across all workspace crates)
+cargo test --workspace              # All tests (~468 across all workspace crates)
 cargo test --lib                    # Unit tests only (current crate)
 cargo test --test '*'               # Integration tests only
-cargo clippy --workspace -- -D warnings  # Lint (strict, zero warnings)
-cargo fmt --check                   # Check formatting
+cargo clippy --workspace --all-targets -- -D warnings  # Lint (strict, zero warnings)
+cargo fmt --all -- --check          # Check formatting
 cargo doc --workspace --no-deps     # Generate docs
 
 # Run a specific binary
-cargo run -p grumpydb-server -- --no-tls --data ./data
+# Note: the server requires --bootstrap-password on the FIRST start
+# (or the env variable GRUMPYDB_BOOTSTRAP_PASSWORD). Subsequent starts on
+# the same data directory do not need it.
+cargo run -p grumpydb-server -- --no-tls --data ./data \
+    --bootstrap-password "dev-only-password"
 cargo run -p grumpy-repl
 cargo run --example taskman -- help
 
@@ -30,6 +34,8 @@ cd drivers/typescript && npm install && npm test && npm run build
 ```
 grumpydb/                       # workspace root
 ├── Cargo.toml                  # workspace members
+│
+├── .github/workflows/          # CI: fmt, clippy, test (stable + 1.85 MSRV), docs, audit
 │
 ├── src/                        # grumpydb crate (storage engine library)
 │   ├── error.rs                # GrumpyError enum, Result<T> alias
@@ -77,7 +83,8 @@ grumpydb/                       # workspace root
     ├── ARCHITECTURE.md
     ├── IMPLEMENTATION_PLAN.md     # phases 1–8: storage engine
     ├── IMPLEMENTATION_PLAN_V2.md  # phases 9–15: server + concurrency + shell
-    └── IMPLEMENTATION_PLAN_V3.md  # phases 16–23: protocol + auth + TCP + drivers
+    ├── IMPLEMENTATION_PLAN_V3.md  # phases 16–23: protocol + auth + TCP + drivers
+    └── IMPLEMENTATION_PLAN_V4.md  # phases 24–43: hardening, observability, RS256/JWKS, replication, MVCC
 ```
 
 ## Code conventions
@@ -98,7 +105,12 @@ grumpydb/                       # workspace root
 
 - Use `thiserror` for error definitions
 - All functions return `Result<T, GrumpyError>`
-- No `unwrap()` or `panic!` outside of tests
+- **No `unwrap()`, `expect()`, or `panic!` in `src/`** — enforced by the
+  crate-level lint
+  `#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::panic, clippy::expect_used))]`
+  in `src/lib.rs`. Use `?` propagation; for "shouldn't happen" cases return
+  `GrumpyError::Corruption(...)`.
+- The lint is allowed inside `#[cfg(test)]` modules.
 
 ### Serialization
 
@@ -121,9 +133,13 @@ Use `tempfile::TempDir` for any test involving disk I/O.
 1. Read the relevant skill file in `.claude/skills/` before coding
 2. Implement the feature
 3. Write unit tests in the same file
-4. Run: `cargo test && cargo clippy -- -D warnings`
+4. Run: `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all -- --check`
 5. Write integration tests in `tests/` if the feature spans multiple modules
 6. Update documentation (the docs-agent handles this automatically)
+
+Every push to `master` and every PR is validated by GitHub Actions
+(`.github/workflows/ci.yml`): `fmt`, `clippy --all-targets -D warnings`,
+`test` (matrix: stable + 1.85 MSRV), `docs`, `audit`. A red CI blocks merge.
 
 ## Dependencies
 
@@ -137,6 +153,7 @@ Use `tempfile::TempDir` for any test involving disk I/O.
 | `rand` | Random data generation for tests |
 | `rustyline` | Line editing for grumpy-repl (binary crate) |
 | `serde_json` | JSON serialization for grumpy-repl (binary crate) |
+| `futures` | `FutureExt::catch_unwind` for panic isolation in `grumpydb-server` |
 
 ### Workspace crates
 

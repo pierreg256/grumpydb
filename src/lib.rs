@@ -25,6 +25,13 @@
 //! db.close().unwrap();
 //! ```
 
+// Forbid panics in production engine code. Doc-comment examples and `#[cfg(test)]`
+// modules are exempt; new code should propagate errors via `Result<T, GrumpyError>`.
+#![cfg_attr(
+    not(test),
+    warn(clippy::unwrap_used, clippy::panic, clippy::expect_used)
+)]
+
 pub mod btree;
 pub mod buffer;
 pub mod collection;

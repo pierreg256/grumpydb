@@ -193,7 +193,10 @@ impl BTree {
         // entries[mid].child_page_id was the left child of promoted_key,
         // which means it contains keys < promoted_key and >= entries[mid-1].key.
         // This should become left's right_child.
-        let mid_entry = full_node.entries.pop().unwrap();
+        let mid_entry = full_node
+            .entries
+            .pop()
+            .ok_or_else(|| GrumpyError::Corruption("split_internal: empty entries".into()))?;
         full_node.num_keys = full_node.entries.len() as u16;
 
         // Right node setup
@@ -286,7 +289,9 @@ impl BTree {
 
     /// Rebalances an underfull leaf by redistributing or merging with a sibling.
     fn rebalance_leaf(&mut self, leaf: LeafNode, mut path: Vec<(u32, usize)>) -> Result<()> {
-        let (parent_page_id, child_idx) = path.pop().unwrap();
+        let (parent_page_id, child_idx) = path
+            .pop()
+            .ok_or_else(|| GrumpyError::Corruption("rebalance_leaf: empty path".into()))?;
         let buf = self.pm.read_page(parent_page_id)?;
         let mut parent = InternalNode::from_bytes(&buf);
 
@@ -344,7 +349,9 @@ impl BTree {
         parent: &mut InternalNode,
         child_idx: usize,
     ) -> Result<()> {
-        let moved = left.entries.pop().unwrap();
+        let moved = left.entries.pop().ok_or_else(|| {
+            GrumpyError::Corruption("redistribute_leaf_from_left: empty left sibling".into())
+        })?;
         left.num_entries -= 1;
         leaf.insert_entry(moved);
 
@@ -490,7 +497,9 @@ impl BTree {
         node: InternalNode,
         mut path: Vec<(u32, usize)>,
     ) -> Result<()> {
-        let (grandparent_page_id, child_idx) = path.pop().unwrap();
+        let (grandparent_page_id, child_idx) = path
+            .pop()
+            .ok_or_else(|| GrumpyError::Corruption("rebalance_internal: empty path".into()))?;
         let buf = self.pm.read_page(grandparent_page_id)?;
         let mut grandparent = InternalNode::from_bytes(&buf);
         let num_children = grandparent.num_keys as usize + 1;
@@ -565,7 +574,9 @@ impl BTree {
         node.num_keys += 1;
 
         // Move last entry from left up to grandparent as new separator
-        let moved_up = left.entries.pop().unwrap();
+        let moved_up = left.entries.pop().ok_or_else(|| {
+            GrumpyError::Corruption("redistribute_internal_from_left: empty left sibling".into())
+        })?;
         left.num_keys -= 1;
         left.right_child = moved_up.child_page_id;
         grandparent.entries[sep_idx].key = moved_up.key;

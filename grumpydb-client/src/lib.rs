@@ -87,7 +87,11 @@ impl GrumpyClient {
 
     /// Create a database.
     pub async fn create_database(&mut self, name: &str) -> Result<(), ClientError> {
-        expect_ok(self.conn.execute(&format!("CREATE DATABASE {name}")).await?)
+        expect_ok(
+            self.conn
+                .execute(&format!("CREATE DATABASE {name}"))
+                .await?,
+        )
     }
 
     /// Drop a database.
@@ -143,7 +147,8 @@ impl DatabaseHandle<'_> {
         key: Uuid,
         value: &serde_json::Value,
     ) -> Result<(), ClientError> {
-        let json = serde_json::to_string(value).map_err(|e| ClientError::Protocol(e.to_string()))?;
+        let json =
+            serde_json::to_string(value).map_err(|e| ClientError::Protocol(e.to_string()))?;
         expect_ok(
             self.conn
                 .execute(&format!("INSERT {collection} {key} {json}"))
@@ -163,8 +168,8 @@ impl DatabaseHandle<'_> {
             .await?
         {
             Response::Bulk(Some(data)) => {
-                let val: serde_json::Value =
-                    serde_json::from_str(&data).map_err(|e| ClientError::Protocol(e.to_string()))?;
+                let val: serde_json::Value = serde_json::from_str(&data)
+                    .map_err(|e| ClientError::Protocol(e.to_string()))?;
                 Ok(Some(val))
             }
             Response::Bulk(None) => Ok(None),
@@ -180,7 +185,8 @@ impl DatabaseHandle<'_> {
         key: &Uuid,
         value: &serde_json::Value,
     ) -> Result<(), ClientError> {
-        let json = serde_json::to_string(value).map_err(|e| ClientError::Protocol(e.to_string()))?;
+        let json =
+            serde_json::to_string(value).map_err(|e| ClientError::Protocol(e.to_string()))?;
         expect_ok(
             self.conn
                 .execute(&format!("UPDATE {collection} {key} {json}"))
@@ -214,11 +220,7 @@ impl DatabaseHandle<'_> {
 
     /// Count documents.
     pub async fn count(&mut self, collection: &str) -> Result<i64, ClientError> {
-        match self
-            .conn
-            .execute(&format!("COUNT {collection}"))
-            .await?
-        {
+        match self.conn.execute(&format!("COUNT {collection}")).await? {
             Response::Integer(n) => Ok(n),
             Response::Error(msg) => Err(ClientError::Server(msg)),
             _ => Err(ClientError::Protocol("unexpected COUNT response".into())),
@@ -297,7 +299,8 @@ impl DatabaseHandle<'_> {
         index_name: &str,
         value: &serde_json::Value,
     ) -> Result<Vec<(String, serde_json::Value)>, ClientError> {
-        let json = serde_json::to_string(value).map_err(|e| ClientError::Protocol(e.to_string()))?;
+        let json =
+            serde_json::to_string(value).map_err(|e| ClientError::Protocol(e.to_string()))?;
         parse_kv_array(
             self.conn
                 .execute(&format!("QUERY {collection} {index_name} {json}"))
@@ -309,11 +312,7 @@ impl DatabaseHandle<'_> {
 
     /// Compact a collection.
     pub async fn compact(&mut self, collection: &str) -> Result<(), ClientError> {
-        expect_ok(
-            self.conn
-                .execute(&format!("COMPACT {collection}"))
-                .await?,
-        )
+        expect_ok(self.conn.execute(&format!("COMPACT {collection}")).await?)
     }
 
     /// Flush all data to disk.

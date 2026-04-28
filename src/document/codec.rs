@@ -218,7 +218,11 @@ fn decode_recursive(cursor: &mut &[u8], depth: usize) -> Result<Value> {
             }
             let collection = read_string(cursor, name_len as usize)?;
             let uuid_bytes = read_bytes(cursor, 16)?;
-            let uuid = Uuid::from_bytes(uuid_bytes.try_into().unwrap());
+            let uuid = {
+                let mut arr = [0u8; 16];
+                arr.copy_from_slice(&uuid_bytes);
+                Uuid::from_bytes(arr)
+            };
             Ok(Value::Ref(collection, uuid))
         }
         _ => Err(GrumpyError::Codec(format!("unknown type tag: 0x{tag:02x}"))),
@@ -242,7 +246,7 @@ fn read_u32_le(cursor: &mut &[u8]) -> Result<u32> {
             "unexpected end of data reading u32".into(),
         ));
     }
-    let val = u32::from_le_bytes(cursor[..4].try_into().unwrap());
+    let val = u32::from_le_bytes([cursor[0], cursor[1], cursor[2], cursor[3]]);
     *cursor = &cursor[4..];
     Ok(val)
 }
@@ -253,7 +257,9 @@ fn read_i64_le(cursor: &mut &[u8]) -> Result<i64> {
             "unexpected end of data reading i64".into(),
         ));
     }
-    let val = i64::from_le_bytes(cursor[..8].try_into().unwrap());
+    let val = i64::from_le_bytes([
+        cursor[0], cursor[1], cursor[2], cursor[3], cursor[4], cursor[5], cursor[6], cursor[7],
+    ]);
     *cursor = &cursor[8..];
     Ok(val)
 }
@@ -264,7 +270,9 @@ fn read_f64_le(cursor: &mut &[u8]) -> Result<f64> {
             "unexpected end of data reading f64".into(),
         ));
     }
-    let val = f64::from_le_bytes(cursor[..8].try_into().unwrap());
+    let val = f64::from_le_bytes([
+        cursor[0], cursor[1], cursor[2], cursor[3], cursor[4], cursor[5], cursor[6], cursor[7],
+    ]);
     *cursor = &cursor[8..];
     Ok(val)
 }

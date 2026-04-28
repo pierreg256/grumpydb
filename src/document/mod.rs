@@ -39,7 +39,11 @@ impl Document {
         if data.len() < 16 {
             return Err(GrumpyError::Codec("document too short for UUID".into()));
         }
-        let key = Uuid::from_bytes(data[..16].try_into().unwrap());
+        let key = {
+            let mut arr = [0u8; 16];
+            arr.copy_from_slice(&data[..16]);
+            Uuid::from_bytes(arr)
+        };
         let mut cursor = &data[16..];
         let value = decode_from_cursor(&mut cursor)?;
         Ok(Self { key, value })

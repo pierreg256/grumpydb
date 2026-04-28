@@ -160,7 +160,10 @@ impl VarBTree {
         let promoted_key = full_node.entries[mid].key.clone();
 
         let right_entries: Vec<VarInternalEntry> = full_node.entries.drain(mid + 1..).collect();
-        let mid_entry = full_node.entries.pop().unwrap();
+        let mid_entry = full_node
+            .entries
+            .pop()
+            .ok_or_else(|| GrumpyError::Corruption("split_internal: empty entries".into()))?;
         full_node.num_keys = full_node.entries.len() as u16;
 
         let right_page_id = self.alloc_page()?;
@@ -243,7 +246,9 @@ impl VarBTree {
     }
 
     fn rebalance_leaf(&mut self, leaf: VarLeafNode, mut path: Vec<(u32, usize)>) -> Result<()> {
-        let (parent_page_id, child_idx) = path.pop().unwrap();
+        let (parent_page_id, child_idx) = path
+            .pop()
+            .ok_or_else(|| GrumpyError::Corruption("rebalance_leaf: empty path".into()))?;
         let buf = self.pm.read_page(parent_page_id)?;
         let mut parent = VarInternalNode::from_bytes(&buf);
         let num_children = parent.num_keys as usize + 1;
@@ -291,7 +296,9 @@ impl VarBTree {
         parent: &mut VarInternalNode,
         child_idx: usize,
     ) -> Result<()> {
-        let moved = left.entries.pop().unwrap();
+        let moved = left.entries.pop().ok_or_else(|| {
+            GrumpyError::Corruption("redistribute_leaf_from_left: empty left sibling".into())
+        })?;
         left.num_entries -= 1;
         leaf.insert_entry(moved);
 
@@ -409,7 +416,9 @@ impl VarBTree {
         node: VarInternalNode,
         mut path: Vec<(u32, usize)>,
     ) -> Result<()> {
-        let (gp_page_id, child_idx) = path.pop().unwrap();
+        let (gp_page_id, child_idx) = path
+            .pop()
+            .ok_or_else(|| GrumpyError::Corruption("rebalance_internal: empty path".into()))?;
         let buf = self.pm.read_page(gp_page_id)?;
         let mut gp = VarInternalNode::from_bytes(&buf);
         let num_children = gp.num_keys as usize + 1;
@@ -459,7 +468,9 @@ impl VarBTree {
         );
         node.num_keys += 1;
 
-        let moved_up = left.entries.pop().unwrap();
+        let moved_up = left.entries.pop().ok_or_else(|| {
+            GrumpyError::Corruption("redistribute_internal_from_left: empty left sibling".into())
+        })?;
         left.num_keys -= 1;
         left.right_child = moved_up.child_page_id;
         gp.entries[sep_idx].key = moved_up.key;

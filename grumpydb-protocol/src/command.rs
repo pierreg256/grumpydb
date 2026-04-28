@@ -53,10 +53,7 @@ pub enum Command {
         value: String,
     },
     /// Retrieve a document by key.
-    Get {
-        collection: String,
-        key: String,
-    },
+    Get { collection: String, key: String },
     /// Update an existing document.
     Update {
         collection: String,
@@ -64,10 +61,7 @@ pub enum Command {
         value: String,
     },
     /// Delete a document by key.
-    Delete {
-        collection: String,
-        key: String,
-    },
+    Delete { collection: String, key: String },
     /// Scan documents in a key range.
     Scan {
         collection: String,
@@ -113,10 +107,7 @@ pub enum Command {
 
     // ── User management ─────────────────────────────────────────────
     /// Create a new user in the current tenant.
-    CreateUser {
-        username: String,
-        password: String,
-    },
+    CreateUser { username: String, password: String },
     /// Drop a user.
     DropUser(String),
     /// List all users in the current tenant (or specified tenant).
@@ -187,9 +178,9 @@ impl Command {
             | Command::Count(_) => Action::Read,
 
             // Write
-            Command::Insert { .. }
-            | Command::Update { .. }
-            | Command::Delete { .. } => Action::Write,
+            Command::Insert { .. } | Command::Update { .. } | Command::Delete { .. } => {
+                Action::Write
+            }
 
             // Admin
             Command::CreateCollection(_)
@@ -202,9 +193,9 @@ impl Command {
             | Command::Flush => Action::Admin,
 
             // Database management
-            Command::CreateDatabase(_)
-            | Command::DropDatabase(_)
-            | Command::ListDatabases => Action::ManageDatabases,
+            Command::CreateDatabase(_) | Command::DropDatabase(_) | Command::ListDatabases => {
+                Action::ManageDatabases
+            }
 
             // User management
             Command::CreateUser { .. }
@@ -214,9 +205,9 @@ impl Command {
             | Command::Revoke { .. } => Action::ManageUsers,
 
             // Server management
-            Command::CreateTenant(_)
-            | Command::DropTenant(_)
-            | Command::ListTenants => Action::ManageServer,
+            Command::CreateTenant(_) | Command::DropTenant(_) | Command::ListTenants => {
+                Action::ManageServer
+            }
 
             // Session (bypass RBAC)
             Command::Login { .. }
@@ -236,9 +227,9 @@ impl Command {
     pub fn target_resource(&self, current_db: Option<&str>) -> Resource {
         match self {
             // Server-level
-            Command::CreateTenant(_)
-            | Command::DropTenant(_)
-            | Command::ListTenants => Resource::Server,
+            Command::CreateTenant(_) | Command::DropTenant(_) | Command::ListTenants => {
+                Resource::Server
+            }
 
             // Database-level
             Command::CreateDatabase(name) | Command::DropDatabase(name) => {
@@ -292,10 +283,7 @@ impl Command {
 
     /// Returns `true` if this command is allowed before authentication.
     pub fn is_pre_auth(&self) -> bool {
-        matches!(
-            self,
-            Command::Login { .. } | Command::Ping | Command::Quit
-        )
+        matches!(self, Command::Login { .. } | Command::Ping | Command::Quit)
     }
 }
 
@@ -391,12 +379,14 @@ mod tests {
     fn test_command_is_pre_auth() {
         assert!(Command::Ping.is_pre_auth());
         assert!(Command::Quit.is_pre_auth());
-        assert!(Command::Login {
-            tenant: "t".into(),
-            username: "u".into(),
-            password: "p".into()
-        }
-        .is_pre_auth());
+        assert!(
+            Command::Login {
+                tenant: "t".into(),
+                username: "u".into(),
+                password: "p".into()
+            }
+            .is_pre_auth()
+        );
 
         assert!(!Command::ListDatabases.is_pre_auth());
         assert!(!Command::WhoAmI.is_pre_auth());

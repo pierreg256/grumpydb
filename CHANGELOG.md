@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### v5 stream — Hardening (P0)
+
+This unreleased section tracks Stream H of the v5 plan
+([docs/IMPLEMENTATION_PLAN_V4.md](docs/IMPLEMENTATION_PLAN_V4.md)). No version
+bump or crates.io publication yet.
+
+#### Phase 24 — CI / Clippy / Hygiene
+- Added `.github/workflows/ci.yml` with jobs `fmt`, `clippy`, `test`
+  (matrix: stable + 1.85 MSRV), `docs`, `audit`.
+- README badges added: CI status, crates.io version, docs.rs, MIT license.
+- Fixed three clippy issues:
+  - `grumpy-repl/src/json_parser.rs` — replaced PI approximation literal in a test.
+  - `grumpydb-protocol/src/lib.rs` — converted constant assertions to `const { assert!(...) }` blocks.
+  - `examples/taskman/store.rs` — fixed `drop with reference` warning by introducing a scope block.
+- Workspace is now `cargo fmt`-clean and passes
+  `cargo clippy --workspace --all-targets -- -D warnings`.
+
+#### Phase 25 — Eliminate `unwrap()` in the engine
+- New `GrumpyError` variants in `src/error.rs`:
+  `Corruption(String)`, `InvalidPageOffset { page, offset }`, `InvalidVarKey(String)`.
+- Refactored 73 production `.unwrap()` calls across `src/` to either explicit
+  byte-array literals or `?` propagation with `Corruption` errors. Doc-comment
+  examples and `#[cfg(test)]` modules were left intact.
+- Added a crate-level lint at the top of `src/lib.rs`:
+  `#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::panic, clippy::expect_used))]`.
+- Added panic isolation in `grumpydb-server/src/tcp/handler.rs`: every
+  `execute_command` call is wrapped in `AssertUnwindSafe(...).catch_unwind().await`.
+  Panics are caught, logged via `tracing::error!`, and surfaced to the client
+  as `Response::Error("internal error (corruption): …")` instead of tearing
+  down the whole server.
+- Added `futures = "0.3"` dependency to `grumpydb-server/Cargo.toml` for
+  `FutureExt::catch_unwind`.
+- 0 production `.unwrap()` in `src/` (verified with an awk script that strips
+  test modules and doc-comments).
+
+#### Phase 26 — Auth bootstrap & secret hardening
+- **Breaking auth bootstrap policy**: the legacy silent `_system/admin/admin`
+  bootstrap is gone. `AuthStore::open` now takes a 4th argument
+  `bootstrap_password: Option<&str>`. If no users exist on disk and
+  `bootstrap_password` is `None`, the call returns
+  `Err(AuthError::BootstrapRefused(...))`.
+- The bootstrap password is resolved in `grumpydb-server/src/main.rs` from the
+  CLI flag `--bootstrap-password <pw>` or the environment variable
+  `GRUMPYDB_BOOTSTRAP_PASSWORD`. Bootstrap passwords shorter than 8 characters
+  emit a warning.
+- New `AuthError` variants in `grumpydb-server/src/auth/user.rs`:
+  `ClockError(String)`, `ReadOnly`, `PasswordChangeRequired`,
+  `BootstrapRefused(String)`.
+- `secret.key` is now created with mode `0600` on Unix; on existing files,
+  group/world bits are detected and the file is re-tightened with a warning
+  logged.
+- Two `SystemTime::now().duration_since(UNIX_EPOCH).unwrap()` sites
+  (in `auth/jwt.rs` and `auth/store.rs`) were replaced with `?`-propagated
+  `AuthError::ClockError`.
+- New tests: `test_store_refuses_silent_bootstrap`,
+  `test_store_no_rebootstrap_after_users_exist`,
+  `test_secret_key_has_owner_only_permissions` (Unix-only).
+
+### Validation
+- `cargo build --workspace` clean
+- `cargo test --workspace` — 468 tests pass (was 460)
+- `cargo clippy --workspace --all-targets -- -D warnings` clean
+- `cargo fmt --all -- --check` clean
+
+### Migration notes (operators)
+- Existing deployments with users already on disk are unaffected.
+- **Brand-new deployments must now pass `--bootstrap-password "<pw>"` (or set
+  `GRUMPYDB_BOOTSTRAP_PASSWORD`) on first start**, otherwise the server
+  refuses to start with a clear `BootstrapRefused` error.
+
 ## [4.1.0] - 2026-04-28
 
 Minor release: the interactive REPL is promoted from an example to a first-class workspace crate published on crates.io as `grumpy-repl 4.1.0`. No engine API changes. Only `grumpydb` (4.0.0 → 4.1.0) and the new `grumpy-repl` crate are published in this release; `grumpydb-protocol`, `grumpydb-server`, and `grumpydb-client` are unchanged.

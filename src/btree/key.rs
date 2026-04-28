@@ -28,7 +28,7 @@ pub fn encode_var_key(key: &[u8]) -> Vec<u8> {
 
 /// Decodes a variable-length key, returning `(key_data, total_bytes_consumed)`.
 pub fn decode_var_key(buf: &[u8]) -> (&[u8], usize) {
-    let len = u16::from_le_bytes(buf[0..2].try_into().unwrap()) as usize;
+    let len = u16::from_le_bytes([buf[0], buf[1]]) as usize;
     (&buf[2..2 + len], 2 + len)
 }
 

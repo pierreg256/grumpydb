@@ -45,17 +45,17 @@ impl SlottedPage {
 
     /// Returns the number of slots (including tombstones).
     pub fn num_slots(&self) -> u16 {
-        u16::from_le_bytes(self.data[6..8].try_into().unwrap())
+        u16::from_le_bytes([self.data[6], self.data[7]])
     }
 
     /// Returns the current free space start offset.
     fn free_space_start(&self) -> u16 {
-        u16::from_le_bytes(self.data[8..10].try_into().unwrap())
+        u16::from_le_bytes([self.data[8], self.data[9]])
     }
 
     /// Returns the current free space end offset.
     fn free_space_end(&self) -> u16 {
-        u16::from_le_bytes(self.data[10..12].try_into().unwrap())
+        u16::from_le_bytes([self.data[10], self.data[11]])
     }
 
     /// Sets the number of slots in the header.
@@ -88,8 +88,8 @@ impl SlottedPage {
     /// Reads a slot entry (offset, length) from the slot array.
     fn read_slot(&self, slot_index: u16) -> (u16, u16) {
         let base = Self::slot_offset(slot_index);
-        let offset = u16::from_le_bytes(self.data[base..base + 2].try_into().unwrap());
-        let length = u16::from_le_bytes(self.data[base + 2..base + 4].try_into().unwrap());
+        let offset = u16::from_le_bytes([self.data[base], self.data[base + 1]]);
+        let length = u16::from_le_bytes([self.data[base + 2], self.data[base + 3]]);
         (offset, length)
     }
 

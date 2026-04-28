@@ -118,21 +118,26 @@ impl VarInternalNode {
     /// Deserializes from a page buffer.
     pub fn from_bytes(buf: &[u8; PAGE_SIZE]) -> Self {
         let header = PageHeader::read_from(buf);
-        let num_keys = u16::from_le_bytes(buf[32..34].try_into().unwrap());
-        let right_child = u32::from_le_bytes(buf[34..38].try_into().unwrap());
-        let max_key_size = u16::from_le_bytes(buf[38..40].try_into().unwrap());
+        let num_keys = u16::from_le_bytes([buf[32], buf[33]]);
+        let right_child = u32::from_le_bytes([buf[34], buf[35], buf[36], buf[37]]);
+        let max_key_size = u16::from_le_bytes([buf[38], buf[39]]);
 
         let mut entries = Vec::with_capacity(num_keys as usize);
         let mut offset = INTERNAL_ENTRIES_START;
 
         for _ in 0..num_keys {
-            let key_len = u16::from_le_bytes(buf[offset..offset + 2].try_into().unwrap()) as usize;
+            let key_len = u16::from_le_bytes([buf[offset], buf[offset + 1]]) as usize;
             offset += 2;
             let key = buf[offset..offset + key_len].to_vec();
             offset += key_len;
             // Pad to max_key_size for fixed-stride layout
             offset += max_key_size as usize - key_len;
-            let child_page_id = u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap());
+            let child_page_id = u32::from_le_bytes([
+                buf[offset],
+                buf[offset + 1],
+                buf[offset + 2],
+                buf[offset + 3],
+            ]);
             offset += 4;
             entries.push(VarInternalEntry { key, child_page_id });
         }
@@ -244,22 +249,26 @@ impl VarLeafNode {
     /// Deserializes from a page buffer.
     pub fn from_bytes(buf: &[u8; PAGE_SIZE]) -> Self {
         let header = PageHeader::read_from(buf);
-        let num_entries = u16::from_le_bytes(buf[32..34].try_into().unwrap());
-        let next_leaf = u32::from_le_bytes(buf[34..38].try_into().unwrap());
-        let prev_leaf = u32::from_le_bytes(buf[38..42].try_into().unwrap());
-        let max_key_size = u16::from_le_bytes(buf[42..44].try_into().unwrap());
+        let num_entries = u16::from_le_bytes([buf[32], buf[33]]);
+        let next_leaf = u32::from_le_bytes([buf[34], buf[35], buf[36], buf[37]]);
+        let prev_leaf = u32::from_le_bytes([buf[38], buf[39], buf[40], buf[41]]);
+        let max_key_size = u16::from_le_bytes([buf[42], buf[43]]);
 
         let stride = VAR_KEY_LEN_PREFIX + max_key_size as usize + DATA_PTR_SIZE;
         let mut entries = Vec::with_capacity(num_entries as usize);
 
         for i in 0..num_entries as usize {
             let base = LEAF_ENTRIES_START + i * stride;
-            let key_len = u16::from_le_bytes(buf[base..base + 2].try_into().unwrap()) as usize;
+            let key_len = u16::from_le_bytes([buf[base], buf[base + 1]]) as usize;
             let key = buf[base + 2..base + 2 + key_len].to_vec();
             let ptr_offset = base + VAR_KEY_LEN_PREFIX + max_key_size as usize;
-            let page_id = u32::from_le_bytes(buf[ptr_offset..ptr_offset + 4].try_into().unwrap());
-            let slot_id =
-                u16::from_le_bytes(buf[ptr_offset + 4..ptr_offset + 6].try_into().unwrap());
+            let page_id = u32::from_le_bytes([
+                buf[ptr_offset],
+                buf[ptr_offset + 1],
+                buf[ptr_offset + 2],
+                buf[ptr_offset + 3],
+            ]);
+            let slot_id = u16::from_le_bytes([buf[ptr_offset + 4], buf[ptr_offset + 5]]);
             entries.push(VarLeafEntry {
                 key,
                 page_id,

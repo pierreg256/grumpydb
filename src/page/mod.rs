@@ -115,16 +115,18 @@ impl PageHeader {
     /// Deserialize a header from the first 32 bytes of a page buffer.
     pub fn read_from(buf: &[u8; PAGE_SIZE]) -> Self {
         Self {
-            page_id: u32::from_le_bytes(buf[0..4].try_into().unwrap()),
+            page_id: u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]),
             page_type: PageType::from_u8(buf[4]).unwrap_or(PageType::Free),
             flags: buf[5],
-            num_slots: u16::from_le_bytes(buf[6..8].try_into().unwrap()),
-            free_space_start: u16::from_le_bytes(buf[8..10].try_into().unwrap()),
-            free_space_end: u16::from_le_bytes(buf[10..12].try_into().unwrap()),
-            next_page_id: u32::from_le_bytes(buf[12..16].try_into().unwrap()),
-            prev_page_id: u32::from_le_bytes(buf[16..20].try_into().unwrap()),
-            lsn: u64::from_le_bytes(buf[20..28].try_into().unwrap()),
-            checksum: u32::from_le_bytes(buf[28..32].try_into().unwrap()),
+            num_slots: u16::from_le_bytes([buf[6], buf[7]]),
+            free_space_start: u16::from_le_bytes([buf[8], buf[9]]),
+            free_space_end: u16::from_le_bytes([buf[10], buf[11]]),
+            next_page_id: u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]),
+            prev_page_id: u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]),
+            lsn: u64::from_le_bytes([
+                buf[20], buf[21], buf[22], buf[23], buf[24], buf[25], buf[26], buf[27],
+            ]),
+            checksum: u32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]),
         }
     }
 }
@@ -148,7 +150,7 @@ pub fn stamp_checksum(buf: &mut [u8; PAGE_SIZE]) {
 /// Returns `Ok(())` if valid, or `ChecksumMismatch` if corrupted.
 /// Pages with a zero checksum (never stamped) are considered valid.
 pub fn verify_checksum(buf: &[u8; PAGE_SIZE], page_id: u32) -> crate::error::Result<()> {
-    let stored = u32::from_le_bytes(buf[28..32].try_into().unwrap());
+    let stored = u32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]);
     if stored == 0 {
         // Legacy page (never stamped) — skip verification
         return Ok(());

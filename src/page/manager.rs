@@ -162,11 +162,12 @@ impl PageManager {
     /// Reads the free-list from page 0. Returns the list of free page IDs.
     fn read_free_list(&mut self) -> Result<Vec<u32>> {
         let buf = self.read_page(0)?;
-        let num_free = u32::from_le_bytes(
-            buf[PAGE_HEADER_SIZE..PAGE_HEADER_SIZE + 4]
-                .try_into()
-                .unwrap(),
-        );
+        let num_free = u32::from_le_bytes([
+            buf[PAGE_HEADER_SIZE],
+            buf[PAGE_HEADER_SIZE + 1],
+            buf[PAGE_HEADER_SIZE + 2],
+            buf[PAGE_HEADER_SIZE + 3],
+        ]);
         let mut free_pages = Vec::with_capacity(num_free as usize);
         let start = PAGE_HEADER_SIZE + 4;
         for i in 0..num_free as usize {
@@ -174,7 +175,12 @@ impl PageManager {
             if offset + 4 > PAGE_SIZE {
                 break; // Safety: don't read past page boundary
             }
-            let pid = u32::from_le_bytes(buf[offset..offset + 4].try_into().unwrap());
+            let pid = u32::from_le_bytes([
+                buf[offset],
+                buf[offset + 1],
+                buf[offset + 2],
+                buf[offset + 3],
+            ]);
             free_pages.push(pid);
         }
         Ok(free_pages)

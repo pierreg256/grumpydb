@@ -27,7 +27,20 @@ pub struct AuthStore {
 
 impl AuthStore {
     /// Open or create the auth store at `<server_root>/_auth/`.
-    pub fn open(auth_dir: &Path, access_ttl_secs: u64, refresh_ttl_secs: u64) -> Result<Self, AuthError> {
+    ///
+    /// Bootstrap behaviour:
+    /// - If no users exist on disk and `bootstrap_password` is `None`, the call
+    ///   returns [`AuthError::BootstrapRefused`] — the server MUST NOT silently
+    ///   create an `admin/admin` account.
+    /// - If `bootstrap_password` is provided and is short (< 8 chars), it is
+    ///   accepted but a warning is logged.
+    /// - Once at least one user exists, subsequent opens never re-bootstrap.
+    pub fn open(
+        auth_dir: &Path,
+        access_ttl_secs: u64,
+        refresh_ttl_secs: u64,
+        bootstrap_password: Option<&str>,
+    ) -> Result<Self, AuthError> {
         std::fs::create_dir_all(auth_dir)?;
         let users_dir = auth_dir.join("users");
         std::fs::create_dir_all(&users_dir)?;
@@ -35,6 +48,8 @@ impl AuthStore {
         // Load or generate secret key
         let secret_path = auth_dir.join("secret.key");
         let secret = if secret_path.exists() {
+            // Verify on-disk permissions are not world/group readable on Unix.
+            check_secret_permissions(&secret_path)?;
             let data = std::fs::read(&secret_path)?;
             if data.len() != 32 {
                 return Err(AuthError::Io(format!(
@@ -50,6 +65,8 @@ impl AuthStore {
             let mut secret = [0u8; 32];
             rand::thread_rng().fill(&mut secret);
             std::fs::write(&secret_path, secret)?;
+            // Tighten permissions to 0600 on Unix immediately after write.
+            set_owner_only_permissions(&secret_path)?;
             secret
         };
 
@@ -69,7 +86,11 @@ impl AuthStore {
                     match serde_json::from_str::<User>(&data) {
                         Ok(u) => users.push(u),
                         Err(e) => {
-                            eprintln!("Warning: failed to parse user file {}: {e}", path.display());
+                            tracing::warn!(
+                                file = %path.display(),
+                                error = %e,
+                                "failed to parse user file — skipped"
+                            );
                         }
                     }
                 }
@@ -82,17 +103,35 @@ impl AuthStore {
             users,
         };
 
-        // Bootstrap: create default server_admin if no users exist
+        // Bootstrap: create initial _system/admin only if explicitly allowed.
         if store.users.is_empty() {
+            let pwd = bootstrap_password.ok_or_else(|| {
+                AuthError::BootstrapRefused(
+                    "no users on disk; pass --bootstrap-password <pw> (or set \
+                     GRUMPYDB_BOOTSTRAP_PASSWORD) on first start to create \
+                     the initial _system/admin account"
+                        .to_string(),
+                )
+            })?;
+            if pwd.len() < 8 {
+                tracing::warn!(
+                    "bootstrap password is shorter than 8 characters — strongly \
+                     recommend at least 12 characters for the initial admin"
+                );
+            }
             store.create_user(
                 "_system",
                 "admin",
-                "admin",
+                pwd,
                 vec![RoleAssignment {
                     role: RoleName::ServerAdmin,
                     scope: ResourceScope::Server,
                 }],
             )?;
+            tracing::info!(
+                "bootstrapped initial _system/admin user — change the password \
+                 immediately via PASSWD command"
+            );
         }
 
         Ok(store)
@@ -107,16 +146,18 @@ impl AuthStore {
         roles: Vec<RoleAssignment>,
     ) -> Result<(), AuthError> {
         // Check for duplicates
-        if self.users.iter().any(|u| u.tenant == tenant && u.username == username) {
-            return Err(AuthError::UserAlreadyExists(format!(
-                "{tenant}/{username}"
-            )));
+        if self
+            .users
+            .iter()
+            .any(|u| u.tenant == tenant && u.username == username)
+        {
+            return Err(AuthError::UserAlreadyExists(format!("{tenant}/{username}")));
         }
 
         let password_hash = user::hash_password(password)?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .map_err(|e| AuthError::ClockError(e.to_string()))?
             .as_secs();
 
         let new_user = User {
@@ -159,10 +200,7 @@ impl AuthStore {
 
     /// List all users in a tenant.
     pub fn list_users(&self, tenant: &str) -> Vec<&User> {
-        self.users
-            .iter()
-            .filter(|u| u.tenant == tenant)
-            .collect()
+        self.users.iter().filter(|u| u.tenant == tenant).collect()
     }
 
     /// Update roles for a user.
@@ -240,11 +278,44 @@ impl AuthStore {
 
     fn save_user(&self, user: &User) -> Result<(), AuthError> {
         let path = self.user_file_path(&user.tenant, &user.username);
-        let json = serde_json::to_string_pretty(user)
-            .map_err(|e| AuthError::Io(e.to_string()))?;
+        let json = serde_json::to_string_pretty(user).map_err(|e| AuthError::Io(e.to_string()))?;
         std::fs::write(path, json)?;
         Ok(())
     }
+}
+
+// ── File permission helpers ──────────────────────────────────────────────────
+
+/// Tighten file permissions to owner-only (mode 0600) on Unix. No-op elsewhere.
+fn set_owner_only_permissions(path: &Path) -> Result<(), AuthError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, perms)?;
+    }
+    let _ = path; // suppress unused warning on non-unix
+    Ok(())
+}
+
+/// On Unix, refuse to start if `secret.key` is readable by group or world.
+fn check_secret_permissions(path: &Path) -> Result<(), AuthError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::metadata(path)?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            tracing::warn!(
+                path = %path.display(),
+                mode = format!("{:o}", mode),
+                "secret.key has group/world permissions; tightening to 0600"
+            );
+            set_owner_only_permissions(path)?;
+        }
+    }
+    let _ = path;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -255,7 +326,7 @@ mod tests {
     fn setup() -> (TempDir, AuthStore) {
         let dir = TempDir::new().unwrap();
         let auth_dir = dir.path().join("_auth");
-        let store = AuthStore::open(&auth_dir, 3600, 604800).unwrap();
+        let store = AuthStore::open(&auth_dir, 3600, 604800, Some("bootstrap-test-pw")).unwrap();
         (dir, store)
     }
 
@@ -267,6 +338,48 @@ mod tests {
         let admin = admin.unwrap();
         assert_eq!(admin.roles.len(), 1);
         assert_eq!(admin.roles[0].role, RoleName::ServerAdmin);
+    }
+
+    #[test]
+    fn test_store_refuses_silent_bootstrap() {
+        // No bootstrap_password → must refuse instead of creating admin/admin.
+        let dir = TempDir::new().unwrap();
+        let auth_dir = dir.path().join("_auth");
+        let result = AuthStore::open(&auth_dir, 3600, 604800, None);
+        assert!(matches!(result, Err(AuthError::BootstrapRefused(_))));
+    }
+
+    #[test]
+    fn test_store_no_rebootstrap_after_users_exist() {
+        // Once at least one user is on disk, opening without a bootstrap
+        // password is fine.
+        let dir = TempDir::new().unwrap();
+        let auth_dir = dir.path().join("_auth");
+        let _ = AuthStore::open(&auth_dir, 3600, 604800, Some("first-pw")).unwrap();
+
+        // Reopen without any password — must not error.
+        let store = AuthStore::open(&auth_dir, 3600, 604800, None).unwrap();
+        assert!(store.get_user("_system", "admin").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_secret_key_has_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_dir, store) = setup();
+        let secret_path = store.auth_dir.join("secret.key");
+        let mode = std::fs::metadata(&secret_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        // Group / world bits must be clear.
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "secret.key must not be group/world readable, got mode {mode:o}"
+        );
     }
 
     #[test]
@@ -295,9 +408,7 @@ mod tests {
     #[test]
     fn test_store_duplicate_user_rejected() {
         let (_dir, mut store) = setup();
-        store
-            .create_user("acme", "alice", "pass", vec![])
-            .unwrap();
+        store.create_user("acme", "alice", "pass", vec![]).unwrap();
         let result = store.create_user("acme", "alice", "pass2", vec![]);
         assert!(matches!(result, Err(AuthError::UserAlreadyExists(_))));
     }
@@ -305,9 +416,7 @@ mod tests {
     #[test]
     fn test_store_delete_user() {
         let (_dir, mut store) = setup();
-        store
-            .create_user("acme", "bob", "pass", vec![])
-            .unwrap();
+        store.create_user("acme", "bob", "pass", vec![]).unwrap();
         assert!(store.get_user("acme", "bob").is_some());
 
         store.delete_user("acme", "bob").unwrap();
@@ -326,12 +435,8 @@ mod tests {
     #[test]
     fn test_store_list_users_by_tenant() {
         let (_dir, mut store) = setup();
-        store
-            .create_user("acme", "alice", "pass", vec![])
-            .unwrap();
-        store
-            .create_user("acme", "bob", "pass", vec![])
-            .unwrap();
+        store.create_user("acme", "alice", "pass", vec![]).unwrap();
+        store.create_user("acme", "bob", "pass", vec![]).unwrap();
         store
             .create_user("globex", "charlie", "pass", vec![])
             .unwrap();
@@ -346,9 +451,7 @@ mod tests {
     #[test]
     fn test_store_update_roles() {
         let (_dir, mut store) = setup();
-        store
-            .create_user("acme", "alice", "pass", vec![])
-            .unwrap();
+        store.create_user("acme", "alice", "pass", vec![]).unwrap();
         assert!(store.get_user("acme", "alice").unwrap().roles.is_empty());
 
         store
@@ -437,7 +540,8 @@ mod tests {
         let auth_dir = dir.path().join("_auth");
 
         {
-            let mut store = AuthStore::open(&auth_dir, 3600, 604800).unwrap();
+            let mut store =
+                AuthStore::open(&auth_dir, 3600, 604800, Some("bootstrap-test-pw")).unwrap();
             store
                 .create_user(
                     "acme",
@@ -454,7 +558,7 @@ mod tests {
         }
 
         // Reopen
-        let store = AuthStore::open(&auth_dir, 3600, 604800).unwrap();
+        let store = AuthStore::open(&auth_dir, 3600, 604800, Some("bootstrap-test-pw")).unwrap();
         let u = store.get_user("acme", "alice").unwrap();
         assert_eq!(u.username, "alice");
         assert_eq!(u.roles.len(), 1);
@@ -472,16 +576,15 @@ mod tests {
 
         let token;
         {
-            let mut store = AuthStore::open(&auth_dir, 3600, 604800).unwrap();
-            store
-                .create_user("acme", "alice", "pass", vec![])
-                .unwrap();
+            let mut store =
+                AuthStore::open(&auth_dir, 3600, 604800, Some("bootstrap-test-pw")).unwrap();
+            store.create_user("acme", "alice", "pass", vec![]).unwrap();
             let (t, _) = store.authenticate("acme", "alice", "pass").unwrap();
             token = t;
         }
 
         // Reopen — same secret → same token verifies
-        let store = AuthStore::open(&auth_dir, 3600, 604800).unwrap();
+        let store = AuthStore::open(&auth_dir, 3600, 604800, Some("bootstrap-test-pw")).unwrap();
         let claims = store.verify_token(&token).unwrap();
         assert_eq!(claims.sub, "alice");
     }

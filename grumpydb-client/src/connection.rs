@@ -118,7 +118,11 @@ impl Connection {
         self.read_response().await
     }
 
-    fn read_response(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Response, ClientError>> + Send + '_>> {
+    fn read_response(
+        &mut self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Response, ClientError>> + Send + '_>,
+    > {
         Box::pin(async move {
             let mut line = String::new();
             let n = self.reader.read_line(&mut line).await?;
@@ -136,8 +140,8 @@ impl Connection {
                 b'*' => self.read_array_response(&line).await,
                 _ => {
                     // Single-line response
-                    let (resp, _) = Response::parse(&line)
-                        .map_err(|e| ClientError::Protocol(e.to_string()))?;
+                    let (resp, _) =
+                        Response::parse(&line).map_err(|e| ClientError::Protocol(e.to_string()))?;
                     Ok(resp)
                 }
             }

@@ -24,7 +24,7 @@ pub struct User {
 /// Returns the hash in PHC string format:
 /// `$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>`
 pub fn hash_password(password: &str) -> Result<String, AuthError> {
-    use argon2::password_hash::{rand_core::OsRng, SaltString};
+    use argon2::password_hash::{SaltString, rand_core::OsRng};
     use argon2::{Argon2, PasswordHasher};
 
     let salt = SaltString::generate(&mut OsRng);
@@ -39,8 +39,8 @@ pub fn hash_password(password: &str) -> Result<String, AuthError> {
 pub fn verify_password(password: &str, hash: &str) -> Result<bool, AuthError> {
     use argon2::{Argon2, PasswordVerifier};
 
-    let parsed_hash = argon2::PasswordHash::new(hash)
-        .map_err(|e| AuthError::HashError(e.to_string()))?;
+    let parsed_hash =
+        argon2::PasswordHash::new(hash).map_err(|e| AuthError::HashError(e.to_string()))?;
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed_hash)
         .is_ok())
@@ -69,6 +69,14 @@ pub enum AuthError {
     NotAuthenticated,
     #[error("I/O error: {0}")]
     Io(String),
+    #[error("system clock error: {0}")]
+    ClockError(String),
+    #[error("server is configured for read-only access")]
+    ReadOnly,
+    #[error("password change required before further operations")]
+    PasswordChangeRequired,
+    #[error("server refuses to bootstrap: {0}")]
+    BootstrapRefused(String),
 }
 
 impl From<std::io::Error> for AuthError {

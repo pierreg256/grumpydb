@@ -197,7 +197,9 @@ impl BufferPool {
         // Flush if dirty
         let frame = &self.frames[victim_idx];
         if frame.dirty {
-            let pid = frame.page_id.unwrap();
+            let pid = frame
+                .page_id
+                .ok_or_else(|| GrumpyError::Corruption("dirty frame without page_id".into()))?;
             let data = frame.data;
             self.pm.write_page(pid, &data)?;
             self.write_count += 1;

@@ -164,7 +164,8 @@ impl Collection {
         };
 
         if overflow::is_overflow(&slot_data) {
-            let (overflow_page_id, _) = overflow::decode_overflow_ref(&slot_data).unwrap();
+            let (overflow_page_id, _) = overflow::decode_overflow_ref(&slot_data)
+                .ok_or_else(|| GrumpyError::Corruption("malformed overflow ref".into()))?;
             overflow::free_overflow(self.data_pool.page_manager(), overflow_page_id)?;
         }
 
@@ -528,7 +529,8 @@ impl Collection {
         self.data_pool.unpin(page_id, false)?;
 
         if overflow::is_overflow(&slot_data) {
-            let (overflow_page_id, _) = overflow::decode_overflow_ref(&slot_data).unwrap();
+            let (overflow_page_id, _) = overflow::decode_overflow_ref(&slot_data)
+                .ok_or_else(|| GrumpyError::Corruption("malformed overflow ref".into()))?;
             overflow::read_overflow(self.data_pool.page_manager(), overflow_page_id)
         } else {
             Ok(slot_data)

@@ -60,6 +60,15 @@ pub enum GrumpyError {
 
     #[error("database not found: {0}")]
     DatabaseNotFound(String),
+
+    #[error("data corruption detected: {0}")]
+    Corruption(String),
+
+    #[error("invalid page offset: page {page}, offset {offset}")]
+    InvalidPageOffset { page: u32, offset: u16 },
+
+    #[error("invalid variable-length key: {0}")]
+    InvalidVarKey(String),
 }
 
 /// Convenience Result type for GrumpyDB operations.

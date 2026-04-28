@@ -32,8 +32,8 @@ pub fn decode_overflow_ref(data: &[u8]) -> Option<(u32, u32)> {
     if data.len() < OVERFLOW_REF_SIZE || data[0] != OVERFLOW_MARKER {
         return None;
     }
-    let page_id = u32::from_le_bytes(data[1..5].try_into().unwrap());
-    let total_len = u32::from_le_bytes(data[5..9].try_into().unwrap());
+    let page_id = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+    let total_len = u32::from_le_bytes([data[5], data[6], data[7], data[8]]);
     Some((page_id, total_len))
 }
 

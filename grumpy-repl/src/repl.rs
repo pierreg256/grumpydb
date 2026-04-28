@@ -90,12 +90,8 @@ impl Repl {
                 Err(e) => Some(format!("Error: {e}")),
             },
             // Translate all other commands to protocol strings
-            Command::CreateCollection(name) => {
-                tcp_exec(tcp, &format!("CREATE COLLECTION {name}"))
-            }
-            Command::DropCollection(name) => {
-                tcp_exec(tcp, &format!("DROP COLLECTION {name}"))
-            }
+            Command::CreateCollection(name) => tcp_exec(tcp, &format!("CREATE COLLECTION {name}")),
+            Command::DropCollection(name) => tcp_exec(tcp, &format!("DROP COLLECTION {name}")),
             Command::ListCollections => tcp_exec(tcp, "LIST COLLECTIONS"),
             Command::Flush => tcp_exec(tcp, "FLUSH"),
             Command::Insert(coll, value) => {
@@ -120,9 +116,7 @@ impl Repl {
             Command::CreateIndex(coll, name, field) => {
                 tcp_exec(tcp, &format!("CREATE INDEX {coll} {name} {field}"))
             }
-            Command::DropIndex(coll, name) => {
-                tcp_exec(tcp, &format!("DROP INDEX {coll} {name}"))
-            }
+            Command::DropIndex(coll, name) => tcp_exec(tcp, &format!("DROP INDEX {coll} {name}")),
             Command::Query(coll, idx, value) => {
                 let json_wire = compact_json(&to_json_string(&value, 0));
                 tcp_exec(tcp, &format!("QUERY {coll} {idx} {json_wire}"))
@@ -132,18 +126,14 @@ impl Repl {
                 let e = compact_json(&to_json_string(&end, 0));
                 tcp_exec(tcp, &format!("QUERYRANGE {coll} {idx} {s} {e}"))
             }
-            Command::ListIndexes(_coll) => {
-                tcp_exec(tcp, &format!("LIST INDEXES {_coll}"))
-            }
+            Command::ListIndexes(_coll) => tcp_exec(tcp, &format!("LIST INDEXES {_coll}")),
             Command::Compact(coll) => tcp_exec(tcp, &format!("COMPACT {coll}")),
             Command::Stats(coll) => tcp_exec(tcp, &format!("COUNT {coll}")),
             Command::Resolve(coll, id) => {
                 // Resolve not available over TCP — fall back to GET
                 tcp_exec(tcp, &format!("GET {coll} {id}"))
             }
-            Command::ResolveDeep(coll, id, _depth) => {
-                tcp_exec(tcp, &format!("GET {coll} {id}"))
-            }
+            Command::ResolveDeep(coll, id, _depth) => tcp_exec(tcp, &format!("GET {coll} {id}")),
         }
     }
 

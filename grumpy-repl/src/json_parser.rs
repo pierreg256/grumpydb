@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn test_parse_float() {
-        assert_eq!(parse_json("3.14").unwrap(), Value::Float(3.14));
+        assert_eq!(parse_json("2.5").unwrap(), Value::Float(2.5));
         assert_eq!(parse_json("-0.5").unwrap(), Value::Float(-0.5));
     }
 

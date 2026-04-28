@@ -124,24 +124,33 @@ impl WalRecord {
             return Err(GrumpyError::WalCorrupted(0));
         }
 
-        let record_len = u32::from_le_bytes(buf[0..4].try_into().unwrap()) as usize;
+        let record_len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
         if buf.len() < record_len {
             return Err(GrumpyError::WalCorrupted(0));
         }
 
-        let lsn = u64::from_le_bytes(buf[4..12].try_into().unwrap());
-        let tx_id = u64::from_le_bytes(buf[12..20].try_into().unwrap());
+        let lsn = u64::from_le_bytes([
+            buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11],
+        ]);
+        let tx_id = u64::from_le_bytes([
+            buf[12], buf[13], buf[14], buf[15], buf[16], buf[17], buf[18], buf[19],
+        ]);
         let op_type = WalOpType::from_u8(buf[20]).ok_or(GrumpyError::WalCorrupted(lsn))?;
-        let page_id = u32::from_le_bytes(buf[21..25].try_into().unwrap());
-        let data_len = u32::from_le_bytes(buf[25..29].try_into().unwrap()) as usize;
+        let page_id = u32::from_le_bytes([buf[21], buf[22], buf[23], buf[24]]);
+        let data_len = u32::from_le_bytes([buf[25], buf[26], buf[27], buf[28]]) as usize;
 
         if 29 + data_len + 4 > record_len {
             return Err(GrumpyError::WalCorrupted(lsn));
         }
 
         let data = buf[29..29 + data_len].to_vec();
-        let checksum =
-            u32::from_le_bytes(buf[29 + data_len..29 + data_len + 4].try_into().unwrap());
+        let checksum_off = 29 + data_len;
+        let checksum = u32::from_le_bytes([
+            buf[checksum_off],
+            buf[checksum_off + 1],
+            buf[checksum_off + 2],
+            buf[checksum_off + 3],
+        ]);
 
         let rec = Self {
             record_len: record_len as u32,
