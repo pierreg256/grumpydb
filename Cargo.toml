@@ -1,6 +1,9 @@
+[workspace]
+members = [".", "grumpydb-protocol", "grumpydb-server", "grumpydb-client"]
+
 [package]
 name = "grumpydb"
-version = "3.1.0"
+version = "4.0.0"
 edition = "2024"
 rust-version = "1.85"
 description = "A disk-based object storage engine with B+Tree indexing and page-based storage"
@@ -24,3 +27,6 @@ tempfile = "3"
 rand = "0.8"
 rustyline = "15"
 serde_json = "1"
+grumpydb-client = { path = "grumpydb-client" }
+grumpydb-protocol = { path = "grumpydb-protocol" }
+tokio = { version = "1", features = ["full"] }

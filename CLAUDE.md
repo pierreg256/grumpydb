@@ -44,11 +44,31 @@ GrumpyDB is a disk-based object storage engine written in Rust. It provides pers
 | `collection`   | Unit of storage: data pages + primary index + secondary indexes, raw CRUD |
 | `index`        | Secondary indexes: sortable encoding, SecondaryIndex, IndexDefinition |
 | `database`     | Multi-collection management with shared WAL, CRUD routing, reference resolution |
-| `naming`       | Name validation: `[a-z0-9_]{1,64}`                       |
+| `naming`       | Name validation: `[a-z0-9_]{1,64}`, reserved names: `_default`, `_system` |
 | `concurrency`  | SWMR wrappers: SharedDb (single-collection), SharedDatabase (per-database), SharedServer (multi-tenant) |
 | `server`       | Multi-tenant server: GrumpyServer (clients), Client (databases per tenant) |
 | `engine`       | Thin wrapper over Collection + WAL, exposes public CRUD  |
 | `error`        | Centralized error types (18 variants)                    |
+
+#### External crates
+
+| Crate              | Module              | Responsibility                                          |
+|--------------------|---------------------|---------------------------------------------------------|
+| `grumpydb-protocol` | `command`          | Command enum with all wire protocol variants, Action/Resource enums for RBAC metadata |
+| `grumpydb-protocol` | `response`         | Response enum (Ok, Error, Integer, Bulk, Array), RESP-like serialize/parse |
+| `grumpydb-protocol` | `parser`           | `parse_command()` — RESP-like single-line command parser |
+| `grumpydb-server`   | `auth::role`       | RoleName, Action, ResourceScope, RoleAssignment, permission checks |
+| `grumpydb-server`   | `auth::user`       | User struct, argon2 hash/verify, AuthError              |
+| `grumpydb-server`   | `auth::jwt`        | JwtConfig, Claims, generate/verify access & refresh tokens (HS256) |
+| `grumpydb-server`   | `auth::store`      | AuthStore: user CRUD, secret.key management, disk persistence |
+| `grumpydb-server`   | `session`          | SessionContext: per-connection JWT claims, current_db, RBAC enforcer (authorize) |
+| `grumpydb-server`   | `config`           | ServerConfig: bind address, data dir, TLS paths, TOML parsing, CLI args |
+| `grumpydb-server`   | `tcp::listener`    | TCP accept loop, TLS via tokio-rustls, self-signed cert generation (rcgen), graceful shutdown |
+| `grumpydb-server`   | `tcp::handler`     | Per-connection handler: command parsing, RBAC enforcement, full command executor |
+| `grumpydb-server`   | `main`             | Binary entry point: CLI arg parsing, server startup |
+| `grumpydb-client`   | `lib`              | GrumpyClient (connect, login, database, raw_execute), DatabaseHandle (CRUD, index, admin API) |
+| `grumpydb-client`   | `connection`       | TCP + TLS connection (tokio-rustls), NoCertVerifier for dev, line-based protocol I/O |
+| `grumpydb-client`   | `error`            | ClientError enum (Connection, Auth, Protocol, Server, Timeout) |
 
 ## Code conventions
 
@@ -119,8 +139,9 @@ error (no internal dependencies)
 
 ## Implementation plan
 
-See `docs/IMPLEMENTATION_PLAN.md` for the full phased plan.
-See `docs/IMPLEMENTATION_PLAN_V2.md` for the v2 multi-tenant plan.
+See `docs/IMPLEMENTATION_PLAN.md` for the full phased plan (phases 1–8: storage engine).
+See `docs/IMPLEMENTATION_PLAN_V2.md` for the v2 multi-tenant plan (phases 9–15: server, concurrency, shell).
+See `docs/IMPLEMENTATION_PLAN_V3.md` for the v3 client interface plan (phases 16–23: protocol, auth, TCP server, drivers).
 See `docs/ARCHITECTURE.md` for in-depth technical details.
 
 ## Available skills
@@ -133,6 +154,10 @@ See `docs/ARCHITECTURE.md` for in-depth technical details.
 | Buffer Pool | `.claude/skills/buffer-pool.md` | Work on LRU cache, dirty tracking |
 | Document Model | `.claude/skills/document-model.md` | Work on document model, binary codec |
 | Testing Strategy | `.claude/skills/testing-strategy.md` | Writing tests, test strategy |
+| Protocol | `.claude/skills/protocol.md` | Work on RESP-like wire protocol (v3) |
+| Auth & RBAC | `.claude/skills/auth-rbac.md` | Work on authentication, JWT, roles, permissions (v3) |
+| TCP & TLS | `.claude/skills/tcp-tls.md` | Work on TCP server, TLS setup, connection handler (v3) |
+| Client Drivers | `.claude/skills/driver.md` | Work on Rust or TypeScript client drivers (v3) |
 
 ## Available agents
 
@@ -144,7 +169,11 @@ See `docs/ARCHITECTURE.md` for in-depth technical details.
 | Integration Agent | `.claude/agents/integration-agent.md` | Assemble modules and integration testing |
 | Docs Agent | `.claude/agents/docs-agent.md` | Verify and update all documentation after each agent |
 | Release Agent | `.claude/agents/release-agent.md` | Version bump, git commit/tag, crates.io package after each phase |
+| Protocol Agent | `.claude/agents/protocol-agent.md` | Develop the RESP-like wire protocol crate (v3) |
+| Auth Agent | `.claude/agents/auth-agent.md` | Develop authentication, JWT, RBAC (v3) |
+| TCP Server Agent | `.claude/agents/tcp-server-agent.md` | Develop the async TCP/TLS server (v3) |
+| Driver Agent | `.claude/agents/driver-agent.md` | Develop Rust and TypeScript client drivers (v3) |
 
 ### Inter-agent workflow
 
-After each execution of a development agent (page, btree, wal, integration), **always run the Docs Agent** to synchronize documentation with the code, then **run the Release Agent** at each phase completion to bump version and commit.
+After each execution of a development agent (page, btree, wal, integration, protocol, auth, tcp-server, driver), **always run the Docs Agent** to synchronize documentation with the code, then **run the Release Agent** at each phase completion to bump version and commit.

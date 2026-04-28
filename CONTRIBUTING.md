@@ -8,65 +8,74 @@
 ## Commands
 
 ```bash
-cargo build                     # Build
-cargo test                      # All tests (unit + integration)
-cargo test --lib                # Unit tests only
-cargo test --test '*'           # Integration tests only
-cargo clippy -- -D warnings     # Lint (strict, zero warnings)
-cargo fmt --check               # Check formatting
-cargo doc --no-deps --open      # Generate docs
+cargo build --workspace             # Build all crates
+cargo test --workspace              # All tests (~445 across all workspace crates)
+cargo test --lib                    # Unit tests only (current crate)
+cargo test --test '*'               # Integration tests only
+cargo clippy --workspace -- -D warnings  # Lint (strict, zero warnings)
+cargo fmt --check                   # Check formatting
+cargo doc --workspace --no-deps     # Generate docs
+
+# Run a specific binary
+cargo run -p grumpydb-server -- --no-tls --data ./data
+cargo run --example grumpysh
+cargo run --example taskman -- help
+
+# TypeScript driver (drivers/typescript/)
+cd drivers/typescript && npm install && npm test && npm run build
 ```
 
 ## Project structure
 
 ```
-src/
-├── error.rs            # GrumpyError enum, Result<T> alias
-├── naming.rs           # Name validation: [a-z0-9_]{1,64}
-├── database/           # Database — multi-collection management
-│   └── mod.rs          # Database struct, CRUD routing, shared WAL, index management
-├── collection/         # Collection — unit of document storage
-│   └── mod.rs          # Collection struct, raw CRUD, compact, PageWriteRecord, secondary indexes
-├── index/              # Secondary indexes on document fields
-│   ├── mod.rs          # SecondaryIndex struct, IndexDefinition, lookup, range_query
-│   └── encoding.rs     # Sortable binary encoding (integers, floats, strings, refs), extract_field
-├── page/               # Page storage (8 KiB pages)
-│   ├── mod.rs          # Constants (PAGE_SIZE, etc.), PageHeader, PageType
-│   ├── manager.rs      # PageManager — disk I/O, free-list
-│   ├── slotted.rs      # SlottedPage — variable-length tuple storage
-│   └── overflow.rs     # Overflow page chains for large documents
-├── btree/              # B+Tree index (separate file: primary.idx)
-│   ├── mod.rs          # BTree struct, metadata (page 1)
-│   ├── node.rs         # InternalNode, LeafNode, binary serialization
-│   ├── ops.rs          # search, insert (with split), delete (with merge)
-│   ├── cursor.rs       # BTreeCursor, range scans
-│   ├── key.rs          # Key encoding utilities (VAR_KEY_MAX_SIZE, encode/decode)
-│   ├── var_node.rs     # VarInternalNode, VarLeafNode (variable-length keys)
-│   ├── var_ops.rs      # VarBTree search/insert/delete with split/merge
-│   ├── var_tree.rs     # VarBTree struct, metadata persistence
-│   └── var_cursor.rs   # VarCursor, range scans for variable keys
-├── document/           # Document model
-│   ├── mod.rs          # Document struct (UUID + Value)
-│   ├── value.rs        # Value enum — schema-less JSON-like type + Ref
-│   └── codec.rs        # Binary codec — encode/decode/encoded_size
-├── wal/                # Write-Ahead Log
-│   ├── mod.rs          # WAL module
-│   ├── record.rs       # WalRecord binary format with CRC32
-│   ├── writer.rs       # WalWriter (append, commit, checkpoint, truncate)
-│   └── recovery.rs     # Redo/undo recovery from WAL records
-├── buffer/             # Buffer pool LRU cache
-│   ├── mod.rs          # Buffer module
-│   ├── frame.rs        # BufferFrame (pin/unpin, dirty tracking)
-│   └── pool.rs         # BufferPool (LRU eviction, I/O counters)
-├── concurrency/        # SWMR lock manager
-│   ├── mod.rs          # Concurrency module
-│   ├── lock_manager.rs # SharedDb (Arc<RwLock<GrumpyDb>>)
-│   └── shared.rs       # SharedDatabase + SharedServer (per-database SWMR)
-├── server/             # Multi-tenant server
-│   ├── mod.rs          # GrumpyServer — top-level multi-tenant management
-│   └── client.rs       # Client — manages multiple databases per tenant
-├── engine.rs           # GrumpyDb — thin wrapper over Collection + WAL
-└── lib.rs              # Public API, re-exports
+grumpydb/                       # workspace root
+├── Cargo.toml                  # workspace members
+│
+├── src/                        # grumpydb crate (storage engine library)
+│   ├── error.rs                # GrumpyError enum, Result<T> alias
+│   ├── naming.rs               # Name validation: [a-z0-9_]{1,64}, reserved: _default, _system
+│   ├── lib.rs                  # Public API, re-exports
+│   ├── engine.rs               # GrumpyDb — thin wrapper over Collection + WAL
+│   ├── database/               # Database — multi-collection management with shared WAL
+│   ├── collection/             # Collection — unit of document storage, raw CRUD, compact
+│   ├── index/                  # Secondary indexes: encoding, SecondaryIndex, IndexDefinition
+│   ├── page/                   # Page storage (8 KiB), slotted layout, overflow, free-list
+│   ├── btree/                  # B+Tree (fixed UUID + variable-length keys)
+│   ├── document/               # Value enum + binary codec
+│   ├── wal/                    # Write-Ahead Log: record, writer, recovery
+│   ├── buffer/                 # LRU buffer pool with dirty tracking
+│   ├── concurrency/            # SharedDb / SharedDatabase / SharedServer (SWMR)
+│   └── server/                 # GrumpyServer + Client (multi-tenant)
+│
+├── grumpydb-protocol/          # RESP-like wire protocol crate
+│   └── src/{lib,command,response,parser}.rs
+│
+├── grumpydb-server/            # TCP/TLS server binary + library
+│   └── src/
+│       ├── lib.rs main.rs config.rs
+│       ├── auth/{user,role,jwt,store}.rs   # argon2, JWT HS256, AuthStore
+│       ├── session/mod.rs                  # SessionContext + RBAC enforcer
+│       └── tcp/{listener,handler}.rs       # tokio + tokio-rustls
+│
+├── grumpydb-client/            # Async Rust client driver
+│   └── src/{lib,connection,error}.rs
+│
+├── drivers/typescript/         # @grumpydb/client npm package (Node ≥ 18)
+│   └── src/{index,client,database,connection,protocol,auth,types,errors}.ts
+│
+├── examples/
+│   ├── grumpysh/               # Dual-mode REPL (embedded + TCP)
+│   └── taskman/                # Demo task manager (embedded engine)
+│
+├── tests/                      # Integration tests (engine + concurrency)
+│   ├── crud_test.rs
+│   └── stress_test.rs
+│
+└── docs/
+    ├── ARCHITECTURE.md
+    ├── IMPLEMENTATION_PLAN.md     # phases 1–8: storage engine
+    ├── IMPLEMENTATION_PLAN_V2.md  # phases 9–15: server + concurrency + shell
+    └── IMPLEMENTATION_PLAN_V3.md  # phases 16–23: protocol + auth + TCP + drivers
 ```
 
 ## Code conventions
@@ -126,3 +135,12 @@ Use `tempfile::TempDir` for any test involving disk I/O.
 | `rand` | Random data generation for tests |
 | `rustyline` | Line editing for GrumpyShell REPL (dev) |
 | `serde_json` | JSON serialization for GrumpyShell (dev) |
+
+### Workspace crates
+
+| Crate | Purpose |
+|-------|--------|
+| `grumpydb` | Core storage engine (library) |
+| `grumpydb-protocol` | RESP-like wire protocol (commands, responses, parser) |
+| `grumpydb-server` | TCP+TLS server binary (tokio, JWT auth, RBAC) |
+| `grumpydb-client` | Async Rust client driver |

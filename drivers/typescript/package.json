@@ -1,0 +1,19 @@
+{
+  "name": "@grumpydb/client",
+  "version": "0.1.0",
+  "description": "TypeScript client driver for GrumpyDB",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "typescript": "^5.4",
+    "vitest": "^2.0"
+  },
+  "license": "MIT"
+}

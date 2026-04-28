@@ -11,24 +11,38 @@ use grumpydb::database::Database;
 use super::filter::matches_filter;
 use super::json_parser::to_json_string;
 use super::parser::{Command, parse_command};
+use super::tcp_backend::TcpBackend;
 
 /// State of the REPL session.
 pub struct Repl {
-    /// Root data directory.
+    /// Root data directory (embedded mode).
     data_dir: PathBuf,
-    /// Currently open database (if any).
+    /// Currently open database (if any, embedded mode).
     db: Option<Database>,
     /// Name of the current database.
     db_name: Option<String>,
+    /// TCP backend (connected mode). If Some, commands go over the wire.
+    tcp: Option<TcpBackend>,
 }
 
 impl Repl {
-    /// Creates a new REPL with the given data directory.
+    /// Creates a new REPL in embedded mode.
     pub fn new(data_dir: &Path) -> Self {
         Self {
             data_dir: data_dir.to_path_buf(),
             db: None,
             db_name: None,
+            tcp: None,
+        }
+    }
+
+    /// Creates a new REPL in TCP connected mode.
+    pub fn with_tcp_backend(backend: TcpBackend) -> Self {
+        Self {
+            data_dir: PathBuf::new(),
+            db: None,
+            db_name: None,
+            tcp: Some(backend),
         }
     }
 
@@ -49,6 +63,92 @@ impl Repl {
             Err(e) => return Some(format!("Error: {e}")),
         };
 
+        // In TCP mode, route commands over the wire
+        if self.tcp.is_some() {
+            return self.execute_tcp(cmd);
+        }
+
+        // Embedded mode: direct database access
+        self.execute_embedded(cmd)
+    }
+
+    /// Execute a command in TCP connected mode.
+    fn execute_tcp(&mut self, cmd: Command) -> Option<String> {
+        let tcp = self.tcp.as_mut().unwrap();
+        match cmd {
+            Command::Exit => {
+                tcp.close();
+                None
+            }
+            Command::Clear => Some("\x1B[2J\x1B[H".to_string()),
+            Command::Help(topic) => Some(help_text(topic.as_deref())),
+            Command::Use(name) => match tcp.use_database(&name) {
+                Ok(msg) => {
+                    self.db_name = Some(name);
+                    Some(msg)
+                }
+                Err(e) => Some(format!("Error: {e}")),
+            },
+            // Translate all other commands to protocol strings
+            Command::CreateCollection(name) => {
+                tcp_exec(tcp, &format!("CREATE COLLECTION {name}"))
+            }
+            Command::DropCollection(name) => {
+                tcp_exec(tcp, &format!("DROP COLLECTION {name}"))
+            }
+            Command::ListCollections => tcp_exec(tcp, "LIST COLLECTIONS"),
+            Command::Flush => tcp_exec(tcp, "FLUSH"),
+            Command::Insert(coll, value) => {
+                let key = Uuid::new_v4();
+                let json = to_json_string(&value, 0);
+                // Compact JSON (single line) for the wire
+                let json_wire = compact_json(&json);
+                match tcp.execute_raw(&format!("INSERT {coll} {key} {json_wire}")) {
+                    Ok(_) => Some(format!("Inserted: {key}")),
+                    Err(e) => Some(format!("Error: {e}")),
+                }
+            }
+            Command::Get(coll, id) => tcp_exec(tcp, &format!("GET {coll} {id}")),
+            Command::Find(coll, _filter) => tcp_exec(tcp, &format!("SCAN {coll}")),
+            Command::Count(coll) => tcp_exec(tcp, &format!("COUNT {coll}")),
+            Command::Update(coll, id, value) => {
+                let json = to_json_string(&value, 0);
+                let json_wire = compact_json(&json);
+                tcp_exec(tcp, &format!("UPDATE {coll} {id} {json_wire}"))
+            }
+            Command::Delete(coll, id) => tcp_exec(tcp, &format!("DELETE {coll} {id}")),
+            Command::CreateIndex(coll, name, field) => {
+                tcp_exec(tcp, &format!("CREATE INDEX {coll} {name} {field}"))
+            }
+            Command::DropIndex(coll, name) => {
+                tcp_exec(tcp, &format!("DROP INDEX {coll} {name}"))
+            }
+            Command::Query(coll, idx, value) => {
+                let json_wire = compact_json(&to_json_string(&value, 0));
+                tcp_exec(tcp, &format!("QUERY {coll} {idx} {json_wire}"))
+            }
+            Command::QueryRange(coll, idx, start, end) => {
+                let s = compact_json(&to_json_string(&start, 0));
+                let e = compact_json(&to_json_string(&end, 0));
+                tcp_exec(tcp, &format!("QUERYRANGE {coll} {idx} {s} {e}"))
+            }
+            Command::ListIndexes(_coll) => {
+                tcp_exec(tcp, &format!("LIST INDEXES {_coll}"))
+            }
+            Command::Compact(coll) => tcp_exec(tcp, &format!("COMPACT {coll}")),
+            Command::Stats(coll) => tcp_exec(tcp, &format!("COUNT {coll}")),
+            Command::Resolve(coll, id) => {
+                // Resolve not available over TCP — fall back to GET
+                tcp_exec(tcp, &format!("GET {coll} {id}"))
+            }
+            Command::ResolveDeep(coll, id, _depth) => {
+                tcp_exec(tcp, &format!("GET {coll} {id}"))
+            }
+        }
+    }
+
+    /// Execute a command in embedded mode (direct database access).
+    fn execute_embedded(&mut self, cmd: Command) -> Option<String> {
         match cmd {
             Command::Exit => None,
             Command::Clear => Some("\x1B[2J\x1B[H".to_string()),
@@ -413,5 +513,23 @@ OTHER:
         Some("resolveDeep") | Some("resolvedeep") => "db.<collection>.resolveDeep(\"id\"[, depth])\n\nRetrieves a document and recursively resolves $ref() values.\nDefault max depth is 16. Cycles are detected and reported as errors.\n\nExample:\n  db.orders.resolveDeep(\"abc123\")\n  db.orders.resolveDeep(\"abc123\", 5)".to_string(),
         Some("ref") => "$ref(\"collection\", \"uuid\")\n\nA reference to a document in another collection.\nUse in insert/update to create cross-collection links.\n\nExample:\n  db.orders.insert({ product: \"widget\", owner: $ref(\"users\", \"a3b4c5d6-...\") })".to_string(),
         Some(cmd) => format!("No detailed help for '{cmd}'. Try: help"),
+    }
+}
+
+/// Execute a raw protocol command via TCP backend, returning formatted output.
+fn tcp_exec(tcp: &mut TcpBackend, cmd: &str) -> Option<String> {
+    match tcp.execute_raw(cmd) {
+        Ok(output) => Some(output),
+        Err(e) => Some(format!("Error: {e}")),
+    }
+}
+
+/// Compact a pretty-printed JSON string to a single line for the wire.
+fn compact_json(s: &str) -> String {
+    // Try parsing as JSON and re-serializing compactly
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(s) {
+        serde_json::to_string(&val).unwrap_or_else(|_| s.replace('\n', " "))
+    } else {
+        s.replace('\n', " ")
     }
 }

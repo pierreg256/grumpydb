@@ -6,15 +6,20 @@
 //! ## Usage
 //!
 //! ```bash
-//! cargo run --example grumpysh                           # launch REPL
-//! cargo run --example grumpysh -- --data ./mydata        # custom data dir
-//! cargo run --example grumpysh -- --eval "use test; db.users.count()"  # one-shot
+//! # Embedded mode (direct disk access, no server needed)
+//! cargo run --example grumpysh                                        # launch REPL
+//! cargo run --example grumpysh -- --data ./mydata                     # custom data dir
+//! cargo run --example grumpysh -- --eval "use test; db.users.count()" # one-shot
+//!
+//! # Connected mode (TCP client to a running GrumpyDB server)
+//! cargo run --example grumpysh -- --host localhost --port 6380 --tenant acme --user alice
 //! ```
 
 mod filter;
 mod json_parser;
 mod parser;
 mod repl;
+mod tcp_backend;
 
 use std::path::PathBuf;
 
@@ -23,6 +28,13 @@ fn main() {
 
     let mut data_dir = PathBuf::from(".grumpysh_data");
     let mut eval_cmd: Option<String> = None;
+    let mut host: Option<String> = None;
+    let mut port: u16 = 6380;
+    let mut tenant: Option<String> = None;
+    let mut user: Option<String> = None;
+    let mut password: Option<String> = None;
+    let mut use_tls = false;
+    let mut embedded = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -39,13 +51,55 @@ fn main() {
                     eval_cmd = Some(args[i].clone());
                 }
             }
+            "--host" => {
+                i += 1;
+                if i < args.len() {
+                    host = Some(args[i].clone());
+                }
+            }
+            "--port" => {
+                i += 1;
+                if i < args.len() {
+                    port = args[i].parse().unwrap_or(6380);
+                }
+            }
+            "--tenant" => {
+                i += 1;
+                if i < args.len() {
+                    tenant = Some(args[i].clone());
+                }
+            }
+            "--user" => {
+                i += 1;
+                if i < args.len() {
+                    user = Some(args[i].clone());
+                }
+            }
+            "--password" => {
+                i += 1;
+                if i < args.len() {
+                    password = Some(args[i].clone());
+                }
+            }
+            "--tls" => use_tls = true,
+            "--no-tls" => use_tls = false,
+            "--embedded" => embedded = true,
             "--help" | "-h" => {
                 println!("GrumpyShell — Interactive GrumpyDB REPL\n");
                 println!("Usage: grumpysh [OPTIONS]\n");
-                println!("Options:");
-                println!("  --data <dir>    Data directory (default: .grumpysh_data)");
-                println!("  --eval <cmds>   Execute commands and exit (semicolon-separated)");
-                println!("  --help          Show this help");
+                println!("Embedded mode (default if no --host):");
+                println!("  --data <dir>       Data directory (default: .grumpysh_data)");
+                println!("  --embedded         Force embedded mode\n");
+                println!("Connected mode (TCP to a GrumpyDB server):");
+                println!("  --host <host>      Server hostname");
+                println!("  --port <port>      Server port (default: 6380)");
+                println!("  --tenant <name>    Tenant name");
+                println!("  --user <name>      Username");
+                println!("  --password <pass>  Password (or prompted interactively)");
+                println!("  --tls / --no-tls   TLS toggle\n");
+                println!("Common:");
+                println!("  --eval <cmds>      Execute commands and exit (semicolon-separated)");
+                println!("  --help             Show this help");
                 return;
             }
             _ => {}
@@ -53,7 +107,40 @@ fn main() {
         i += 1;
     }
 
-    let mut repl = repl::Repl::new(&data_dir);
+    // Decide mode: connected if --host provided (and not --embedded)
+    let connected_mode = host.is_some() && !embedded;
+
+    let mut repl = if connected_mode {
+        let host = host.unwrap();
+        let tenant = tenant.unwrap_or_else(|| {
+            eprint!("Tenant: ");
+            read_line_stdin()
+        });
+        let user = user.unwrap_or_else(|| {
+            eprint!("Username: ");
+            read_line_stdin()
+        });
+        let password = password.unwrap_or_else(|| {
+            eprint!("Password: ");
+            read_line_stdin()
+        });
+
+        match tcp_backend::TcpBackend::connect(&host, port, use_tls, &tenant, &user, &password) {
+            Ok(backend) => {
+                println!(
+                    "Connected to GrumpyDB at {host}:{port} (TLS: {use_tls})"
+                );
+                println!("Authenticated as {user}@{tenant}\n");
+                repl::Repl::with_tcp_backend(backend)
+            }
+            Err(e) => {
+                eprintln!("Connection failed: {e}");
+                return;
+            }
+        }
+    } else {
+        repl::Repl::new(&data_dir)
+    };
 
     // --eval mode: execute commands and exit
     if let Some(cmds) = eval_cmd {
@@ -72,7 +159,11 @@ fn main() {
     }
 
     // Interactive mode with rustyline
-    println!("GrumpyShell v{}", env!("CARGO_PKG_VERSION"));
+    if connected_mode {
+        println!("GrumpyShell v{} (connected mode)", env!("CARGO_PKG_VERSION"));
+    } else {
+        println!("GrumpyShell v{} (embedded mode)", env!("CARGO_PKG_VERSION"));
+    }
     println!("Type 'help' for commands, 'exit' to quit.\n");
 
     let mut rl = match rustyline::DefaultEditor::new() {
@@ -126,4 +217,11 @@ fn dirs_home() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Read a line from stdin (for prompting tenant/user/password).
+fn read_line_stdin() -> String {
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).unwrap_or(0);
+    line.trim().to_string()
 }

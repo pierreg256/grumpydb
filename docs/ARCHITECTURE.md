@@ -140,9 +140,7 @@ Descent via `find_child()`: linear scan, first entry whose key > search_key → 
 - **Merge**: when a node falls below 40% occupancy, merge with a sibling
 - **Redistribution**: if the sibling has enough entries, redistribute instead of merging
 
-## 4. Document Model
-
-### 4.0 Variable-Key B+Tree (VarBTree)
+### 3.6 Variable-Key B+Tree (VarBTree)
 
 A parallel B+Tree implementation supporting variable-length byte keys (up to 256 bytes), used for secondary indexes.
 
@@ -726,7 +724,7 @@ impl Database {
 
 ### 14.4 Name Validation (`src/naming.rs`)
 
-All names (collections, indexes) are validated: `[a-z0-9_]{1,64}`, no path separators, no dots. Names starting with `_` are reserved (exception: `_default`).
+All names (collections, indexes) are validated: `[a-z0-9_]{1,64}`, no path separators, no dots. Names starting with `_` are reserved (exceptions: `_default`, `_system`).
 
 ### 14.5 Auto-discovery
 
@@ -739,9 +737,14 @@ On `Database::open()`, existing collections are discovered by scanning subdirect
 ### 15.1 Usage
 
 ```bash
+# Embedded mode (direct disk access, no server needed)
 cargo run --example grumpysh                           # launch REPL
 cargo run --example grumpysh -- --data ./mydata        # custom data dir
 cargo run --example grumpysh -- --eval "use test; db.users.count()"  # one-shot
+
+# Connected mode (TCP client to a running GrumpyDB server)
+cargo run --example grumpysh -- --host localhost --port 6380 --tenant acme --user alice
+cargo run --example grumpysh -- --host localhost --no-tls --tenant acme --user admin --password admin
 ```
 
 ### 15.2 Commands
@@ -772,11 +775,12 @@ help                                       // command reference
 
 | File | Role |
 |------|------|
-| `main.rs` | CLI entry: `--data`, `--eval`, `--help` flags |
-| `repl.rs` | Read-eval-print loop, session state, command execution |
+| `main.rs` | CLI entry: `--data`, `--eval`, `--host`, `--port`, `--tenant`, `--user`, `--password`, `--tls`/`--no-tls`, `--embedded` flags |
+| `repl.rs` | Read-eval-print loop, session state, command execution (routes to embedded or TCP backend) |
 | `parser.rs` | Command parser: `Command` enum, tokenizer |
 | `json_parser.rs` | Relaxed JSON parser (unquoted keys, single quotes, trailing commas, `$ref()`) |
 | `filter.rs` | Client-side document matching for `find({ field: value })` |
+| `tcp_backend.rs` | TCP backend: wraps `grumpydb-client` with `tokio::Runtime::block_on()` for synchronous shell |
 
 Relaxed JSON: unquoted keys, single/double quotes, trailing commas. Uses `rustyline` for line editing and persistent history (`~/.grumpysh_history`).
 
@@ -932,3 +936,308 @@ println!("Migrated {count} documents");
 ```
 
 The original v1 data is **not modified** — this is a copy, not a move.
+
+## 19. Network Layer (v3)
+
+> **Status**: Implemented (phases 16–22 complete, phase 23 partial — formal e2e/CI/Docker deferred). See `docs/IMPLEMENTATION_PLAN_V3.md` for the phased plan.
+
+GrumpyDB is both an embedded engine and a **networked, secured, multi-tenant database server**. The existing engine crate (`src/`) remains unchanged and usable as an embedded library; the network layer is layered on top through three additional workspace crates plus a TypeScript driver.
+
+### 19.1 Workspace topology
+
+| Crate / package | Kind | Purpose |
+|-----------------|------|---------|
+| `grumpydb` | library | Storage engine (unchanged from v2) |
+| `grumpydb-protocol` | library | RESP-like wire protocol — `Command`, `Response`, parser |
+| `grumpydb-server` | binary + lib | TCP/TLS server, JWT auth, RBAC enforcer |
+| `grumpydb-client` | library | Async Rust client driver |
+| `@grumpydb/client` | npm package | TypeScript/Node.js client driver (zero runtime deps) |
+
+### 19.2 Wire protocol (`grumpydb-protocol`)
+
+RESP-like single-line text protocol terminated by `\r\n`.
+
+**Constants** (`grumpydb-protocol/src/lib.rs`):
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `DEFAULT_PORT` | `6380` | Default TCP port |
+| `PROTOCOL_VERSION` | `"4.0.0"` | Banner string |
+| `MAX_LINE_LENGTH` | `1_048_576` (1 MiB) | DoS protection |
+| `MAX_BULK_LENGTH` | `16_777_216` (16 MiB) | Max document size on the wire |
+
+**Response framing**:
+
+```
++<message>\r\n              Simple string (success)
+-ERR <message>\r\n          Error
+:<integer>\r\n              Integer
+$<length>\r\n<data>\r\n     Bulk string (binary-safe payload)
+$-1\r\n                     Null bulk
+*<count>\r\n...             Array (followed by count framed responses)
+```
+
+**Connection lifecycle**:
+
+```
+Client                                            Server
+  │── TCP connect ───────────────────────────────→│
+  │←── TLS handshake (rustls 1.2/1.3) ────────────│
+  │←── +GRUMPYDB 4.0.0\r\n ───────────────────────│  banner
+  │── LOGIN <tenant> <user> <pwd>\r\n ───────────→│
+  │←── +TOKEN <access> <refresh>\r\n ─────────────│
+  │── TOKEN <access>\r\n ────────────────────────→│
+  │←── +OK\r\n ───────────────────────────────────│
+  │── USE <db>\r\n ──────────────────────────────→│
+  │←── +OK\r\n ───────────────────────────────────│
+  │── INSERT <coll> <uuid> <json>\r\n ───────────→│   (RBAC checked)
+  │←── +OK\r\n ───────────────────────────────────│
+  │── QUIT\r\n ──────────────────────────────────→│
+  │←── +BYE\r\n ──────────────────────────────────│
+```
+
+**Command groups** (`grumpydb-protocol::Command` enum):
+
+| Group | Commands |
+|-------|----------|
+| Auth | `LOGIN`, `TOKEN`, `REFRESH`, `WHOAMI` |
+| Session | `USE`, `PING`, `QUIT` |
+| Database | `CREATE DATABASE`, `DROP DATABASE`, `LIST DATABASES` |
+| Collection | `CREATE COLLECTION`, `DROP COLLECTION`, `LIST COLLECTIONS` |
+| CRUD | `INSERT`, `GET`, `UPDATE`, `DELETE`, `SCAN` |
+| Index | `CREATE INDEX`, `DROP INDEX`, `LIST INDEXES`, `QUERY`, `QUERYRANGE` |
+| Maintenance | `COMPACT`, `FLUSH`, `COUNT` |
+| User mgmt | `CREATE USER`, `DROP USER`, `LIST USERS [@tenant]`, `GRANT`, `REVOKE` |
+| Tenant mgmt | `CREATE TENANT`, `DROP TENANT`, `LIST TENANTS` |
+
+Each `Command` carries RBAC metadata via `Command::required_action() -> Action` and `Command::target_resource() -> Resource`, used by the session enforcer.
+
+**Naming conventions on the wire**:
+
+| Syntax | Meaning |
+|--------|---------|
+| `alice` | User in current tenant (LOGIN, CREATE USER) |
+| `alice@acme` | User in explicit tenant |
+| `mydb@acme` | Database in explicit tenant |
+| `users:mydb` | Collection in database |
+| `users:mydb@acme` | Fully-qualified collection (used by GRANT/REVOKE) |
+| `@acme` | Tenant-only scope |
+
+### 19.3 Authentication & RBAC (`grumpydb-server::auth`)
+
+**Modules**:
+
+| Module | Responsibility |
+|--------|----------------|
+| `auth::user` | `User` struct, argon2 password hash/verify, `AuthError` |
+| `auth::role` | `RoleName`, `Action`, `ResourceScope`, `RoleAssignment::permits()` |
+| `auth::jwt` | `JwtConfig`, `Claims`, HS256 generate/verify (access + refresh) |
+| `auth::store` | `AuthStore` — user CRUD, `secret.key`, on-disk persistence |
+
+**Predefined roles** (`auth::role::RoleName`):
+
+| Role | Permissions |
+|------|-------------|
+| `server_admin` | Cross-tenant: create/drop tenants, manage all users, full CRUD |
+| `tenant_admin` | Within tenant: create/drop databases, manage users, full CRUD |
+| `db_admin` | Within database: create/drop collections + indexes, compact, full CRUD |
+| `read_write` | INSERT, GET, UPDATE, DELETE, SCAN, QUERY |
+| `read_only` | GET, SCAN, QUERY only |
+
+**JWT (HS256)** — payload:
+
+```json
+{
+  "sub": "alice",
+  "tenant": "acme",
+  "roles": [{ "role": "read_write", "scope": { "Database": "myapp" } }],
+  "iat": 1745740800,
+  "exp": 1745744400
+}
+```
+
+Default lifetimes: access 1 h, refresh 7 d (configurable). Secret key (32 random bytes) is generated on first boot and persisted in `_auth/secret.key`.
+
+**On-disk auth layout**:
+
+```
+<data_dir>/
+  _auth/
+    secret.key                       ← 32-byte HMAC key
+    users/
+      <tenant>__<username>.json      ← User record (argon2 hash + roles)
+```
+
+A default `admin` user is bootstrapped in tenant `_system` with role `server_admin` (password `admin`) on first boot when `_auth/users/` is empty.
+
+**RBAC enforcer** (`grumpydb-server::session::SessionContext`):
+
+```rust
+pub struct SessionContext {
+    pub claims: Option<Claims>,       // None until LOGIN/TOKEN
+    pub current_db: Option<String>,   // None until USE
+}
+
+impl SessionContext {
+    pub fn is_authenticated(&self) -> bool;
+    pub fn tenant(&self) -> Result<&str>;
+    pub fn authorize(&self, command: &Command) -> Result<(), AuthError>;
+}
+```
+
+`authorize()` rejects any command other than `LOGIN`, `TOKEN`, `REFRESH`, `PING`, `QUIT` before authentication. After authentication it checks every `RoleAssignment` in the JWT claims against `command.required_action()` and `command.target_resource()`.
+
+### 19.4 TCP server (`grumpydb-server::tcp`)
+
+**Layout**:
+
+| File | Responsibility |
+|------|----------------|
+| `tcp/listener.rs` | Bind + accept loop, TLS handshake, graceful shutdown (SIGINT/SIGTERM) |
+| `tcp/handler.rs` | Per-connection: read → parse → authorize → execute → respond |
+| `config.rs` | `ServerConfig` — bind, data dir, TLS, auth TTLs (TOML + CLI) |
+| `main.rs` | Binary entry point — argument parsing + listener startup |
+
+**Three modes**:
+
+| Mode | Config | Usage |
+|------|--------|-------|
+| Plaintext | `tls.enabled = false` or `--no-tls` | Development |
+| TLS | `tls.enabled = true` (default) | Production — auto-generates self-signed cert via `rcgen` if files absent |
+| mTLS | TLS + client CA | Reserved for future use |
+
+**Default config** (`grumpydb.toml`):
+
+```toml
+[server]
+bind = "0.0.0.0:6380"
+max_connections = 1024
+data_dir = "./data"
+
+[tls]
+enabled = true
+# cert_file / key_file auto-generated if absent
+
+[auth]
+access_token_ttl_secs  = 3600     # 1 h
+refresh_token_ttl_secs = 604800   # 7 d
+```
+
+**Connection handler** (`tcp/handler.rs`):
+
+```rust
+pub async fn handle_connection<S>(
+    stream: S,
+    auth_store: Arc<RwLock<AuthStore>>,
+    shared_server: SharedServer,
+) -> io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin;
+```
+
+Each connection is spawned in its own tokio task. The handler:
+
+1. Reads a line (enforcing `MAX_LINE_LENGTH`).
+2. Parses via `grumpydb_protocol::parse_command`.
+3. Calls `session.authorize(&cmd)` (returns `-ERR access denied` on failure).
+4. Dispatches to `execute_command` which maps to `SharedServer` calls.
+5. Writes the `Response` back to the stream.
+
+**Tenant auto-provisioning**: a successful `LOGIN` for an existing user creates the matching tenant client directory if it does not yet exist. `USE <db>` similarly creates the database on demand (subject to RBAC).
+
+**Listing semantics**:
+
+- `LIST TENANTS` filters out the internal `_auth` directory (where authentication metadata lives) so it never appears as a tenant.
+- `LIST USERS` accepts an optional `@<tenant>` suffix (`LIST USERS @acme`) to filter to a specific tenant; `LIST USERS` without suffix lists users in the caller's current tenant.
+- `CREATE USER` and `LOGIN` both accept the `username@tenant` notation. When the suffix is omitted, the caller's tenant (or the tenant from the LOGIN parameters) is used.
+- `GRANT` / `REVOKE` accept resource notation `[collection:][db][@tenant]` — e.g. `mydb`, `mydb@acme`, `users:mydb`, `users:mydb@acme`, or just `@acme` for tenant-scoped grants.
+
+### 19.5 Rust driver (`grumpydb-client`)
+
+```rust
+use grumpydb_client::GrumpyClient;
+
+let mut client = GrumpyClient::connect("localhost", 6380, false).await?;
+client.login("acme", "alice", "s3cr3t").await?;
+
+let db = client.database("myapp").await?;
+let key = uuid::Uuid::new_v4();
+db.insert("users", key, &serde_json::json!({"name": "Bob"})).await?;
+let doc = db.get("users", &key).await?;
+db.delete("users", &key).await?;
+
+client.raw_execute("PING").await?;
+client.close().await?;
+```
+
+| Module | Role |
+|--------|------|
+| `lib.rs` | `GrumpyClient` (connect, login, database, raw_execute) + `DatabaseHandle` (CRUD, index, admin) |
+| `connection.rs` | TCP / `tokio_rustls::TlsStream`, line-based I/O, `NoCertVerifier` for dev TLS |
+| `error.rs` | `ClientError` — `Connection`, `Auth`, `Protocol`, `Server`, `Timeout` |
+
+The driver depends on `grumpydb-protocol` for parsing responses, so wire format changes are caught at compile time on both sides.
+
+### 19.6 TypeScript driver (`@grumpydb/client`)
+
+```typescript
+import { GrumpyClient } from '@grumpydb/client';
+
+const client = await GrumpyClient.connect({
+  host: 'localhost', port: 6380, tls: false,
+  tenant: 'acme', username: 'alice', password: 's3cr3t',
+});
+
+const db = client.database('myapp');
+await db.insert('users', crypto.randomUUID(), { name: 'Bob' });
+const doc = await db.get('users', '<uuid>');
+await client.close();
+```
+
+| File | Role |
+|------|------|
+| `src/index.ts` | Public exports |
+| `src/connection.ts` | `node:net` + `node:tls`, line-based I/O, exponential backoff reconnect |
+| `src/protocol.ts` | RESP-like encode/decode (mirrors `grumpydb-protocol`) |
+| `src/auth.ts` | LOGIN, JWT storage, auto-refresh on `token expired` |
+| `src/client.ts` | `GrumpyClient` class |
+| `src/database.ts` | `DatabaseHandle` with CRUD, index, admin |
+| `src/types.ts` | `ConnectOptions`, `UserInfo`, value types |
+| `src/errors.ts` | `GrumpyError`, `ConnectionError`, `AuthError`, `ProtocolError`, `ServerError` |
+
+Zero runtime dependencies — only Node built-ins (`node:net`, `node:tls`, `node:crypto`). Test runner: `vitest` (dev only). Requires Node ≥ 18.
+
+### 19.7 GrumpyShell v2 (`examples/grumpysh`)
+
+Dual-mode REPL — connected (TCP via `grumpydb-client`) by default, embedded (direct disk access) with `--embedded`.
+
+```bash
+# Embedded
+cargo run --example grumpysh
+cargo run --example grumpysh -- --embedded --data ./mydata
+
+# Connected (TCP)
+cargo run --example grumpysh -- --host localhost --port 6380 \
+    --tenant acme --user alice --password s3cr3t
+cargo run --example grumpysh -- --host localhost --no-tls \
+    --tenant _system --user admin --password admin
+```
+
+`tcp_backend.rs` wraps `GrumpyClient` and uses `tokio::runtime::Runtime::block_on()` so the REPL itself stays synchronous. Parsed shell commands are translated to protocol command strings and dispatched via `client.raw_execute()`. Responses are pretty-printed (JSON formatting, arrays).
+
+### 19.8 Module dependency graph (v3)
+
+```
+grumpydb (engine)
+   ▲
+   │
+grumpydb-server  ──────► grumpydb-protocol ◄────── grumpydb-client
+   │                                                    │
+   ▼                                                    ▼
+[binary: tcp listener,                          [embedded in grumpysh
+ auth store, RBAC,                               connected mode and
+ SharedServer]                                   user applications]
+
+drivers/typescript (@grumpydb/client)
+   └── reimplements protocol in TypeScript, no Rust dep
+```

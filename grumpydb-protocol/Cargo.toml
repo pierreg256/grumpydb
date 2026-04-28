@@ -1,0 +1,10 @@
+[package]
+name = "grumpydb-protocol"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Wire protocol (RESP-like) for GrumpyDB — shared between server and client drivers"
+license = "MIT"
+
+[dependencies]
+thiserror = "2"

@@ -1,0 +1,16 @@
+[package]
+name = "grumpydb-client"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Rust client driver for GrumpyDB — TCP/TLS, JWT auth, async CRUD"
+license = "MIT"
+
+[dependencies]
+grumpydb-protocol = { path = "../grumpydb-protocol" }
+tokio = { version = "1", features = ["net", "io-util", "rt", "macros"] }
+tokio-rustls = "0.26"
+rustls = "0.23"
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"

@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-04-28
+
+Major release: networked multi-tenant server with authentication and RBAC. Closes phases 16–23 of the v3 plan (client interface).
+
+### Added
+- **RESP-like Protocol Crate** (Phase 16): new `grumpydb-protocol` crate (v1.0.0) with Command enum, Response serialization/parsing, RESP-like single-line parser, Action/Resource enums for RBAC metadata (70 tests)
+- **Authentication & RBAC** (Phases 17–18): new `grumpydb-server` crate (v1.0.0) auth module — argon2 password hashing, JWT (HS256) access & refresh tokens, 5-role RBAC model (`admin`, `dba`, `read_write`, `read_only`, `auditor`), per-connection `SessionContext`, RBAC enforcer with `authorize()` (56 tests)
+- **TCP/TLS Server** (Phase 19): async TCP+TLS server built on `tokio` + `tokio-rustls`, auto-generated self-signed certs via `rcgen`, TOML configuration, full command executor with RBAC enforcement, graceful shutdown (60 tests)
+- **Rust Client Driver** (Phase 20): new `grumpydb-client` crate (v1.0.0) with async TCP+TLS connection, LOGIN/TOKEN/REFRESH auth, `DatabaseHandle` CRUD+index+admin API, `raw_execute()` for direct protocol commands, `NoCertVerifier` for dev TLS
+- **TypeScript Client Driver** (Phase 21): new `@grumpydb/client` npm package under `drivers/typescript/` — zero runtime dependencies, `node:net`/`node:tls` transport, full CRUD+auth+admin API
+- **GrumpyShell v2** (Phase 22): dual-mode shell — connected (TCP client) and embedded (direct disk)
+  - CLI flags: `--host`, `--port`, `--tenant`, `--user`, `--password`, `--tls`/`--no-tls`, `--embedded`
+  - `examples/grumpysh/tcp_backend.rs`: `TcpBackend` wrapping `grumpydb-client` with synchronous `block_on()`
+  - Notation `user@tenant` and `[collection:][db][@tenant]` for resource paths
+  - E2E tested over TCP: LOGIN, USE, CREATE COLLECTION, INSERT, GET, DELETE, COUNT, SCAN
+- `src/naming.rs`: `_system` is now an allowed reserved name (alongside `_default`)
+- `grumpydb-server/src/tcp/handler.rs`: LOGIN auto-creates tenant, USE auto-creates database
+- `grumpydb-client/src/lib.rs`: `raw_execute()` for forwarding raw protocol commands
+- ~445 total tests across the workspace, 0 clippy warnings
+
+### Changed
+- `grumpydb` bumped 3.1.0 → **4.0.0** (new networking layer, new public surface via sibling crates)
+- Workspace now contains 4 crates: `grumpydb`, `grumpydb-protocol`, `grumpydb-server`, `grumpydb-client`
+- `README.md` rewritten for the v3 networked architecture
+- `docs/ARCHITECTURE.md` §19.4 updated with the multi-tenant server topology
+- `docs/IMPLEMENTATION_PLAN_V3.md` marked phases 16–22 complete; phase 23 partially complete (final polish, formal integration tests, Docker image, and CI deferred)
+
+### Notes
+- Phase 23 deferred items: Dockerfile, GitHub Actions CI matrix, formal end-to-end integration test suite, additional polish (will land in a future patch / minor release)
+
+
 ## [3.1.0] - 2026-04-24
 
 ### Added

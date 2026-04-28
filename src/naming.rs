@@ -15,7 +15,7 @@ pub fn validate_name(name: &str) -> Result<()> {
             name.len()
         )));
     }
-    if name.starts_with('_') && name != "_default" {
+    if name.starts_with('_') && name != "_default" && name != "_system" {
         return Err(GrumpyError::InvalidName(
             "names starting with '_' are reserved".into(),
         ));
