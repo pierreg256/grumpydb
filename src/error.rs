@@ -69,6 +69,15 @@ pub enum GrumpyError {
 
     #[error("invalid variable-length key: {0}")]
     InvalidVarKey(String),
+
+    #[error("HLC error: {0}")]
+    Hlc(String),
+
+    #[error("vector clock error: {0}")]
+    VectorClock(String),
+
+    #[error("unsupported WAL format version: {0}")]
+    UnsupportedWalVersion(u16),
 }
 
 /// Convenience Result type for GrumpyDB operations.

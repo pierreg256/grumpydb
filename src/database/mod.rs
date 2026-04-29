@@ -16,6 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use uuid::Uuid;
 
@@ -24,6 +25,8 @@ use crate::document::Document;
 use crate::document::value::Value;
 use crate::error::{GrumpyError, Result};
 use crate::naming::validate_name;
+use crate::wal::applied_set::AppliedSet;
+use crate::wal::hlc::{Hlc, HlcClock, HlcError};
 use crate::wal::writer::WalWriter;
 
 /// Default buffer pool capacity per collection.
@@ -31,6 +34,20 @@ const DEFAULT_POOL_CAPACITY: usize = 256;
 
 /// Number of writes between automatic checkpoints.
 const CHECKPOINT_INTERVAL: u32 = 100;
+
+/// Subdirectory (under the database dir) where the engine identity is
+/// persisted.
+const IDENTITY_DIR: &str = "_database";
+/// File name for the persisted engine identity.
+const IDENTITY_FILE: &str = "node.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedIdentity {
+    /// Hyphenated UUID string of the engine's node identifier.
+    node_id: String,
+    /// Schema version of this file (currently 1).
+    schema_version: u32,
+}
 
 /// A database containing multiple named collections.
 pub struct Database {
@@ -42,15 +59,39 @@ pub struct Database {
     wal: WalWriter,
     /// Write counter for periodic checkpointing.
     writes_since_checkpoint: u32,
+    /// Engine-side node identifier (Phase 40b).
+    node_id: u128,
+    /// Shared HLC clock used to stamp every WAL record (Phase 40b).
+    clock: Arc<HlcClock>,
+    /// Per-origin "highest applied HLC" tracker. Allocated and
+    /// persisted from Phase 40b onward; not consulted on the write path
+    /// in v5 (Phase 40e will start using it).
+    applied_set: AppliedSet,
 }
 
 impl Database {
     /// Opens or creates a database at the given directory.
+    ///
+    /// On first open, an engine identity (random UUID) is generated and
+    /// persisted at `<path>/_database/node.json`. A fresh
+    /// [`HlcClock`] is created and used to stamp every WAL record.
+    /// Subsequent opens reuse the persisted identity.
     pub fn open(path: &Path) -> Result<Self> {
+        std::fs::create_dir_all(path)?;
+        let node_id = load_or_create_identity(path)?;
+        let clock = Arc::new(HlcClock::new());
+        Self::open_with(path, node_id, clock)
+    }
+
+    /// Opens or creates a database with an explicit node identity and
+    /// HLC clock. Used by the server (which carries its own cluster
+    /// identity from `_cluster/node.json`).
+    pub fn open_with(path: &Path, node_id: u128, clock: Arc<HlcClock>) -> Result<Self> {
         std::fs::create_dir_all(path)?;
 
         let wal_path = path.join("wal.log");
-        let wal = WalWriter::new(&wal_path)?;
+        let wal = WalWriter::new_with_identity(&wal_path, node_id, Arc::clone(&clock))?;
+        let applied_set = AppliedSet::load(path)?;
 
         // Discover existing collections by scanning subdirectories
         let mut collections = HashMap::new();
@@ -59,12 +100,11 @@ impl Database {
                 let ft = entry.file_type()?;
                 if ft.is_dir() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    // Skip hidden dirs
-                    if name.starts_with('.') {
+                    // Skip hidden dirs and engine-internal dirs.
+                    if name.starts_with('.') || name == IDENTITY_DIR || name == "_replication" {
                         continue;
                     }
                     let coll_path = entry.path();
-                    // Only open if it looks like a collection (has data.db)
                     if coll_path.join("data.db").exists() {
                         let coll = Collection::open(&coll_path, &name, DEFAULT_POOL_CAPACITY)?;
                         collections.insert(name, coll);
@@ -78,6 +118,9 @@ impl Database {
             collections,
             wal,
             writes_since_checkpoint: 0,
+            node_id,
+            clock,
+            applied_set,
         })
     }
 
@@ -398,12 +441,39 @@ impl Database {
 
     /// Closes the database, flushing all data.
     pub fn close(mut self) -> Result<()> {
+        // Persist the AppliedSet (no-op in v5 single-writer; the file
+        // is created the first time observe() ever advances anything).
+        let _ = self.applied_set.save(&self.path);
         self.flush()
     }
 
     /// Returns the database directory path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Returns the engine-side node identifier (Phase 40b).
+    pub fn node_id(&self) -> u128 {
+        self.node_id
+    }
+
+    /// Returns the last issued HLC value (Phase 40b).
+    pub fn current_hlc(&self) -> Hlc {
+        self.clock.read()
+    }
+
+    /// Blends a remote HLC into the local clock state. Used by Phase
+    /// 40e replication apply when ingesting records produced by another
+    /// node. Returns the new local HLC after the merge.
+    pub fn record_remote_hlc(&self, hlc: Hlc) -> Result<Hlc> {
+        self.clock
+            .update(hlc)
+            .map_err(|e: HlcError| GrumpyError::Hlc(e.to_string()))
+    }
+
+    /// Returns a clone of the shared HLC clock (cheap — `Arc::clone`).
+    pub fn clock(&self) -> Arc<HlcClock> {
+        Arc::clone(&self.clock)
     }
 
     fn maybe_checkpoint(&mut self) -> Result<()> {
@@ -413,6 +483,32 @@ impl Database {
         }
         Ok(())
     }
+}
+
+/// Loads the engine identity from `<path>/_database/node.json`. Creates
+/// a fresh random one (and persists it) if the file is missing.
+fn load_or_create_identity(path: &Path) -> Result<u128> {
+    let dir = path.join(IDENTITY_DIR);
+    let file = dir.join(IDENTITY_FILE);
+    if file.exists() {
+        let bytes = std::fs::read(&file)?;
+        let parsed: PersistedIdentity = serde_json::from_slice(&bytes)
+            .map_err(|e| GrumpyError::Corruption(format!("invalid {IDENTITY_FILE}: {e}")))?;
+        let uuid = Uuid::parse_str(&parsed.node_id)
+            .map_err(|e| GrumpyError::Corruption(format!("invalid node_id UUID: {e}")))?;
+        return Ok(uuid.as_u128());
+    }
+    std::fs::create_dir_all(&dir)?;
+    let new_id = Uuid::new_v4();
+    let body = serde_json::to_vec_pretty(&PersistedIdentity {
+        node_id: new_id.hyphenated().to_string(),
+        schema_version: 1,
+    })
+    .map_err(|e| GrumpyError::Corruption(format!("serialize identity: {e}")))?;
+    let tmp = dir.join(format!("{IDENTITY_FILE}.tmp"));
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, &file)?;
+    Ok(new_id.as_u128())
 }
 
 #[cfg(test)]

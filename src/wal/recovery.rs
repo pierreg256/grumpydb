@@ -3,12 +3,19 @@
 //! At startup, the recovery module reads the WAL and:
 //! 1. **Redo**: replays page writes from committed transactions
 //! 2. **Undo**: reverts page writes from uncommitted transactions
+//!
+//! Phase 40b: each WAL record now carries an `origin_node_id` and HLC.
+//! In v5 (single writer) the only origin is the local node, so the
+//! optional `AppliedSet` parameter never causes records to be skipped.
+//! Phase 40e (replication apply) will start using the high-water marks
+//! to drop duplicates.
 
 use std::collections::HashSet;
 
 use crate::error::Result;
 use crate::page::PAGE_SIZE;
 use crate::page::manager::PageManager;
+use crate::wal::applied_set::{AppliedSet, ObserveOutcome};
 use crate::wal::record::{WalOpType, WalRecord};
 
 /// Performs crash recovery by replaying the WAL.
@@ -21,6 +28,18 @@ pub fn recover(
     records: &[WalRecord],
     data_pm: &mut PageManager,
     index_pm: &mut PageManager,
+) -> Result<RecoveryResult> {
+    recover_with_applied_set(records, data_pm, index_pm, None)
+}
+
+/// Same as [`recover`] but consults an [`AppliedSet`] to drop records
+/// whose `(origin, hlc)` pair has already been applied. Updates the set
+/// in place when records are applied.
+pub fn recover_with_applied_set(
+    records: &[WalRecord],
+    data_pm: &mut PageManager,
+    index_pm: &mut PageManager,
+    mut applied: Option<&mut AppliedSet>,
 ) -> Result<RecoveryResult> {
     if records.is_empty() {
         return Ok(RecoveryResult::default());
@@ -46,10 +65,17 @@ pub fn recover(
 
     let mut redo_count = 0;
     let mut undo_count = 0;
+    let mut skipped_dup = 0usize;
 
     // REDO phase: apply after-images of committed transactions (in order)
     for record in active.iter() {
         if record.op_type == WalOpType::PageWrite && committed_txs.contains(&record.tx_id) {
+            if let Some(set) = applied.as_deref_mut()
+                && set.observe(record.origin_node_id, record.hlc) == ObserveOutcome::AlreadyApplied
+            {
+                skipped_dup += 1;
+                continue;
+            }
             apply_after_image(record, data_pm, index_pm)?;
             redo_count += 1;
         }
@@ -68,6 +94,7 @@ pub fn recover(
         undo_count,
         committed_txs: committed_txs.len(),
         records_processed: active.len(),
+        skipped_duplicate: skipped_dup,
     })
 }
 
@@ -82,6 +109,9 @@ pub struct RecoveryResult {
     pub committed_txs: usize,
     /// Total records processed.
     pub records_processed: usize,
+    /// Number of records dropped because their `(origin, hlc)` had
+    /// already been applied (Phase 40e use; always 0 in v5).
+    pub skipped_duplicate: usize,
 }
 
 /// Applies the after-image from a PageWrite record.
@@ -93,12 +123,11 @@ fn apply_after_image(
     if record.data.len() < PAGE_SIZE * 2 {
         return Ok(()); // Malformed record, skip
     }
-    let after = &record.data[PAGE_SIZE..PAGE_SIZE * 2];
+    // v2 stores `after` first.
+    let after = &record.data[..PAGE_SIZE];
     let mut page_buf = [0u8; PAGE_SIZE];
     page_buf.copy_from_slice(after);
 
-    // Determine which PageManager owns this page
-    // Convention: page_id's high bit indicates index file (bit 31)
     let pm = select_pm(record.page_id, data_pm, index_pm);
     let real_id = record.page_id & 0x7FFF_FFFF;
 
@@ -114,10 +143,11 @@ fn apply_before_image(
     data_pm: &mut PageManager,
     index_pm: &mut PageManager,
 ) -> Result<()> {
-    if record.data.len() < PAGE_SIZE {
+    if record.data.len() < PAGE_SIZE * 2 {
         return Ok(()); // Malformed record, skip
     }
-    let before = &record.data[..PAGE_SIZE];
+    // v2 stores `after` first then `before`.
+    let before = &record.data[PAGE_SIZE..PAGE_SIZE * 2];
     let mut page_buf = [0u8; PAGE_SIZE];
     page_buf.copy_from_slice(before);
 
@@ -150,6 +180,9 @@ pub const INDEX_PAGE_FLAG: u32 = 0x8000_0000;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wal::hlc::Hlc;
+    use crate::wal::record::NIL_NODE_ID;
+    use crate::wal::vclock::VectorClock;
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, PageManager, PageManager) {
@@ -157,6 +190,38 @@ mod tests {
         let data = PageManager::new(dir.path().join("data.db")).unwrap();
         let index = PageManager::new(dir.path().join("index.db")).unwrap();
         (dir, data, index)
+    }
+
+    fn pw(lsn: u64, tx: u64, page_id: u32, before: &[u8], after: &[u8]) -> WalRecord {
+        WalRecord::page_write(
+            lsn,
+            tx,
+            NIL_NODE_ID,
+            Hlc::from_packed(lsn),
+            VectorClock::singleton(NIL_NODE_ID, lsn),
+            page_id,
+            before,
+            after,
+        )
+    }
+
+    fn commit(lsn: u64, tx: u64) -> WalRecord {
+        WalRecord::commit(
+            lsn,
+            tx,
+            NIL_NODE_ID,
+            Hlc::from_packed(lsn),
+            VectorClock::singleton(NIL_NODE_ID, lsn),
+        )
+    }
+
+    fn cp(lsn: u64) -> WalRecord {
+        WalRecord::checkpoint(
+            lsn,
+            NIL_NODE_ID,
+            Hlc::from_packed(lsn),
+            VectorClock::singleton(NIL_NODE_ID, lsn),
+        )
     }
 
     #[test]
@@ -170,21 +235,13 @@ mod tests {
     #[test]
     fn test_recovery_committed_tx_redo() {
         let (_dir, mut data, mut index) = setup();
-
-        // Create a page with known data
         let page_id = data.allocate_page().unwrap();
         let before = [0xAA; PAGE_SIZE];
         data.write_page(page_id, &before).unwrap();
 
-        // Simulate: WAL says page should have after-image
         let after = [0xBB; PAGE_SIZE];
-        let records = vec![
-            WalRecord::page_write(1, 1, page_id, &before, &after),
-            WalRecord::commit(2, 1),
-        ];
+        let records = vec![pw(1, 1, page_id, &before, &after), commit(2, 1)];
 
-        // "Crash" — page still has before-image (0xAA)
-        // Recovery should redo → apply after-image (0xBB)
         let result = recover(&records, &mut data, &mut index).unwrap();
         assert_eq!(result.redo_count, 1);
         assert_eq!(result.undo_count, 0);
@@ -196,23 +253,17 @@ mod tests {
     #[test]
     fn test_recovery_uncommitted_tx_undo() {
         let (_dir, mut data, mut index) = setup();
-
         let page_id = data.allocate_page().unwrap();
         let before = [0xAA; PAGE_SIZE];
         let after = [0xCC; PAGE_SIZE];
-        data.write_page(page_id, &after).unwrap(); // Page has the "dirty" state
+        data.write_page(page_id, &after).unwrap();
 
-        // WAL has the write but NO commit
-        let records = vec![
-            WalRecord::page_write(1, 1, page_id, &before, &after),
-            // No commit!
-        ];
+        let records = vec![pw(1, 1, page_id, &before, &after)];
 
         let result = recover(&records, &mut data, &mut index).unwrap();
         assert_eq!(result.redo_count, 0);
         assert_eq!(result.undo_count, 1);
 
-        // Page should be reverted to before-image
         let page = data.read_page(page_id).unwrap();
         assert_eq!(page[0], 0xAA);
     }
@@ -220,53 +271,64 @@ mod tests {
     #[test]
     fn test_recovery_mixed_transactions() {
         let (_dir, mut data, mut index) = setup();
-
         let p1 = data.allocate_page().unwrap();
         let p2 = data.allocate_page().unwrap();
-
         let before1 = [0x11; PAGE_SIZE];
         let after1 = [0x22; PAGE_SIZE];
         let before2 = [0x33; PAGE_SIZE];
         let after2 = [0x44; PAGE_SIZE];
 
-        // Both pages start with before images
         data.write_page(p1, &before1).unwrap();
-        data.write_page(p2, &after2).unwrap(); // p2 has dirty state
+        data.write_page(p2, &after2).unwrap();
 
         let records = vec![
-            WalRecord::page_write(1, 1, p1, &before1, &after1),
-            WalRecord::commit(2, 1), // TX1 committed
-            WalRecord::page_write(3, 2, p2, &before2, &after2),
-            // TX2 NOT committed
+            pw(1, 1, p1, &before1, &after1),
+            commit(2, 1),
+            pw(3, 2, p2, &before2, &after2),
         ];
 
         let result = recover(&records, &mut data, &mut index).unwrap();
-        assert_eq!(result.redo_count, 1); // TX1 redone
-        assert_eq!(result.undo_count, 1); // TX2 undone
+        assert_eq!(result.redo_count, 1);
+        assert_eq!(result.undo_count, 1);
 
-        assert_eq!(data.read_page(p1).unwrap()[0], 0x22); // redo → after
-        assert_eq!(data.read_page(p2).unwrap()[0], 0x33); // undo → before
+        assert_eq!(data.read_page(p1).unwrap()[0], 0x22);
+        assert_eq!(data.read_page(p2).unwrap()[0], 0x33);
     }
 
     #[test]
     fn test_recovery_respects_checkpoint() {
         let (_dir, mut data, mut index) = setup();
-
         let p1 = data.allocate_page().unwrap();
         let before = [0; PAGE_SIZE];
         let after = [0xFF; PAGE_SIZE];
         data.write_page(p1, &before).unwrap();
 
-        let records = vec![
-            WalRecord::page_write(1, 1, p1, &before, &after),
-            WalRecord::commit(2, 1),
-            WalRecord::checkpoint(3), // checkpoint after TX1
-                                      // Only records after LSN 3 are processed
-        ];
+        let records = vec![pw(1, 1, p1, &before, &after), commit(2, 1), cp(3)];
 
         let result = recover(&records, &mut data, &mut index).unwrap();
-        // Nothing to redo — TX1 was before the checkpoint
         assert_eq!(result.redo_count, 0);
         assert_eq!(result.undo_count, 0);
+    }
+
+    #[test]
+    fn test_recovery_with_applied_set_dedups() {
+        let (_dir, mut data, mut index) = setup();
+        let p1 = data.allocate_page().unwrap();
+        let before = [0x00; PAGE_SIZE];
+        let after = [0x77; PAGE_SIZE];
+        data.write_page(p1, &before).unwrap();
+
+        let records = vec![pw(1, 1, p1, &before, &after), commit(2, 1)];
+
+        let mut applied = AppliedSet::default();
+        // Pre-mark this HLC as already applied.
+        applied.observe(NIL_NODE_ID, Hlc::from_packed(1));
+
+        let result =
+            recover_with_applied_set(&records, &mut data, &mut index, Some(&mut applied)).unwrap();
+        assert_eq!(result.redo_count, 0);
+        assert_eq!(result.skipped_duplicate, 1);
+        // Because the redo was skipped, the page is still the before-image.
+        assert_eq!(data.read_page(p1).unwrap()[0], 0x00);
     }
 }
