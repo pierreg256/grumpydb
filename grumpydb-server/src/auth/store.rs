@@ -92,17 +92,26 @@ impl AuthStore {
     /// Open or create the auth store at `<server_root>/_auth/`.
     ///
     /// See the module docs for fresh-install / migration semantics.
+    /// Open the auth store at `auth_dir`. If no JWT config exists on
+    /// disk, bootstrap with `bootstrap_algorithm` (typically RS256 for
+    /// production, HS256 for tests that spawn many short-lived servers).
     pub fn open(
         auth_dir: &Path,
         access_ttl_secs: u64,
         refresh_ttl_secs: u64,
         bootstrap_password: Option<&str>,
+        bootstrap_algorithm: JwtAlgorithm,
     ) -> Result<Self, AuthError> {
         std::fs::create_dir_all(auth_dir)?;
         let users_dir = auth_dir.join("users");
         std::fs::create_dir_all(&users_dir)?;
 
-        let jwt_config = load_or_create_jwt_config(auth_dir, access_ttl_secs, refresh_ttl_secs)?;
+        let jwt_config = load_or_create_jwt_config(
+            auth_dir,
+            access_ttl_secs,
+            refresh_ttl_secs,
+            bootstrap_algorithm,
+        )?;
 
         // Load existing users
         let mut users = Vec::new();
@@ -539,6 +548,7 @@ fn load_or_create_jwt_config(
     auth_dir: &Path,
     access_ttl_secs: u64,
     refresh_ttl_secs: u64,
+    bootstrap_algorithm: JwtAlgorithm,
 ) -> Result<JwtConfig, AuthError> {
     let jwt_dir = auth_dir.join("jwt");
     let config_path = jwt_dir.join("config.json");
@@ -563,28 +573,59 @@ fn load_or_create_jwt_config(
         ));
     }
 
-    // Fresh install — generate RS256 keyring and persist.
-    tracing::info!("no JWT config on disk; generating fresh RS256 keyring (default for v5)");
-    std::fs::create_dir_all(jwt_dir.join("keys"))?;
-    let ring = RsKeyRing::generate()?;
-    let keys_dir = jwt_dir.join("keys");
-    write_key_pair(&keys_dir, &ring.current)?;
-    write_key_pair(&keys_dir, &ring.next)?;
-    let current_kid = ring.current.kid.clone();
-    let next_kid = ring.next.kid.clone();
-    write_jwt_config(
-        auth_dir,
-        JwtAlgorithm::Rs256,
-        Some(&current_kid),
-        Some(&next_kid),
-        access_ttl_secs,
-        refresh_ttl_secs,
-    )?;
-    Ok(JwtConfig::new_rs256(
-        ring,
-        Duration::from_secs(access_ttl_secs),
-        Duration::from_secs(refresh_ttl_secs),
-    ))
+    // Fresh install — bootstrap according to the requested algorithm.
+    match bootstrap_algorithm {
+        JwtAlgorithm::Hs256 => {
+            tracing::info!(
+                "no JWT config on disk; bootstrapping HS256 (cheap keygen — \
+                 typical of test harnesses spawning short-lived servers)"
+            );
+            std::fs::create_dir_all(&jwt_dir)?;
+            use rand::Rng;
+            let mut secret = [0u8; 32];
+            rand::thread_rng().fill(&mut secret);
+            std::fs::write(&secret_path, secret)?;
+            set_owner_only_permissions(&secret_path)?;
+            write_jwt_config(
+                auth_dir,
+                JwtAlgorithm::Hs256,
+                None,
+                None,
+                access_ttl_secs,
+                refresh_ttl_secs,
+            )?;
+            Ok(JwtConfig::new_hs256(
+                secret,
+                Duration::from_secs(access_ttl_secs),
+                Duration::from_secs(refresh_ttl_secs),
+            ))
+        }
+        JwtAlgorithm::Rs256 => {
+            tracing::info!(
+                "no JWT config on disk; generating fresh RS256 keyring (default for v5)"
+            );
+            std::fs::create_dir_all(jwt_dir.join("keys"))?;
+            let ring = RsKeyRing::generate()?;
+            let keys_dir = jwt_dir.join("keys");
+            write_key_pair(&keys_dir, &ring.current)?;
+            write_key_pair(&keys_dir, &ring.next)?;
+            let current_kid = ring.current.kid.clone();
+            let next_kid = ring.next.kid.clone();
+            write_jwt_config(
+                auth_dir,
+                JwtAlgorithm::Rs256,
+                Some(&current_kid),
+                Some(&next_kid),
+                access_ttl_secs,
+                refresh_ttl_secs,
+            )?;
+            Ok(JwtConfig::new_rs256(
+                ring,
+                Duration::from_secs(access_ttl_secs),
+                Duration::from_secs(refresh_ttl_secs),
+            ))
+        }
+    }
 }
 
 fn load_from_disk_config(auth_dir: &Path, disk: &JwtDiskConfig) -> Result<JwtConfig, AuthError> {
@@ -765,9 +806,33 @@ mod tests {
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, AuthStore) {
+        // Default test bootstrap is HS256 — RSA-2048 keygen in debug
+        // builds is too slow for the volume of TestServer instances some
+        // CI runs spawn. RS256-specific tests use `setup_rs256()`.
         let dir = TempDir::new().unwrap();
         let auth_dir = dir.path().join("_auth");
-        let store = AuthStore::open(&auth_dir, 3600, 604800, Some("bootstrap-test-pw")).unwrap();
+        let store = AuthStore::open(
+            &auth_dir,
+            3600,
+            604800,
+            Some("bootstrap-test-pw"),
+            JwtAlgorithm::Hs256,
+        )
+        .unwrap();
+        (dir, store)
+    }
+
+    fn setup_rs256() -> (TempDir, AuthStore) {
+        let dir = TempDir::new().unwrap();
+        let auth_dir = dir.path().join("_auth");
+        let store = AuthStore::open(
+            &auth_dir,
+            3600,
+            604800,
+            Some("bootstrap-test-pw"),
+            JwtAlgorithm::Rs256,
+        )
+        .unwrap();
         (dir, store)
     }
 
@@ -779,7 +844,14 @@ mod tests {
         std::fs::create_dir_all(&auth_dir).unwrap();
         let secret = [7u8; 32];
         std::fs::write(auth_dir.join("secret.key"), secret).unwrap();
-        let store = AuthStore::open(&auth_dir, 3600, 604800, Some("bootstrap-test-pw")).unwrap();
+        let store = AuthStore::open(
+            &auth_dir,
+            3600,
+            604800,
+            Some("bootstrap-test-pw"),
+            JwtAlgorithm::Hs256,
+        )
+        .unwrap();
         (dir, store)
     }
 
@@ -809,7 +881,7 @@ mod tests {
 
     #[test]
     fn test_fresh_install_defaults_to_rs256() {
-        let (_dir, store) = setup();
+        let (_dir, store) = setup_rs256();
         assert_eq!(store.algorithm(), JwtAlgorithm::Rs256);
         let jwks = store.jwks();
         assert_eq!(jwks.len(), 2, "JWKS should contain both keys in the ring");
@@ -828,7 +900,7 @@ mod tests {
     fn test_store_refuses_silent_bootstrap() {
         let dir = TempDir::new().unwrap();
         let auth_dir = dir.path().join("_auth");
-        let result = AuthStore::open(&auth_dir, 3600, 604800, None);
+        let result = AuthStore::open(&auth_dir, 3600, 604800, None, JwtAlgorithm::Hs256);
         assert!(matches!(result, Err(AuthError::BootstrapRefused(_))));
     }
 
@@ -836,9 +908,16 @@ mod tests {
     fn test_store_no_rebootstrap_after_users_exist() {
         let dir = TempDir::new().unwrap();
         let auth_dir = dir.path().join("_auth");
-        let _ = AuthStore::open(&auth_dir, 3600, 604800, Some("first-pw")).unwrap();
+        let _ = AuthStore::open(
+            &auth_dir,
+            3600,
+            604800,
+            Some("first-pw"),
+            JwtAlgorithm::Hs256,
+        )
+        .unwrap();
         // Reopen without a bootstrap password — fine.
-        let store = AuthStore::open(&auth_dir, 3600, 604800, None).unwrap();
+        let store = AuthStore::open(&auth_dir, 3600, 604800, None, JwtAlgorithm::Hs256).unwrap();
         assert!(store.get_user("_system", "admin").is_some());
     }
 
@@ -846,7 +925,7 @@ mod tests {
     #[test]
     fn test_rs256_private_key_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        let (_dir, store) = setup();
+        let (_dir, store) = setup_rs256();
         // Pull the kid from the JWKS so we don't rely on internals.
         let jwks = store.jwks();
         let kid = &jwks[0].kid;
@@ -1014,15 +1093,30 @@ mod tests {
         let auth_dir = dir.path().join("_auth");
         let kid_first;
         {
-            let mut store =
-                AuthStore::open(&auth_dir, 3600, 604800, Some("bootstrap-test-pw")).unwrap();
+            let mut store = AuthStore::open(
+                &auth_dir,
+                3600,
+                604800,
+                Some("bootstrap-test-pw"),
+                JwtAlgorithm::Rs256,
+            )
+            .unwrap();
             store
                 .create_user("acme", "alice", "s3cr3t", vec![])
                 .unwrap();
             kid_first = store.jwks()[0].kid.clone();
         }
         // Reopen — same kid (key material persisted), token still verifies.
-        let store = AuthStore::open(&auth_dir, 3600, 604800, Some("bootstrap-test-pw")).unwrap();
+        // The bootstrap_algorithm passed below is ignored because the
+        // on-disk config wins.
+        let store = AuthStore::open(
+            &auth_dir,
+            3600,
+            604800,
+            Some("bootstrap-test-pw"),
+            JwtAlgorithm::Hs256,
+        )
+        .unwrap();
         assert_eq!(store.algorithm(), JwtAlgorithm::Rs256);
         assert_eq!(store.jwks()[0].kid, kid_first);
         let (access, _) = store.authenticate("acme", "alice", "s3cr3t").unwrap();
@@ -1039,14 +1133,27 @@ mod tests {
 
         let token;
         {
-            let mut store =
-                AuthStore::open(&auth_dir, 3600, 604800, Some("bootstrap-test-pw")).unwrap();
+            let mut store = AuthStore::open(
+                &auth_dir,
+                3600,
+                604800,
+                Some("bootstrap-test-pw"),
+                JwtAlgorithm::Hs256,
+            )
+            .unwrap();
             assert_eq!(store.algorithm(), JwtAlgorithm::Hs256);
             store.create_user("acme", "alice", "pass", vec![]).unwrap();
             let (t, _) = store.authenticate("acme", "alice", "pass").unwrap();
             token = t;
         }
-        let store = AuthStore::open(&auth_dir, 3600, 604800, Some("bootstrap-test-pw")).unwrap();
+        let store = AuthStore::open(
+            &auth_dir,
+            3600,
+            604800,
+            Some("bootstrap-test-pw"),
+            JwtAlgorithm::Hs256,
+        )
+        .unwrap();
         assert_eq!(store.algorithm(), JwtAlgorithm::Hs256);
         let claims = store.verify_token(&token).unwrap();
         assert_eq!(claims.sub, "alice");
@@ -1054,7 +1161,7 @@ mod tests {
 
     #[test]
     fn test_rotate_promotes_next_and_archives_old_current() {
-        let (_dir, mut store) = setup();
+        let (_dir, mut store) = setup_rs256();
         let kids_before: Vec<String> = store.jwks().iter().map(|j| j.kid.clone()).collect();
         let outcome = store.rotate_jwt_keys().unwrap();
         let kids_after: Vec<String> = store.jwks().iter().map(|j| j.kid.clone()).collect();
@@ -1098,7 +1205,7 @@ mod tests {
 
         // Reopen — RS256 sticks.
         let auth_dir = dir.path().join("_auth");
-        let store2 = AuthStore::open(&auth_dir, 3600, 604800, None).unwrap();
+        let store2 = AuthStore::open(&auth_dir, 3600, 604800, None, JwtAlgorithm::Hs256).unwrap();
         assert_eq!(store2.algorithm(), JwtAlgorithm::Rs256);
         // Old secret.key is intentionally kept on disk for the operator to
         // archive once the longest outstanding HS256 token has expired.
@@ -1107,14 +1214,14 @@ mod tests {
 
     #[test]
     fn test_migrate_already_rs256_errors() {
-        let (_dir, mut store) = setup();
+        let (_dir, mut store) = setup_rs256();
         let result = store.migrate_to_rs256();
         assert!(matches!(result, Err(AuthError::JwtError(_))));
     }
 
     #[test]
     fn test_jwks_returns_unique_kids_for_rs256() {
-        let (_dir, store) = setup();
+        let (_dir, store) = setup_rs256();
         let jwks = store.jwks();
         assert_eq!(jwks.len(), 2);
         assert_ne!(jwks[0].kid, jwks[1].kid);
@@ -1128,7 +1235,7 @@ mod tests {
 
     #[test]
     fn test_cluster_peer_token_reissued_on_rotate() {
-        let (_dir, mut store) = setup();
+        let (_dir, mut store) = setup_rs256();
         let tok_path = store.auth_dir.join("jwt").join("cluster_peer.token");
         let token_before = std::fs::read_to_string(&tok_path).unwrap();
         store.rotate_jwt_keys().unwrap();

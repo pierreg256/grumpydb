@@ -41,6 +41,26 @@ impl TestServer {
         Self::spawn_with_extra_args(&[]).await
     }
 
+    /// Spawn a fresh server with RS256 JWT (instead of the test default
+    /// HS256). Use this only in tests that explicitly exercise JWKS or
+    /// asymmetric token verification — it incurs a ~5–10 s RSA-2048
+    /// keygen cost per spawn in debug builds.
+    pub async fn spawn_rs256() -> Self {
+        let cfg_dir = TempDir::new().expect("rs256 cfg tmpdir");
+        let cfg_path = cfg_dir.path().join("grumpydb.toml");
+        std::fs::write(&cfg_path, "[auth]\njwt_algorithm = \"rs256\"\n")
+            .expect("write rs256 test config");
+        let cfg_str = cfg_path.to_str().expect("utf8 cfg path").to_string();
+        // Leak the TempDir so the file outlives the await — TestServer
+        // doesn't own this auxiliary directory.
+        std::mem::forget(cfg_dir);
+        // Use a Vec<String> trick: spawn_with_extra_args takes `&[&str]`,
+        // and we need to keep the strings alive across the await.
+        let owned_args: Vec<String> = vec!["--config".into(), cfg_str];
+        let arg_refs: Vec<&str> = owned_args.iter().map(String::as_str).collect();
+        Self::spawn_with_extra_args(&arg_refs).await
+    }
+
     /// Spawn a fresh server with extra CLI arguments appended after the
     /// default flags. Useful for tests that need to point at a custom config
     /// file (e.g. short token TTLs).
@@ -53,6 +73,17 @@ impl TestServer {
         let http_addr: SocketAddr = format!("127.0.0.1:{http_port}").parse().unwrap();
         let admin_password = random_password(32);
         let bin = locate_server_binary();
+
+        // Default to HS256 for the test harness — RSA-2048 keygen in
+        // debug builds is too slow for the volume of TestServer
+        // instances the workspace tests spawn (each server bootstraps
+        // a fresh data dir). RS256-specific tests pass `--config` via
+        // `extra` to override.
+        let default_config_path = tmp.path().join("grumpydb.toml");
+        if !extra.contains(&"--config") {
+            std::fs::write(&default_config_path, "[auth]\njwt_algorithm = \"hs256\"\n")
+                .expect("write default test config");
+        }
 
         let mut cmd = Command::new(&bin);
         cmd.arg("--data")
@@ -68,6 +99,9 @@ impl TestServer {
             .arg("text")
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
+        if !extra.contains(&"--config") {
+            cmd.arg("--config").arg(&default_config_path);
+        }
         for a in extra {
             cmd.arg(a);
         }

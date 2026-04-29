@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use grumpydb::SharedServer;
+use grumpydb_server::auth::jwt::JwtAlgorithm;
 use grumpydb_server::auth::store::AuthStore;
 use grumpydb_server::cluster::NodeIdentity;
 use grumpydb_server::config::ServerConfig;
@@ -118,6 +119,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bootstrap_password = get_arg(&args, "--bootstrap-password")
         .or_else(|| std::env::var("GRUMPYDB_BOOTSTRAP_PASSWORD").ok());
 
+    // Choose the bootstrap algorithm from `[auth] jwt_algorithm` (Phase 39).
+    // Defaults to RS256 for production deployments. Existing data dirs
+    // ignore this — the on-disk algorithm always wins.
+    let bootstrap_algorithm = match config.auth.jwt_algorithm.to_ascii_lowercase().as_str() {
+        "hs256" => JwtAlgorithm::Hs256,
+        _ => JwtAlgorithm::Rs256,
+    };
+
     // Initialize auth store
     let auth_dir = config.server.data_dir.join("_auth");
     let auth_store = AuthStore::open(
@@ -125,6 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.auth.access_token_ttl_secs,
         config.auth.refresh_token_ttl_secs,
         bootstrap_password.as_deref(),
+        bootstrap_algorithm,
     )?;
     let auth_store = Arc::new(parking_lot::RwLock::new(auth_store));
 

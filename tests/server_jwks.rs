@@ -54,7 +54,7 @@ async fn fetch_jwks(addr: std::net::SocketAddr) -> JwksDocument {
 #[tokio::test]
 async fn test_e2e_jwks_endpoint_serves_keys() {
     // Default config = RS256, so JWKS must contain at least one RSA key.
-    let server = TestServer::spawn().await;
+    let server = TestServer::spawn_rs256().await;
     let jwks = fetch_jwks(server.http_addr).await;
     assert!(
         !jwks.keys.is_empty(),
@@ -74,7 +74,7 @@ async fn test_e2e_jwks_endpoint_serves_keys() {
 async fn test_e2e_token_verifiable_with_jwks_key() {
     // Login → obtain access token → fetch JWKS → verify token with the JWKS
     // public key alone (no shared secret needed).
-    let server = TestServer::spawn().await;
+    let server = TestServer::spawn_rs256().await;
 
     let mut client = GrumpyClient::connect("127.0.0.1", server.addr.port(), false)
         .await
@@ -123,7 +123,7 @@ async fn test_e2e_token_verifiable_with_jwks_key() {
 #[tokio::test]
 async fn test_e2e_jwks_unauthenticated() {
     // No login required: the JWKS endpoint is the *public* keyset.
-    let server = TestServer::spawn().await;
+    let server = TestServer::spawn_rs256().await;
     // First request without ever connecting on the TCP port.
     let _ = fetch_jwks(server.http_addr).await;
     // Sleep a touch to make sure no other concurrent activity is required.

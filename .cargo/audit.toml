@@ -1,6 +1,28 @@
 [advisories]
-# Transitive dependency via rustls/tokio-rustls. The crate is "unmaintained"
-# (RUSTSEC-2025-0134) but not vulnerable. Migration to rustls-pki-types'
-# PemObject API is tracked separately and depends on rustls/tokio-rustls
-# upstream pulling the dep themselves.
-ignore = ["RUSTSEC-2025-0134"]
+ignore = [
+    # Transitive dependency via rustls/tokio-rustls. The crate is
+    # "unmaintained" (RUSTSEC-2025-0134) but not vulnerable. Migration to
+    # rustls-pki-types' PemObject API is tracked separately and depends on
+    # rustls/tokio-rustls upstream pulling the dep themselves.
+    "RUSTSEC-2025-0134",
+
+    # `rsa` 0.9.x has a known timing sidechannel (Marvin attack,
+    # RUSTSEC-2023-0071, CVSS 7.4 high). We use it ONLY for JWT keypair
+    # generation + PEM serialisation in the auth subsystem (Phase 39).
+    # Mitigations in place:
+    #   - JWT signing/verification itself is delegated to `jsonwebtoken`,
+    #     which uses `ring` (constant-time).
+    #   - The `rsa` private-key material is short-lived (rotation Phase 39)
+    #     and never leaves the local process — no remote attacker can
+    #     observe the timing of `rsa::generate()`.
+    # Follow-up: migrate keygen + PEM I/O to `ring` or `aws-lc-rs` in v6.
+    # Tracked at <docs/IMPLEMENTATION_PLAN_V4.md> v6 backlog.
+    "RUSTSEC-2023-0071",
+
+    # `rand` 0.7.x is unsound under a very specific custom-logger setup
+    # (RUSTSEC-2026-0097). It's a transitive dep of the AWS SDK chain
+    # (cloud-aws feature only). We don't expose any custom logger that
+    # touches `rand::rng()` from inside its trace path. Re-evaluate when
+    # the AWS SDK upgrades to rand 0.9.
+    "RUSTSEC-2026-0097",
+]

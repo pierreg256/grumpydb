@@ -177,8 +177,9 @@ impl SlottedPage {
     ///
     /// Logical tombstones have a non-zero `offset` (slot still holds
     /// data) AND bit 15 of the length field set. They are produced by
-    /// `Database::delete` (Phase 40d) and are invisible to clients
-    /// until the next [`crate::Collection::compact_with`] call.
+    /// `Database::delete` (Phase 40d format-locked, semantics in v6
+    /// Phase 46) and are invisible to clients until garbage-collected
+    /// by `Collection::compact` after `gc_grace_seconds` has elapsed.
     pub fn is_slot_tombstone(&self, slot_index: u16) -> bool {
         if slot_index >= self.num_slots() {
             return false;

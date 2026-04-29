@@ -40,13 +40,28 @@ pub struct TlsSection {
     pub key_file: Option<String>,
 }
 
-/// Auth token lifetimes.
+/// Auth token lifetimes and signing algorithm.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthSection {
     #[serde(default = "default_access_ttl")]
     pub access_token_ttl_secs: u64,
     #[serde(default = "default_refresh_ttl")]
     pub refresh_token_ttl_secs: u64,
+    /// JWT signing algorithm to use when bootstrapping a fresh auth
+    /// store. `"rs256"` (default) generates an RSA-2048 keypair on
+    /// first start — strongly recommended for production. `"hs256"`
+    /// uses a 32-byte symmetric secret — cheaper to bootstrap (no
+    /// keygen) so it's the right choice for short-lived test
+    /// processes that spawn fresh data dirs in a tight loop.
+    ///
+    /// On a server that already has an auth store on disk, this field
+    /// is IGNORED — the on-disk algorithm always wins.
+    #[serde(default = "default_jwt_algorithm")]
+    pub jwt_algorithm: String,
+}
+
+fn default_jwt_algorithm() -> String {
+    "rs256".to_string()
 }
 
 /// Observability HTTP server settings.
@@ -236,6 +251,7 @@ impl Default for AuthSection {
         Self {
             access_token_ttl_secs: default_access_ttl(),
             refresh_token_ttl_secs: default_refresh_ttl(),
+            jwt_algorithm: default_jwt_algorithm(),
         }
     }
 }
