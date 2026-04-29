@@ -70,6 +70,18 @@ pub trait ReplicationApplier: Send + Sync {
     async fn apply(&self, raw: &[u8]) -> Result<(), ApplyError>;
 }
 
+// Blanket impls so callers can use `Arc<T>` / `Arc<dyn ReplicationApplier>`
+// transparently as the inner applier — the natural shape for the
+// server-side wiring (slice 40e.6) where one concrete applier is
+// shared across multiple per-peer FollowerTasks.
+
+#[async_trait]
+impl<T: ReplicationApplier + ?Sized> ReplicationApplier for Arc<T> {
+    async fn apply(&self, raw: &[u8]) -> Result<(), ApplyError> {
+        (**self).apply(raw).await
+    }
+}
+
 /// Errors raised by the applier.
 #[derive(Debug, Error)]
 pub enum ApplyError {

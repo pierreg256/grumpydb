@@ -57,6 +57,7 @@
 #![warn(missing_docs)]
 
 mod frame;
+mod idempotent;
 mod session;
 mod tailer;
 mod tasks;
@@ -65,6 +66,7 @@ pub use frame::{
     Ack, Bye, Frame, FrameError, FrameType, Heartbeat, Hello, HelloAck, MAX_FRAME_PAYLOAD,
     PROTOCOL_VERSION, ReplicationError, Subscribe, decode_frame, encode_frame,
 };
+pub use idempotent::{IdempotentApplier, resume_hlc_for};
 pub use session::{
     AuthRejection, MIN_SUPPORTED_VERSION, PeerAuthenticator, PeerIdentity, PeerSession,
     SessionError,
