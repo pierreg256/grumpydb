@@ -75,6 +75,7 @@ pub fn encode_sortable_value(value: &Value) -> Result<Vec<u8>> {
             Ok(buf)
         }
         Value::Array(_) | Value::Object(_) => Err(GrumpyError::NotIndexable),
+        Value::Tombstone { .. } => Err(GrumpyError::NotIndexable),
     }
 }
 

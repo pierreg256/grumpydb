@@ -2,9 +2,35 @@
 //!
 //! Uses a slot array growing from the header and tuple data growing from the
 //! end of the page, with free space in between.
+//!
+//! ## Slot encoding (4 bytes per slot)
+//!
+//! Each slot is `(offset: u16 LE, length_with_flag: u16 LE)`:
+//!
+//! | Field   | Bits  | Meaning                                                |
+//! |---------|-------|--------------------------------------------------------|
+//! | offset  | 0..15 | Byte offset of the tuple within the page. `0` ⇒ free  |
+//! |         |       | slot (physically removed, reusable on next insert).    |
+//! | length  | 0..14 | Tuple byte length, masked by [`SLOT_LENGTH_MASK`].     |
+//! |         |       | Effective cap: 32 KiB (well above the 8 KiB page).     |
+//! | tflag   | 15    | [`SLOT_TOMBSTONE_BIT`] — when set, the slot still      |
+//! |         |       | holds an encoded [`crate::Value::Tombstone`] payload   |
+//! |         |       | and is invisible to clients (Phase 40d). Cleared       |
+//! |         |       | only by `Collection::compact_with` once the GC grace   |
+//! |         |       | window has elapsed.                                    |
+//!
+//! Bit 15 of the length field is **format-locking**. Do not repurpose
+//! it in v6+ without a WAL/data-format version bump.
 
 use crate::error::{GrumpyError, Result};
 use crate::page::{PAGE_HEADER_SIZE, PAGE_SIZE, PageHeader, PageType, SLOT_SIZE};
+
+/// Mask for the on-disk length field within a slot. Bits 0..14.
+pub const SLOT_LENGTH_MASK: u16 = 0x7FFF;
+/// Bit-15 marker: when set, the slot is a logical tombstone (Phase 40d).
+pub const SLOT_TOMBSTONE_BIT: u16 = 0x8000;
+/// Maximum representable slot length given that bit 15 is reserved (32 KiB).
+pub const MAX_SLOT_LENGTH: u16 = SLOT_LENGTH_MASK;
 
 /// A slotted page that stores variable-length tuples within a fixed 8 KiB buffer.
 ///
@@ -86,18 +112,98 @@ impl SlottedPage {
     }
 
     /// Reads a slot entry (offset, length) from the slot array.
+    ///
+    /// The returned length already has the [`SLOT_TOMBSTONE_BIT`]
+    /// stripped — use [`SlottedPage::is_slot_tombstone`] to test it.
     fn read_slot(&self, slot_index: u16) -> (u16, u16) {
         let base = Self::slot_offset(slot_index);
         let offset = u16::from_le_bytes([self.data[base], self.data[base + 1]]);
-        let length = u16::from_le_bytes([self.data[base + 2], self.data[base + 3]]);
-        (offset, length)
+        let raw_len = u16::from_le_bytes([self.data[base + 2], self.data[base + 3]]);
+        (offset, raw_len & SLOT_LENGTH_MASK)
+    }
+
+    /// Returns the raw length field as stored on disk (still includes
+    /// the [`SLOT_TOMBSTONE_BIT`]). For tests / introspection only.
+    ///
+    /// Currently unused by the v5 engine — tombstone semantics are
+    /// activated in v6 Phase 46. The helper is shipped now because the
+    /// slot bit layout is format-locked.
+    #[allow(dead_code)]
+    fn read_slot_raw_length(&self, slot_index: u16) -> u16 {
+        let base = Self::slot_offset(slot_index);
+        u16::from_le_bytes([self.data[base + 2], self.data[base + 3]])
     }
 
     /// Writes a slot entry (offset, length) into the slot array.
-    fn write_slot(&mut self, slot_index: u16, offset: u16, length: u16) {
+    ///
+    /// `length` MUST be `<=` [`MAX_SLOT_LENGTH`] (32 KiB - 1). Returns
+    /// [`GrumpyError::Codec`] otherwise — bit 15 is reserved for the
+    /// [`SLOT_TOMBSTONE_BIT`] flag.
+    fn write_slot(&mut self, slot_index: u16, offset: u16, length: u16) -> Result<()> {
+        if length > MAX_SLOT_LENGTH {
+            return Err(GrumpyError::Codec(format!(
+                "slot length {length} exceeds {MAX_SLOT_LENGTH} (bit 15 reserved for tombstone)"
+            )));
+        }
         let base = Self::slot_offset(slot_index);
         self.data[base..base + 2].copy_from_slice(&offset.to_le_bytes());
         self.data[base + 2..base + 4].copy_from_slice(&length.to_le_bytes());
+        Ok(())
+    }
+
+    /// Writes a slot entry preserving the existing [`SLOT_TOMBSTONE_BIT`].
+    /// Used by callers that just want to update the offset/length without
+    /// touching the tombstone flag.
+    ///
+    /// Currently unused by the v5 engine — the v5 `delete` path still
+    /// physically removes the slot. Phase 46 (v6) wires this in when
+    /// `delete` becomes a tombstone write.
+    #[allow(dead_code)]
+    fn write_slot_preserving_flag(
+        &mut self,
+        slot_index: u16,
+        offset: u16,
+        length: u16,
+    ) -> Result<()> {
+        let was_tombstone = self.is_slot_tombstone(slot_index);
+        self.write_slot(slot_index, offset, length)?;
+        if was_tombstone {
+            self.set_slot_tombstone_flag(slot_index, true);
+        }
+        Ok(())
+    }
+
+    /// Returns `true` if the slot at `slot_index` is a logical tombstone.
+    ///
+    /// Logical tombstones have a non-zero `offset` (slot still holds
+    /// data) AND bit 15 of the length field set. They are produced by
+    /// `Database::delete` (Phase 40d) and are invisible to clients
+    /// until the next [`crate::Collection::compact_with`] call.
+    pub fn is_slot_tombstone(&self, slot_index: u16) -> bool {
+        if slot_index >= self.num_slots() {
+            return false;
+        }
+        let base = Self::slot_offset(slot_index);
+        let raw_len = u16::from_le_bytes([self.data[base + 2], self.data[base + 3]]);
+        let offset = u16::from_le_bytes([self.data[base], self.data[base + 1]]);
+        offset != 0 && (raw_len & SLOT_TOMBSTONE_BIT) != 0
+    }
+
+    /// Sets or clears the [`SLOT_TOMBSTONE_BIT`] on the given slot.
+    ///
+    /// Does nothing if the slot index is out of range.
+    pub fn set_slot_tombstone_flag(&mut self, slot_index: u16, is_tombstone: bool) {
+        if slot_index >= self.num_slots() {
+            return;
+        }
+        let base = Self::slot_offset(slot_index);
+        let mut raw_len = u16::from_le_bytes([self.data[base + 2], self.data[base + 3]]);
+        if is_tombstone {
+            raw_len |= SLOT_TOMBSTONE_BIT;
+        } else {
+            raw_len &= SLOT_LENGTH_MASK;
+        }
+        self.data[base + 2..base + 4].copy_from_slice(&raw_len.to_le_bytes());
     }
 
     /// Inserts a tuple into the page.
@@ -130,7 +236,7 @@ impl SlottedPage {
         self.data[offset..offset + data_len].copy_from_slice(tuple_data);
 
         // Write the slot entry
-        self.write_slot(slot_index, new_end, data_len as u16);
+        self.write_slot(slot_index, new_end, data_len as u16)?;
 
         Ok(slot_index)
     }
@@ -184,7 +290,7 @@ impl SlottedPage {
         }
 
         // Mark as tombstone
-        self.write_slot(slot_index, 0, 0);
+        self.write_slot(slot_index, 0, 0)?;
         Ok(())
     }
 
@@ -209,7 +315,7 @@ impl SlottedPage {
             let start = offset as usize;
             self.data[start..start + new_data.len()].copy_from_slice(new_data);
             // Update length (might be shorter)
-            self.write_slot(slot_index, offset, new_data.len() as u16);
+            self.write_slot(slot_index, offset, new_data.len() as u16)?;
             Ok(slot_index)
         } else {
             // Delete + re-insert
@@ -222,7 +328,7 @@ impl SlottedPage {
     ///
     /// After compaction, all live tuples are packed at the end of the page
     /// and the free space is contiguous.
-    pub fn compact(&mut self) {
+    pub fn compact(&mut self) -> Result<()> {
         let num_slots = self.num_slots();
 
         // Collect live tuples: (slot_index, data)
@@ -246,10 +352,11 @@ impl SlottedPage {
             write_end -= tuple_data.len() as u16;
             let start = write_end as usize;
             self.data[start..start + tuple_data.len()].copy_from_slice(tuple_data);
-            self.write_slot(*slot_index, write_end, tuple_data.len() as u16);
+            self.write_slot(*slot_index, write_end, tuple_data.len() as u16)?;
         }
 
         self.set_free_space_end(write_end);
+        Ok(())
     }
 
     /// Returns the number of live (non-tombstone) tuples.
@@ -368,7 +475,7 @@ mod tests {
         let free_before = page.free_space();
         page.delete(1).unwrap(); // delete "bbb"
 
-        page.compact();
+        page.compact().unwrap();
 
         // After compaction, free space should increase (recovered "bbb" data space)
         let free_after = page.free_space();

@@ -25,6 +25,20 @@ pub enum Value {
     Object(BTreeMap<String, Value>),
     /// Reference to a document in another (or the same) collection.
     Ref(std::string::String, Uuid),
+    /// Tombstone marker. Only ever produced by [`crate::Database::delete`]
+    /// (and the legacy [`crate::GrumpyDb::delete`]).
+    ///
+    /// Carries the HLC at deletion time and the encoded vector clock so
+    /// that concurrent writes (Phase 46+) can be reconciled. The vector
+    /// clock is stored as opaque bytes — already produced by
+    /// `VectorClock::encode_to` — to keep `value.rs` independent of the
+    /// `wal` module.
+    Tombstone {
+        /// Packed [`crate::wal::hlc::Hlc`] at the moment of deletion.
+        deleted_at_hlc: u64,
+        /// Serialised vector clock (produced by `VectorClock::encode_to`).
+        vector_clock: Vec<u8>,
+    },
 }
 
 impl Value {
@@ -93,6 +107,22 @@ impl Value {
     pub fn as_ref(&self) -> Option<(&str, &Uuid)> {
         match self {
             Value::Ref(coll, id) => Some((coll, id)),
+            _ => None,
+        }
+    }
+
+    /// Returns `true` if this value is a [`Value::Tombstone`].
+    pub fn is_tombstone(&self) -> bool {
+        matches!(self, Value::Tombstone { .. })
+    }
+
+    /// If this value is a tombstone, returns `(deleted_at_hlc, &vector_clock_bytes)`.
+    pub fn as_tombstone(&self) -> Option<(u64, &[u8])> {
+        match self {
+            Value::Tombstone {
+                deleted_at_hlc,
+                vector_clock,
+            } => Some((*deleted_at_hlc, vector_clock)),
             _ => None,
         }
     }
@@ -179,6 +209,31 @@ mod tests {
     #[test]
     fn test_value_ref_clone_and_eq() {
         let v = Value::Ref("tasks".into(), Uuid::from_u128(99));
+        let cloned = v.clone();
+        assert_eq!(v, cloned);
+    }
+
+    #[test]
+    fn test_value_tombstone_helpers() {
+        let v = Value::Tombstone {
+            deleted_at_hlc: 0xdeadbeef,
+            vector_clock: vec![0u8, 0u8],
+        };
+        assert!(v.is_tombstone());
+        assert!(!Value::Null.is_tombstone());
+        let (hlc, vc) = v.as_tombstone().unwrap();
+        assert_eq!(hlc, 0xdeadbeef);
+        assert_eq!(vc, &[0u8, 0u8]);
+        assert!(Value::Null.as_tombstone().is_none());
+        assert!(!v.is_null());
+    }
+
+    #[test]
+    fn test_value_tombstone_clone_and_eq() {
+        let v = Value::Tombstone {
+            deleted_at_hlc: 42,
+            vector_clock: vec![1, 2, 3, 4],
+        };
         let cloned = v.clone();
         assert_eq!(v, cloned);
     }

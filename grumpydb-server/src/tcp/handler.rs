@@ -825,5 +825,8 @@ fn value_to_serde_json(val: &Value) -> serde_json::Value {
         Value::Ref(collection, uuid) => {
             serde_json::json!({"$ref": {"collection": collection, "uuid": uuid.to_string()}})
         }
+        Value::Tombstone { deleted_at_hlc, .. } => {
+            serde_json::json!({"$tombstone": {"hlc": deleted_at_hlc}})
+        }
     }
 }

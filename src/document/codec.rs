@@ -21,9 +21,16 @@ const TAG_BYTES: u8 = 0x05;
 const TAG_ARRAY: u8 = 0x06;
 const TAG_OBJECT: u8 = 0x07;
 const TAG_REF: u8 = 0x08;
+/// Tombstone marker (Phase 40d). Format-locking — DO NOT REUSE in v6+.
+const TAG_TOMBSTONE: u8 = 0x09;
 
 /// Maximum collection name length in a Ref (from naming rules).
 const MAX_REF_NAME_LEN: u32 = 64;
+
+/// Maximum encoded vector-clock length stored inside a tombstone payload.
+/// Defensive cap (matches `MAX_VCLOCK_ENTRIES * 24 + 2` ≈ 100 KiB) so
+/// malformed input cannot cause unbounded allocations.
+const MAX_TOMBSTONE_VCLOCK_LEN: u32 = 128 * 1024;
 
 // ── Safety limits ───────────────────────────────────────────────────────
 
@@ -86,6 +93,15 @@ pub fn encode(value: &Value, buf: &mut Vec<u8>) {
             buf.extend_from_slice(collection.as_bytes());
             buf.extend_from_slice(uuid.as_bytes());
         }
+        Value::Tombstone {
+            deleted_at_hlc,
+            vector_clock,
+        } => {
+            buf.push(TAG_TOMBSTONE);
+            buf.extend_from_slice(&deleted_at_hlc.to_le_bytes());
+            buf.extend_from_slice(&(vector_clock.len() as u32).to_le_bytes());
+            buf.extend_from_slice(vector_clock);
+        }
     }
 }
 
@@ -115,6 +131,7 @@ pub fn encoded_size(value: &Value) -> usize {
                     .sum::<usize>()
         }
         Value::Ref(collection, _) => 1 + 4 + collection.len() + 16,
+        Value::Tombstone { vector_clock, .. } => 1 + 8 + 4 + vector_clock.len(),
     }
 }
 
@@ -224,6 +241,31 @@ fn decode_recursive(cursor: &mut &[u8], depth: usize) -> Result<Value> {
                 Uuid::from_bytes(arr)
             };
             Ok(Value::Ref(collection, uuid))
+        }
+        TAG_TOMBSTONE => {
+            // 8 bytes packed HLC + length-prefixed encoded vector clock.
+            let mut hlc_bytes = [0u8; 8];
+            if cursor.len() < 8 {
+                return Err(GrumpyError::Codec(
+                    "unexpected end of data reading tombstone HLC".into(),
+                ));
+            }
+            hlc_bytes.copy_from_slice(&cursor[..8]);
+            let deleted_at_hlc = u64::from_le_bytes(hlc_bytes);
+            *cursor = &cursor[8..];
+
+            let vc_len = read_u32_le(cursor)?;
+            if vc_len > MAX_TOMBSTONE_VCLOCK_LEN {
+                return Err(GrumpyError::Codec(format!(
+                    "tombstone vector clock length {vc_len} exceeds maximum \
+                     ({MAX_TOMBSTONE_VCLOCK_LEN})"
+                )));
+            }
+            let vector_clock = read_bytes(cursor, vc_len as usize)?;
+            Ok(Value::Tombstone {
+                deleted_at_hlc,
+                vector_clock,
+            })
         }
         _ => Err(GrumpyError::Codec(format!("unknown type tag: 0x{tag:02x}"))),
     }
@@ -535,5 +577,49 @@ mod tests {
         assert_eq!(encoded.len(), encoded_size(&v));
         // tag(1) + name_len(4) + "users"(5) + uuid(16) = 26
         assert_eq!(encoded.len(), 26);
+    }
+
+    #[test]
+    fn test_tombstone_codec_round_trip() {
+        // Empty vclock.
+        let v = Value::Tombstone {
+            deleted_at_hlc: 0,
+            vector_clock: vec![],
+        };
+        round_trip(&v);
+        // Realistic vclock: u16 num_entries=1 + (u128 + u64) = 26 bytes.
+        let mut vc_bytes = Vec::new();
+        vc_bytes.extend_from_slice(&1u16.to_le_bytes());
+        vc_bytes.extend_from_slice(&12345u128.to_le_bytes());
+        vc_bytes.extend_from_slice(&7u64.to_le_bytes());
+        let v2 = Value::Tombstone {
+            deleted_at_hlc: 0xdeadbeef_cafebabe,
+            vector_clock: vc_bytes.clone(),
+        };
+        round_trip(&v2);
+
+        // Sanity: tag(1) + hlc(8) + vc_len(4) + vc(26) = 39 bytes.
+        let encoded = encode_to_vec(&v2);
+        assert_eq!(encoded.len(), 1 + 8 + 4 + vc_bytes.len());
+        assert_eq!(encoded[0], TAG_TOMBSTONE);
+    }
+
+    #[test]
+    fn test_tombstone_decode_truncated_hlc() {
+        // Tag + only 4 bytes of the 8-byte HLC.
+        let mut data = vec![TAG_TOMBSTONE];
+        data.extend_from_slice(&[0u8; 4]);
+        let err = decode(&data).unwrap_err();
+        assert!(err.to_string().contains("tombstone HLC"));
+    }
+
+    #[test]
+    fn test_tombstone_decode_oversize_vclock_rejected() {
+        let mut data = vec![TAG_TOMBSTONE];
+        data.extend_from_slice(&0u64.to_le_bytes());
+        // Claim a vclock far above the cap.
+        data.extend_from_slice(&(MAX_TOMBSTONE_VCLOCK_LEN + 1).to_le_bytes());
+        let err = decode(&data).unwrap_err();
+        assert!(err.to_string().contains("vector clock length"));
     }
 }

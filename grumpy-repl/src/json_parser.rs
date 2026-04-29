@@ -27,6 +27,9 @@ pub fn to_json_string(value: &Value, indent: usize) -> String {
         Value::String(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
         Value::Bytes(b) => format!("\"<{} bytes>\"", b.len()),
         Value::Ref(collection, uuid) => format!("$ref(\"{collection}\", \"{uuid}\")"),
+        Value::Tombstone { deleted_at_hlc, .. } => {
+            format!("$tombstone(hlc={deleted_at_hlc})")
+        }
         Value::Array(arr) => {
             if arr.is_empty() {
                 return "[]".to_string();
