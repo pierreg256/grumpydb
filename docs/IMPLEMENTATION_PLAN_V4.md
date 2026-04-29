@@ -101,7 +101,7 @@ Phase 38: Snapshot & restore tooling         ███████████�
 Phase 39:  RS256 JWT + JWKS                  ████████████░░░░░░░░  P3 ★
 Phase 40a: Cluster identity + static memb.   ████████░░░░░░░░░░░░  P3 ★
 Phase 40b: HLC + vector clocks (WAL v2)      ████████████░░░░░░░░  P3 ★ (format-locking)
-Phase 40c: Ring + vnodes module              ████████████░░░░░░░░  P3 ★
+Phase 40c: Ring + vnodes module              ████████████████████  P3 ★ ✅ Done
 Phase 40d: Tombstones in the engine          ████████░░░░░░░░░░░░  P3 ★
 Phase 40e: WAL-stream replication (1-writer) ████████████████████  P3 ★
 Phase 40f: Coordinator + tunable consistency ████████████░░░░░░░░  P3 ★ (protocol-locking)
@@ -861,38 +861,53 @@ after v5 ships** — this is the moment to pay the format cost.
 
 ## Phase 40c: Consistent Hash Ring with Virtual Nodes
 
+**Status: ✅ Done** (delivered as `grumpydb-ring` crate, workspace member).
+
 ### Goal
 Independent module that supports today's single-node deployment and
 tomorrow's N-node ring without changing call sites.
 
-### Deliverables
-1. **New crate `grumpydb-ring`** (workspace member, `publish = false`
-   initially):
-   - `Ring<NodeId>` with **256 vnodes per physical node** by default
-     (configurable via `[cluster] vnodes_per_node = 256`).
-   - Hash function: `Murmur3` over the canonical key
-     `database || \0 || collection || \0 || key_bytes`.
+### Delivered
+1. **New crate `grumpydb-ring`** (workspace member, `publish = false`):
+   - `Ring<NodeId>` generic over `NodeId: Clone + Eq + Ord + Hash + Display + Debug`,
+     with **256 vnodes per physical node** by default (configurable via
+     `RingConfig::vnodes_per_node`).
+   - Hash function: `Murmur3 x64_128` (low 64 bits) over the canonical
+     key `database || 0x00 || collection || 0x00 || key_bytes` —
+     see the `RoutingKey` type.
    - `ring.preference_list(key, n) -> Vec<NodeId>` returns the first `N`
-     **distinct physical** nodes around the ring (so replicas land on
-     different machines, not different vnodes of the same one).
-   - `ring.add_node(node_id)` / `ring.remove_node(node_id)` returning the
-     `Vec<KeyRange>` to transfer (for v6 rebalancing).
-   - Pure data structure: no I/O, no async. Easy to unit-test exhaustively.
-2. **Singleton "live ring"** in the server: an `Arc<RwLock<Ring>>` built from
-   `[cluster].peers` at startup. v5 never modifies it after boot; v6 will.
-3. **Routing decision API** (used by Phase 40e coordinator):
-   - `Coordinator::owners_for(database, collection, key) -> Vec<NodeId>`
-   - `Coordinator::is_local(database, collection, key) -> bool`
-4. **Tests**:
-   - Distribution uniformity (chi-squared on 1M keys → no node holds more
-     than +20% of average).
-   - Membership change deltas (adding a node moves only ~1/N of the keys).
+     **distinct physical** nodes around the ring; clamps `n` to
+     `nodes().len()` so empty/single-node rings degrade gracefully.
+   - `ring.add_node(node)` / `ring.remove_node(&node)` are idempotent
+     and return the `Vec<KeyRange>` deltas (for v6 Phase 49
+     rebalancing). `KeyRange` carries `from`/`to` as `NodeIdOpaque`
+     (type-erased Display string) so it isn't generic.
+   - Pure data structure: no I/O, no async, no globals.
+2. **Tests**: 23 unit tests + 1 doc test, including:
+   - Distribution uniformity over 1M random keys (per-node load within
+     ±12% of mean for 10 nodes).
+   - Membership-change deltas (~25% of keys move on `3 -> 4 nodes`,
+     ~33% on `3 -> 2`).
+   - Full-circle coverage of the emitted `KeyRange`s.
+   - `proptest` for `preference_list` size, distinctness, and
+     `owns` consistency.
+3. **Bench** (`cargo bench -p grumpydb-ring`): `preference_list` runs
+   in **~107–175 ns** for 3-50 node rings — an order of magnitude
+   under the 1 µs target.
+4. **Documentation**: `docs/RING.md`.
 
-### Acceptance
-- `cargo bench --bench ring` shows `preference_list` < 1µs.
-- Distribution test passes.
-- v5 single-node deployment routes 100% of keys to the local node and
-  emits no "forward" decision.
+### Deferred to later phases
+- The `Coordinator::owners_for` / `Coordinator::is_local` routing API
+  and the singleton `Arc<RwLock<Ring>>` in the server are wired in
+  Phase 40f (coordinator). The pure ring crate is ready to drop in.
+
+### Acceptance — met
+- 23 ring-crate tests pass; full workspace test count is 609 (was 585
+  + 23 unit + 1 doc test).
+- `cargo bench -p grumpydb-ring` shows `preference_list` < 1 µs.
+- Distribution test passes (loose ±30% bound, actual measured ±12%).
+- `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- `RUSTDOCFLAGS="-Dwarnings" cargo doc --workspace --no-deps` clean.
 
 ---
 

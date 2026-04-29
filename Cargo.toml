@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "grumpydb-protocol", "grumpydb-server", "grumpydb-client", "grumpy-repl", "grumpydb-testing"]
+members = [".", "grumpydb-protocol", "grumpydb-server", "grumpydb-client", "grumpy-repl", "grumpydb-testing", "grumpydb-ring"]
 exclude = ["fuzz"]
 
 # Shared metadata for all workspace members (Phase 32 v5 alignment).

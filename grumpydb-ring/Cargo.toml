@@ -1,0 +1,24 @@
+[package]
+name = "grumpydb-ring"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Consistent-hash ring with virtual nodes for GrumpyDB. Internal."
+
+[dependencies]
+uuid = { version = "1", features = ["v4", "serde"] }
+murmur3 = "0.5"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+proptest = "1"
+criterion = "0.5"
+
+[[bench]]
+name = "ring"
+harness = false
