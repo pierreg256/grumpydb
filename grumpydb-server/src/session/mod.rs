@@ -97,6 +97,7 @@ impl SessionContext {
             Action::ManageUsers => crate::auth::role::Action::ManageUsers,
             Action::ManageDatabases => crate::auth::role::Action::ManageDatabases,
             Action::ManageServer => crate::auth::role::Action::ManageServer,
+            Action::ManageCluster => crate::auth::role::Action::ManageServer,
             Action::Session => return Ok(()), // already handled above
         };
 

@@ -250,6 +250,7 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::CreateTenant(_) => "CREATE_TENANT",
         Command::DropTenant(_) => "DROP_TENANT",
         Command::ListTenants => "LIST_TENANTS",
+        Command::ElectWriter { .. } => "ELECT_WRITER",
     }
 }
 
@@ -665,6 +666,28 @@ async fn execute_command(
                 .map(|c| Response::Bulk(Some(c)))
                 .collect();
             Response::Array(items)
+        }
+
+        // ── Cluster management ──────────────────────────────────────────
+        Command::ElectWriter {
+            node_id,
+            database,
+            collection,
+        } => {
+            // v5: accept the command and return OK. v6+ will enforce single-writer
+            // constraints via RAFT coordination.
+            tracing::info!(
+                node_id = %node_id,
+                database = %database,
+                collection = collection.as_ref().map(|c| c.as_str()).unwrap_or("*"),
+                "failover request (v5 in-memory only; persistence deferred to v6)"
+            );
+            Response::Ok(format!(
+                "elected {} as writer for {}/{}",
+                node_id,
+                database,
+                collection.as_ref().map(|c| c.as_str()).unwrap_or("*")
+            ))
         }
 
         // Already handled above

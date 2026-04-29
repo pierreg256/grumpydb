@@ -61,6 +61,7 @@ mod idempotent;
 mod session;
 mod tailer;
 mod tasks;
+mod writer_control;
 
 pub use frame::{
     Ack, Bye, Frame, FrameError, FrameType, Heartbeat, Hello, HelloAck, MAX_FRAME_PAYLOAD,
@@ -76,3 +77,4 @@ pub use tasks::{
     AckPolicy, ApplyError, FollowerError, FollowerShutdown, FollowerTask, LeaderError,
     LeaderShutdown, LeaderTask, ReplicationApplier,
 };
+pub use writer_control::{WriterAssignment, WriterNotAllowed};

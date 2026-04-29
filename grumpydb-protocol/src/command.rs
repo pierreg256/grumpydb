@@ -132,6 +132,15 @@ pub enum Command {
     DropTenant(String),
     /// List all tenants.
     ListTenants,
+
+    // ── Cluster administration ──────────────────────────────────────
+    /// Failover: elect a new writer for a database or collection.
+    /// `collection` is optional; if absent, applies to the entire database.
+    ElectWriter {
+        node_id: String,
+        database: String,
+        collection: Option<String>,
+    },
 }
 
 /// The type of action a command performs (for RBAC).
@@ -149,6 +158,8 @@ pub enum Action {
     ManageDatabases,
     /// Manage the server: CREATE/DROP TENANT.
     ManageServer,
+    /// Manage the cluster: ELECT-WRITER.
+    ManageCluster,
     /// Session commands that bypass RBAC: LOGIN, TOKEN, REFRESH, PING, QUIT, USE, WHOAMI.
     Session,
 }
@@ -208,6 +219,9 @@ impl Command {
             Command::CreateTenant(_) | Command::DropTenant(_) | Command::ListTenants => {
                 Action::ManageServer
             }
+
+            // Cluster management
+            Command::ElectWriter { .. } => Action::ManageCluster,
 
             // Session (bypass RBAC)
             Command::Login { .. }
@@ -269,6 +283,9 @@ impl Command {
             | Command::ListUsers(_)
             | Command::Grant { .. }
             | Command::Revoke { .. } => Resource::Server,
+
+            // Cluster management → server scope
+            Command::ElectWriter { .. } => Resource::Server,
 
             // Session — no resource
             Command::Login { .. }
@@ -386,6 +403,17 @@ mod tests {
 
         let create_tenant = Command::CreateTenant("acme".into());
         assert_eq!(create_tenant.target_resource(None), Resource::Server);
+    }
+
+    #[test]
+    fn test_command_cluster_actions() {
+        let elect = Command::ElectWriter {
+            node_id: "node-1".into(),
+            database: "mydb".into(),
+            collection: Some("mycoll".into()),
+        };
+        assert_eq!(elect.required_action(), Action::ManageCluster);
+        assert_eq!(elect.target_resource(None), Resource::Server);
     }
 
     #[test]
