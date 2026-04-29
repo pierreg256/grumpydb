@@ -59,6 +59,7 @@
 mod frame;
 mod session;
 mod tailer;
+mod tasks;
 
 pub use frame::{
     Ack, Bye, Frame, FrameError, FrameType, Heartbeat, Hello, HelloAck, MAX_FRAME_PAYLOAD,
@@ -69,3 +70,7 @@ pub use session::{
     SessionError,
 };
 pub use tailer::{DEFAULT_POLL_INTERVAL, TailedRecord, WalTailer};
+pub use tasks::{
+    AckPolicy, ApplyError, FollowerError, FollowerShutdown, FollowerTask, LeaderError,
+    LeaderShutdown, LeaderTask, ReplicationApplier,
+};

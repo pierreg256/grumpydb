@@ -364,6 +364,83 @@ where
         let _ = write_bye(&mut self.stream, &reason.into()).await;
         let _ = self.stream.shutdown().await;
     }
+
+    /// Splits the post-handshake session into independent reader and
+    /// writer halves.
+    ///
+    /// This is required by full-duplex tasks (e.g. the leader push
+    /// loop in [`crate::LeaderTask`]) that need to ship outbound
+    /// frames concurrently with draining inbound ack frames. Without
+    /// the split, a `tokio::select!` over `recv_frame` + `send_frame`
+    /// is unsafe because the codec's `read_one_frame` is **not**
+    /// cancellation-safe: a cancelled mid-read can leave the stream
+    /// in a broken state.
+    ///
+    /// The reader half retains the read buffer accumulated during
+    /// the handshake; the writer half is stateless beyond the
+    /// underlying transport.
+    pub fn into_split(
+        self,
+    ) -> (
+        PeerReader<tokio::io::ReadHalf<S>>,
+        PeerWriter<tokio::io::WriteHalf<S>>,
+    )
+    where
+        S: 'static,
+    {
+        let (r, w) = tokio::io::split(self.stream);
+        (
+            PeerReader {
+                stream: r,
+                read_buf: self.read_buf,
+            },
+            PeerWriter { stream: w },
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Split halves
+// ---------------------------------------------------------------------------
+
+/// Read half of a [`PeerSession`] after [`PeerSession::into_split`].
+pub struct PeerReader<R> {
+    stream: R,
+    read_buf: Vec<u8>,
+}
+
+impl<R> PeerReader<R>
+where
+    R: tokio::io::AsyncRead + Unpin + Send,
+{
+    /// Awaits the next frame.
+    ///
+    /// Same semantics as [`PeerSession::recv_frame`]: clean EOF
+    /// surfaces as [`SessionError::Closed`].
+    pub async fn recv_frame(&mut self) -> Result<Frame, SessionError> {
+        read_one_frame(&mut self.stream, &mut self.read_buf).await
+    }
+}
+
+/// Write half of a [`PeerSession`] after [`PeerSession::into_split`].
+pub struct PeerWriter<W> {
+    stream: W,
+}
+
+impl<W> PeerWriter<W>
+where
+    W: tokio::io::AsyncWrite + Unpin + Send,
+{
+    /// Sends a frame, flushing on completion.
+    pub async fn send_frame(&mut self, frame: &Frame) -> Result<(), ReplicationError> {
+        write_frame_raw(&mut self.stream, frame).await
+    }
+
+    /// Best-effort `Bye` + `shutdown`. Errors are swallowed.
+    pub async fn close(mut self, reason: impl Into<String>) {
+        let _ = write_bye(&mut self.stream, &reason.into()).await;
+        let _ = self.stream.shutdown().await;
+    }
 }
 
 // ---------------------------------------------------------------------------
