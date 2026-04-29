@@ -58,6 +58,7 @@
 
 mod frame;
 mod idempotent;
+mod lag_tracker;
 mod session;
 mod tailer;
 mod tasks;
@@ -68,6 +69,7 @@ pub use frame::{
     PROTOCOL_VERSION, ReplicationError, Subscribe, decode_frame, encode_frame,
 };
 pub use idempotent::{IdempotentApplier, resume_hlc_for};
+pub use lag_tracker::LagTracker;
 pub use session::{
     AuthRejection, MIN_SUPPORTED_VERSION, PeerAuthenticator, PeerIdentity, PeerSession,
     SessionError,
