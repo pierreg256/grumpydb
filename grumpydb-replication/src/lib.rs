@@ -57,10 +57,15 @@
 #![warn(missing_docs)]
 
 mod frame;
+mod session;
 mod tailer;
 
 pub use frame::{
     Ack, Bye, Frame, FrameError, FrameType, Heartbeat, Hello, HelloAck, MAX_FRAME_PAYLOAD,
     PROTOCOL_VERSION, ReplicationError, Subscribe, decode_frame, encode_frame,
+};
+pub use session::{
+    AuthRejection, MIN_SUPPORTED_VERSION, PeerAuthenticator, PeerIdentity, PeerSession,
+    SessionError,
 };
 pub use tailer::{DEFAULT_POLL_INTERVAL, TailedRecord, WalTailer};
