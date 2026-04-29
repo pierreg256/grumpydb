@@ -98,16 +98,16 @@ Phase 35: Rate limiting & connection caps    ███████████�
 Phase 36: Health, readiness, metrics HTTP    ████████████████████  P2 ✅ Done
 Phase 37: Docker + docker-compose            ████████████████████  P2 ✅ Done
 Phase 38: Snapshot & restore tooling         ████████████████████  P2 ✅ Done
-Phase 39:  RS256 JWT + JWKS                  ████████████░░░░░░░░  P3 ★
-Phase 40a: Cluster identity + static memb.   ████████░░░░░░░░░░░░  P3 ★
-Phase 40b: HLC + vector clocks (WAL v2)      ████████████░░░░░░░░  P3 ★ (format-locking)
+Phase 39:  RS256 JWT + JWKS                  ████████████████████  P3 ★ ✅ Done (server-side; driver JWKS cache → Phase 42)
+Phase 40a: Cluster identity + static memb.   ████████████████████  P3 ★ ✅ Done
+Phase 40b: HLC + vector clocks (WAL v2)      ████████████████████  P3 ★ ✅ Done (format-locked)
 Phase 40c: Ring + vnodes module              ████████████████████  P3 ★ ✅ Done
-Phase 40d: Tombstones in the engine          ████████░░░░░░░░░░░░  P3 ★
-Phase 40e: WAL-stream replication (1-writer) ████████████████████  P3 ★
-Phase 40f: Coordinator + tunable consistency ████████████░░░░░░░░  P3 ★ (protocol-locking)
-Phase 41:  MVCC read snapshots (HLC-indexed) ████████████████░░░░  P3 ★
-Phase 42:  Smart drivers (Rust + TS)         ████████████░░░░░░░░  P3
-Phase 43:  v5.0.0 release                    ██░░░░░░░░░░░░░░░░░░  P3
+Phase 40d: Tombstones in the engine          ████████░░░░░░░░░░░░  P3 ★ 🟡 Format-locked; semantics deferred to v6 Phase 46
+Phase 40e: WAL-stream replication (1-writer) ░░░░░░░░░░░░░░░░░░░░  P3 ★ ⏳ Not started
+Phase 40f: Coordinator + tunable consistency ░░░░░░░░░░░░░░░░░░░░  P3 ★ ⏳ Not started (protocol-locking)
+Phase 41:  MVCC read snapshots (HLC-indexed) ░░░░░░░░░░░░░░░░░░░░  P3 ★ ⏳ Not started
+Phase 42:  Smart drivers (Rust + TS)         ░░░░░░░░░░░░░░░░░░░░  P3 ⏳ Not started
+Phase 43:  v5.0.0 release                    ░░░░░░░░░░░░░░░░░░░░  P3 ⏳ Not started
 ─── Streams E (v6) and F (v7) below: out of v5 scope ───────────────
 Phase 44:  Gossip membership                 ──────────────────── v6
 Phase 45:  Multi-writer ack pipeline (W>1)   ──────────────────── v6
@@ -738,6 +738,9 @@ Backup-able, restorable database. Foundation for replication seeding (Phase 40).
 
 ## Phase 39: RS256 JWT + JWKS
 
+**Status: ✅ Done** (server-side). The JWKS-aware client driver path
+(deliverable 5) is folded into Phase 42 (smart drivers).
+
 ### Goal
 Asymmetric tokens. Any node (or external service) can verify a token using only the public key.
 
@@ -766,6 +769,13 @@ Asymmetric tokens. Any node (or external service) can verify a token using only 
 ---
 
 ## Phase 40a: Cluster Identity & Static Membership
+
+**Status: ✅ Done.** Implemented in `grumpydb-server/src/cluster/`
+(`mod.rs` for `NodeIdentity` persistence, `handshake.rs` for the
+peer-to-peer cluster handshake) and surfaced in the new `[cluster]`
+section of `grumpydb-server/src/config.rs`. Node identity round-trips
+across restarts; mismatched `cluster_id` cleanly refuses; documented in
+`docs/CLUSTER.md`.
 
 ### Goal
 Establish the durable identity of a node and the static topology config that
@@ -812,6 +822,14 @@ replication) depend on `node_id`.
 ---
 
 ## Phase 40b: Hybrid Logical Clocks + Vector Clocks
+
+**Status: ✅ Done (format-locked).** WAL format **v2** is the steady-state
+on-disk format. Delivered: `src/wal/hlc.rs` (Hlc), `src/wal/vclock.rs`
+(`VectorClock` with `proptest`-verified partial order), `src/wal/record.rs`
+(record encoding gains `origin_node_id`, `hlc`, `vector_clock`; v1 records
+are back-compat-decoded as nil-origin), and `src/wal/applied_set.rs`
+(idempotent replay watermark). Live HLC stamping at write time wires up in
+Phase 40e once a writer identity flows through `Database::insert/update/delete`.
 
 ### Goal
 Replace bare LSN time-ordering with a clock that is comparable across nodes
@@ -913,6 +931,15 @@ tomorrow's N-node ring without changing call sites.
 
 ## Phase 40d: Tombstones in the Engine
 
+**Status: 🟡 Format-locked; semantics deferred to v6 Phase 46.** The
+on-disk encoding is final: `Value::Tombstone { vector_clock,
+deleted_at_hlc }` with `TAG_TOMBSTONE = 0x09` (see
+`src/document/codec.rs`), and `[cluster] gc_grace_seconds = 864_000`
+is honoured by `grumpydb-server/src/config.rs`. Live tombstone writes,
+GC, and replication-aware resurrection blocking are intentionally
+holdover for v6 (Phase 46) where multi-writer makes them load-bearing.
+See `docs/TOMBSTONES.md`.
+
 ### Goal
 Make `delete` safe under replication: a deleted key must not "resurrect"
 when an out-of-date replica comes back online.
@@ -939,6 +966,13 @@ when an out-of-date replica comes back online.
 ---
 
 ## Phase 40e: WAL-Stream Replication (Single-Writer, Ring-Ready)
+
+**Status: ⏳ Not started.** Only the RBAC scaffolding exists today:
+`Action::ReplicationPeer` and `RoleName::ClusterPeer` in
+`grumpydb-server/src/auth/role.rs`, plus the bootstrap `cluster_peer`
+user/token in `grumpydb-server/src/auth/store.rs`. No
+`grumpydb-replication` crate, no peer port, no WAL tailer. Next phase
+to execute.
 
 ### Goal
 Stream WAL records between peers. v5 enforces a single-active-writer regime

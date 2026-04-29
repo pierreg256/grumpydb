@@ -1505,6 +1505,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "grumpydb-replication"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "grumpydb-ring"
 version = "0.1.0"
 dependencies = [

@@ -325,6 +325,92 @@ This unreleased subsection tracks Stream A of the v5 plan
 - `RUSTDOCFLAGS="-Dwarnings" cargo doc --workspace --no-deps --features grumpydb-server/cloud-aws,grumpydb-server/cloud-azure`
   clean
 
+### v5 stream — Distribution (P3)
+
+This unreleased subsection tracks Stream D of the v5 plan
+(`docs/IMPLEMENTATION_PLAN_V4.md`). It lays the format-locked
+foundations needed by the downstream distributed project.
+
+#### Added — Phase 39: RS256 JWT + JWKS (server-side)
+- **Asymmetric tokens by default**: `JwtAlgorithm::Rs256` is the default
+  for new deployments. RSA-2048 keypair is generated on first start
+  (`_auth/jwt/rs256_current.{key,pub}`) and exposed via the JWKS
+  endpoint `GET /.well-known/jwks.json` on the HTTP port.
+- **Two-key rotation**: `current` + `next` coexist; `AuthStore::rotate_jwt_keys()`
+  promotes `next` to `current` and mints a new `next`, so previously-issued
+  tokens still verify until expiry.
+- **`kid` in JWT header**: every issued token references the signing
+  key id, so verifiers (current node or any peer) can pick the right
+  public key from JWKS.
+- **HS256 backward compatibility**: existing HS256 deployments keep
+  working unchanged; the algorithm is recorded in
+  `_auth/jwt/config.json`.
+- **Inter-node auth scaffolding**: bootstrap `cluster_peer` user
+  (`_cluster/local-bootstrap`) with a 1-year JWT persisted to
+  `_auth/cluster_peer.token`. New `RoleName::ClusterPeer` and
+  `Action::ReplicationPeer`; the role permits **only** that action
+  and is denied any user-data operation.
+- New deps (server): `rsa = "0.9"`, `sha2`, `base64ct`.
+
+#### Added — Phase 40a: Cluster identity & static membership
+- **Persistent node identity** in `<data_dir>/_cluster/node.json`:
+  `{ node_id, cluster_id, created_at_unix, identity_version }`. Round-trips
+  across restarts; refuses to start on malformed file.
+- **Static peer config** under `[cluster]` in `grumpydb-server.toml`:
+  `cluster_id`, `listen_peer`, `peers = [{ node_id, addr }, …]`,
+  `vnodes_per_node`, `gc_grace_seconds`, `max_lag_seconds`.
+- **Cluster handshake** (`grumpydb-server/src/cluster/handshake.rs`):
+  exchange `(cluster_id, node_id)` first; mismatched `cluster_id`
+  closes the connection.
+- Documented in `docs/CLUSTER.md`.
+
+#### Added — Phase 40b: HLC + vector clocks (WAL format v2, format-locked)
+- **`Hlc(u64)`** in `src/wal/hlc.rs` — 48 bits physical ms + 16 bits
+  logical counter, with bounded-skew `update()` semantics.
+- **`VectorClock`** in `src/wal/vclock.rs` — `proptest`-verified partial
+  order (`Equal`/`Less`/`Greater`/`Concurrent`); length-prefixed
+  serialisation sorted by `node_id`.
+- **WAL format v2** (`src/wal/record.rs`): every record gains
+  `origin_node_id: u128`, `hlc: u64`, and `vector_clock`. v1 records
+  remain decodable (mapped to nil-origin / `hlc = lsn`). The on-disk
+  layout is **final**.
+- **Idempotent replay**: `src/wal/applied_set.rs` persists
+  `(node_id → last_hlc)` so replay of the same `(origin, hlc)` is a
+  no-op — zero cost in v5 single-writer; load-bearing for v6 multi-writer.
+
+#### Added — Phase 40c: Consistent hash ring with virtual nodes
+- New workspace crate **`grumpydb-ring`** (`publish = false`):
+  `Ring<NodeId>` generic, default 256 vnodes/node, Murmur3 x64_128
+  hashing over `database || 0x00 || collection || 0x00 || key`.
+  `preference_list(key, n)` returns the first N distinct physical
+  owners; `add_node`/`remove_node` are idempotent and return
+  `Vec<KeyRange>` deltas for v6 rebalancing.
+- 23 unit tests + 1 doc test; bench `preference_list < 1 µs`
+  (measured 107–175 ns for 3–50 node rings); distribution within ±12 %
+  of the mean over 1 M random keys.
+- Documented in `docs/RING.md`.
+- The `Coordinator::owners_for` / `is_local` routing API is wired in
+  Phase 40f.
+
+#### Added — Phase 40d: Tombstones (format-locked, semantics deferred)
+- **`Value::Tombstone { vector_clock, deleted_at_hlc }`** with stable
+  on-disk tag `0x09` (see `src/document/codec.rs`); round-trip and
+  oversize-vclock guards covered by unit tests.
+- `[cluster] gc_grace_seconds = 864_000` (10 days default) honoured by
+  config parsing.
+- **Live semantics** (writing/visibility/GC interaction with replication)
+  are intentionally deferred to **v6 Phase 46**, where multi-writer makes
+  resurrection a real risk. The format is final; no v5→v6 migration.
+- Documented in `docs/TOMBSTONES.md`.
+
+#### Pending — remaining Stream D phases
+- Phase 40e: WAL-stream replication — **not started** (only RBAC
+  scaffolding present).
+- Phase 40f: coordinator + tunable `(N, R, W)` protocol — not started.
+- Phase 41: MVCC reads (HLC-indexed) — not started.
+- Phase 42: smart drivers (Rust + TS, JWKS-aware) — not started.
+- Phase 43: v5.0.0 release — not started.
+
 ## [4.1.0] - 2026-04-28
 
 Minor release: the interactive REPL is promoted from an example to a first-class workspace crate published on crates.io as `grumpy-repl 4.1.0`. No engine API changes. Only `grumpydb` (4.0.0 → 4.1.0) and the new `grumpy-repl` crate are published in this release; `grumpydb-protocol`, `grumpydb-server`, and `grumpydb-client` are unchanged.
