@@ -41,11 +41,14 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
+use crate::auth::store::AuthStore;
+
 /// State observed by the HTTP server.
 ///
 /// Shared with the TCP listener (so `/readyz` can flip on once the TCP
 /// socket is bound) and owned by the spawned HTTP task (which renders the
-/// Prometheus snapshot on every `/metrics` request).
+/// Prometheus snapshot on every `/metrics` request and the JWKS document
+/// on every `/.well-known/jwks.json` request).
 pub struct HttpState {
     /// Set to `true` by the TCP listener once it has successfully bound.
     /// Read with `Acquire` ordering by `/readyz`.
@@ -53,6 +56,9 @@ pub struct HttpState {
     /// Prometheus exporter handle. Cheap to clone; rendering snapshots is
     /// O(metrics).
     pub prometheus: PrometheusHandle,
+    /// Auth store reference for the JWKS endpoint. `None` only in the
+    /// observability-unit-tests where no auth store is set up.
+    pub auth_store: Option<Arc<parking_lot::RwLock<AuthStore>>>,
 }
 
 /// Initialise the global metrics recorder and register the GrumpyDB
@@ -191,6 +197,23 @@ async fn handle_request(
                     text_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
                 })
         }
+        // Phase 39: JWKS public-keyset endpoint. Unauthenticated by design
+        // (it is the *public* keyset). Returns `{"keys": []}` for HS256
+        // deployments — symmetric secrets must never be exposed.
+        (&Method::GET, "/.well-known/jwks.json") => {
+            let keys = match &state.auth_store {
+                Some(store) => store.read().jwks(),
+                None => Vec::new(),
+            };
+            let body = serde_json::json!({ "keys": keys }).to_string();
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(Full::new(Bytes::from(body)))
+                .unwrap_or_else(|_| {
+                    text_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+                })
+        }
         _ => text_response(StatusCode::NOT_FOUND, "not found"),
     };
     Ok(resp)
@@ -246,6 +269,7 @@ mod tests {
         let state = Arc::new(HttpState {
             ready: AtomicBool::new(ready),
             prometheus: prom,
+            auth_store: None,
         });
 
         // Bind to :0 to grab a free port, but the public `serve` API takes a
@@ -346,6 +370,7 @@ mod tests {
         let state = Arc::new(HttpState {
             ready: AtomicBool::new(false),
             prometheus: prom,
+            auth_store: None,
         });
         let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = probe.local_addr().unwrap().port();

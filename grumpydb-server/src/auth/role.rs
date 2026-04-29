@@ -17,6 +17,14 @@ pub enum RoleName {
     ReadWrite,
     /// Read-only within scope.
     ReadOnly,
+    /// **Inter-node only** (Phase 39 stub, fully wired in Phase 40e).
+    ///
+    /// Issued to every cluster node at bootstrap as a long-lived JWT used
+    /// to authenticate WAL-stream / replication endpoints between peers.
+    /// `ClusterPeer` permits **only** the [`Action::ReplicationPeer`]
+    /// action and *no* user-data operation, so a stolen cluster_peer
+    /// token cannot read or modify tenant data.
+    ClusterPeer,
 }
 
 impl fmt::Display for RoleName {
@@ -27,6 +35,7 @@ impl fmt::Display for RoleName {
             RoleName::DbAdmin => write!(f, "db_admin"),
             RoleName::ReadWrite => write!(f, "read_write"),
             RoleName::ReadOnly => write!(f, "read_only"),
+            RoleName::ClusterPeer => write!(f, "cluster_peer"),
         }
     }
 }
@@ -40,20 +49,35 @@ impl RoleName {
             "db_admin" => Some(RoleName::DbAdmin),
             "read_write" => Some(RoleName::ReadWrite),
             "read_only" => Some(RoleName::ReadOnly),
+            "cluster_peer" => Some(RoleName::ClusterPeer),
             _ => None,
         }
     }
 
     /// Returns `true` if this role permits the given action type.
+    ///
+    /// `ClusterPeer` is intentionally restricted to the
+    /// [`Action::ReplicationPeer`] action so that a leaked cluster-peer
+    /// token cannot be used to read or mutate user data.
     pub fn permits_action(&self, action: &Action) -> bool {
         match self {
-            RoleName::ServerAdmin => true,
-            RoleName::TenantAdmin => !matches!(action, Action::ManageServer),
+            RoleName::ServerAdmin => !matches!(action, Action::ReplicationPeer),
+            RoleName::TenantAdmin => {
+                !matches!(action, Action::ManageServer | Action::ReplicationPeer)
+            }
             RoleName::DbAdmin => matches!(action, Action::Read | Action::Write | Action::Admin),
             RoleName::ReadWrite => matches!(action, Action::Read | Action::Write),
             RoleName::ReadOnly => matches!(action, Action::Read),
+            RoleName::ClusterPeer => matches!(action, Action::ReplicationPeer),
         }
     }
+}
+
+/// Returns `true` if `action` is reserved for `ClusterPeer` only — used as
+/// a defence-in-depth guard at the request handlers, in addition to the
+/// per-role check.
+pub fn is_cluster_peer_only(action: &Action) -> bool {
+    matches!(action, Action::ReplicationPeer)
 }
 
 /// The type of action being performed.
@@ -66,6 +90,11 @@ pub enum Action {
     ManageUsers,
     ManageDatabases,
     ManageServer,
+    /// Inter-node replication endpoints (WAL stream, snapshot fetch).
+    /// Permitted **only** by [`RoleName::ClusterPeer`]. Wired up by
+    /// Phase 40e — Phase 39 only registers the variant and the
+    /// permission rule.
+    ReplicationPeer,
 }
 
 /// The scope of a role assignment.
@@ -153,6 +182,7 @@ mod tests {
             RoleName::DbAdmin,
             RoleName::ReadWrite,
             RoleName::ReadOnly,
+            RoleName::ClusterPeer,
         ];
         for role in &roles {
             let s = role.to_string();
@@ -162,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn test_server_admin_permits_everything() {
+    fn test_server_admin_permits_everything_except_replication() {
         let sa = RoleName::ServerAdmin;
         assert!(sa.permits_action(&Action::Read));
         assert!(sa.permits_action(&Action::Write));
@@ -170,6 +200,39 @@ mod tests {
         assert!(sa.permits_action(&Action::ManageUsers));
         assert!(sa.permits_action(&Action::ManageDatabases));
         assert!(sa.permits_action(&Action::ManageServer));
+        // Replication endpoints are reserved for ClusterPeer only — a
+        // stolen server_admin token MUST NOT be able to subscribe to a
+        // peer's WAL stream.
+        assert!(!sa.permits_action(&Action::ReplicationPeer));
+    }
+
+    #[test]
+    fn test_cluster_peer_permits_only_replication() {
+        let cp = RoleName::ClusterPeer;
+        assert!(cp.permits_action(&Action::ReplicationPeer));
+        // Defence in depth: cluster_peer cannot touch user data.
+        for action in [
+            Action::Read,
+            Action::Write,
+            Action::Admin,
+            Action::ManageUsers,
+            Action::ManageDatabases,
+            Action::ManageServer,
+        ] {
+            assert!(
+                !cp.permits_action(&action),
+                "ClusterPeer must not permit {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_cluster_peer_only_marks_replication_action() {
+        assert!(is_cluster_peer_only(&Action::ReplicationPeer));
+        assert!(!is_cluster_peer_only(&Action::Read));
+        assert!(!is_cluster_peer_only(&Action::Write));
+        assert!(!is_cluster_peer_only(&Action::Admin));
+        assert!(!is_cluster_peer_only(&Action::ManageServer));
     }
 
     #[test]

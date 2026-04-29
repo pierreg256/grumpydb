@@ -119,11 +119,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialise the global metrics recorder and observability HTTP server
     // (Phase 36). The HTTP server is unauthenticated by design — it serves
-    // only `/healthz`, `/readyz`, and Prometheus `/metrics` aggregates.
+    // only `/healthz`, `/readyz`, Prometheus `/metrics` aggregates, and the
+    // JWKS public-keyset (`/.well-known/jwks.json`, Phase 39).
     let prom = http::init_metrics();
     let http_state = Arc::new(HttpState {
         ready: AtomicBool::new(false),
         prometheus: prom,
+        auth_store: Some(auth_store.clone()),
     });
     if !config.http.bind.is_empty() {
         let _http_handle = http::serve(http_state.clone(), &config.http.bind).await?;

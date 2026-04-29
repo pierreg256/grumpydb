@@ -39,8 +39,10 @@ parking_lot = "0.12"
 tempfile = "3"
 rand = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
+jsonwebtoken = "9"
 grumpydb-client = { path = "grumpydb-client" }
 grumpydb-protocol = { path = "grumpydb-protocol" }
 grumpydb-testing = { path = "grumpydb-testing" }

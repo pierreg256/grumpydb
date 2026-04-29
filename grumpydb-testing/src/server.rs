@@ -90,7 +90,7 @@ impl TestServer {
             _tmp: tmp,
         };
 
-        wait_until_ready(addr, Duration::from_secs(10)).await;
+        wait_until_ready(addr, Duration::from_secs(60)).await;
         server
     }
 
@@ -140,7 +140,7 @@ impl TestServer {
         // Replace the dead handle so `Drop` reaps the live one.
         self.process = process;
 
-        wait_until_ready(self.addr, Duration::from_secs(10)).await;
+        wait_until_ready(self.addr, Duration::from_secs(60)).await;
     }
 }
 

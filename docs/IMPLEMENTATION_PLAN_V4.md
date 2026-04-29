@@ -2,82 +2,131 @@
 
 ## Vision
 
-Transform GrumpyDB from a *credible single-node engine* (v4.1) into a **production-grade, observable, distributable database** suitable for being embedded as a building block of a larger distributed system.
+Transform GrumpyDB from a *credible single-node engine* (v4.1) into a
+**production-grade, observable, ring-distributable database** in the
+**Dynamo lineage** (consistent hashing, vector-clock-versioned multi-writer,
+tunable consistency `(N, R, W)`).
 
-This plan is split into four streams executed roughly in parallel but committed in priority order:
+This plan is split into four streams executed roughly in parallel but
+committed in priority order:
 
 1. **Stream H — Hardening** (P0): zero `unwrap` in the engine, hardened auth bootstrap, CI, clippy clean.
 2. **Stream O — Observability** (P1): tracing, metrics, integration tests, benchmarks, fuzzing.
 3. **Stream A — Architecture** (P2): unify B+Tree, kill `GrumpyDb`, rate-limiting, Docker, snapshot/backup tooling.
-4. **Stream D — Distribution** (P3, **mandatory** for the downstream distributed project): RS256 JWT with JWKS, WAL-shipping replication, MVCC foundations.
+4. **Stream D — Distribution** (P3, **mandatory** for the downstream distributed
+   project): RS256 JWT with JWKS, **cluster identity, HLC + vector clocks,
+   consistent-hash ring with vnodes, tombstones, WAL-stream replication,
+   coordinator pattern with tunable consistency protocol**, MVCC reads,
+   smart drivers.
 
-### Target architecture (end of v5)
+Two follow-on streams are **out of v5 scope** but pre-shaped here so v6/v7
+ship with **zero on-disk migration**:
+
+- **Stream E — v6** (Phases 44–49): gossip membership, multi-writer ack
+  pipeline, conflict resolution (LWW + CRDT runtime), read repair with
+  tunable `R`, hinted handoff, ring rebalancing.
+- **Stream F — v7** (Phases 50–53): Merkle-tree active anti-entropy,
+  multi-region replication, schema validation, time-series optimisations.
+
+### Target architecture (end of v7)
 
 ```
-                    ┌────────────────────────────────────────┐
-                    │  Control Plane                         │
-                    │  - JWKS endpoint (RS256 public keys)   │
-                    │  - /metrics (Prometheus)               │
-                    │  - /healthz, /readyz                   │
-                    └────────────────────────────────────────┘
-                                   │
-   ┌───────────────────────────────┼───────────────────────────────┐
-   ▼                               ▼                               ▼
-┌──────────────┐              ┌──────────────┐              ┌──────────────┐
-│  Primary     │  WAL ship    │  Replica 1   │   WAL ship   │  Replica 2   │
-│  (read+write)│ ────────────►│ (read-only)  │ ────────────►│ (read-only)  │
-│              │              │              │              │              │
-│  RS256 sign  │              │  RS256 verify│              │  RS256 verify│
-└──────────────┘              └──────────────┘              └──────────────┘
-   ▲                               ▲                               ▲
-   │            ┌──────────────────┴──────────────────┐            │
-   │            │  Clients (with token from any node) │            │
-   │            └─────────────────────────────────────┘            │
-   │                                                               │
-   └─── Snapshot/Backup ──► S3 / disk ◄── Snapshot/Backup ─────────┘
+   ┌────────────────────────────────────────────────────────────────┐
+   │                     Smart clients (Rust + TS)                  │
+   │     - JWKS cache, RS256 verify                                 │
+   │     - TOPOLOGY-aware routing                                   │
+   │     - Sibling reconciliation (LWW or CRDT)                     │
+   └────────┬───────────────────────────────────────────────────────┘
+            │
+            ▼
+   ┌──────────────────────────────────────────────────────────────────┐
+   │  Cluster (consistent-hash ring with N=256 vnodes per phys node)  │
+   │                                                                  │
+   │  ┌────────┐ gossip+WAL  ┌────────┐ gossip+WAL  ┌────────┐        │
+   │  │ Node A │ ◄─────────► │ Node B │ ◄─────────► │ Node C │  …     │
+   │  │        │             │        │             │        │        │
+   │  │ HLC +  │             │ HLC +  │             │ HLC +  │        │
+   │  │ VClock │             │ VClock │             │ VClock │        │
+   │  └────────┘             └────────┘             └────────┘        │
+   │                                                                  │
+   │   - Each node carries the FULL data set in v6 (no sharding yet)  │
+   │   - N = replication factor (=cluster size in v5/v6)              │
+   │   - (R, W) tunable per-request: R + W > N for strong consistency │
+   │   - Conflict resolution: LWW by HLC, opt-in CRDT types           │
+   └──────────────────────────────────────────────────────────────────┘
+            │
+            ▼
+   Snapshot / Restore ──► local / S3 / Azure Blob
 ```
 
-### Key design decisions
+### Key design decisions (v5 → v7)
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| JWT algorithm | **RS256** (asymmetric) | Required for distributed verification across replicas |
-| Key publishing | **JWKS endpoint** (HTTP) | Standard, reused by clients and replicas |
-| Replication | **WAL shipping** (async, primary→replicas) | The WAL already exists — minimal new design |
-| Replication topology v1 | **Single primary, N async replicas** | Simple, correct, covers the immediate use case |
-| Replica lag bound | **Bounded by config** (max 5 s default) | Failover decisions deferred to v6 |
-| Snapshot format | **tar.gz of {checkpoint LSN, data files}** | Simple, restorable, S3-friendly |
+| Replication topology | **Consistent-hash ring** (Cassandra-lineage) | Horizontal scale-out without primary bottleneck |
+| Vnodes | **~256 per physical node** | Smooth rebalancing, industry-standard granularity |
+| Concurrency model | **Multi-writer concurrent** (v6+); v5 single-writer-per-collection enforced | Dynamo-style; lays the groundwork in v5 |
+| Versioning | **HLC + vector clocks** stamped on every WAL record (v5) | Detects concurrent writes; required for read repair (v6) and Merkle reconciliation (v7) |
+| Conflict resolution | **LWW by HLC** + opt-in CRDT types (`Value::CRDT(...)`) | Simple default; CRDT escape hatch for sensitive data |
+| Coordinator | **Server-side proxy AND smart client** | Smart driver path is fast; dumb clients (`nc`) still work |
+| Membership | **Static TOML in v5 → gossip in v6**, no Raft | Eventually-consistent membership, no leader election |
+| Anti-entropy | **Read repair v6, Merkle trees v7** | Progressive complexity |
+| Consistency | **Tunable `(R, W) ∈ [1, N]`** in protocol (v5 freezes wire format, v6 honours `R>1`/`W>1`) | True Dynamo semantics |
+| Tombstones | **Yes, with `gc_grace_seconds`** | Prevents resurrection of deleted keys when a peer reconnects |
+| Snapshot format | **tar.gz of {data, _auth, manifest}** (Phase 38) | Simple, restorable, S3/Azure-friendly |
+| JWT algorithm | **RS256** (asymmetric) | Each node can verify tokens issued by any other |
+| Key publishing | **JWKS endpoint** | Standard; reused by clients and peers |
 | Observability | **`tracing` JSON + Prometheus** | Industry standard |
-| MVCC | **Read snapshots, write serialized** (foundation only) | Full MVCC in v6; v5 unblocks reader/writer concurrency |
 
 ---
 
 ## Phase Overview
 
 ```
-Phase 24: CI / Clippy / Hygiene             ████████████████████  P0 ✅ Done
-Phase 25: Eliminate unwrap() in engine      ████████████████████  P0 ✅ Done
-Phase 26: Auth bootstrap & secret hardening ████████████████████  P0 ✅ Done
-Phase 27: tracing instrumentation           ████████████████████  P1 ✅ Done
-Phase 28: Integration tests (TCP E2E)       ████████████████████  P1 ✅ Done
-Phase 29: Crash recovery integration tests  ████████████████████  P1 ✅ Done
-Phase 30: Criterion benchmarks              ████████████████████  P1 ✅ Done
-Phase 31: Fuzz protocol & json parsers      ████████████████████  P1 ✅ Done
-Phase 32: Workspace version alignment       ████████████████████  P1 ✅ Done
-Phase 33: Unify B+Tree (generic over Key)   ████████████████████  P2 ✅ Done
-Phase 34: Retire GrumpyDb wrapper           ████████████████████  P2 ✅ Done
-Phase 35: Rate limiting & connection caps   ████████████████████  P2 ✅ Done
-Phase 36: Health, readiness, metrics HTTP   ████████████████████  P2 ✅ Done
-Phase 37: Docker + docker-compose           ████████████████████  P2 ✅ Done
-Phase 38: Snapshot & restore tooling        ████████████████████  P2 ✅ Done
-Phase 39: RS256 JWT + JWKS                  ████████████░░░░░░░░  P3 ★
-Phase 40: WAL shipping replication          ████████████████████  P3 ★
-Phase 41: MVCC foundations (read snapshots) ████████████████░░░░  P3 ★
-Phase 42: TypeScript driver hardening       ██████░░░░░░░░░░░░░░  P3
-Phase 43: v5.0.0 release                    ██░░░░░░░░░░░░░░░░░░  P3
+Phase 24: CI / Clippy / Hygiene              ████████████████████  P0 ✅ Done
+Phase 25: Eliminate unwrap() in engine       ████████████████████  P0 ✅ Done
+Phase 26: Auth bootstrap & secret hardening  ████████████████████  P0 ✅ Done
+Phase 27: tracing instrumentation            ████████████████████  P1 ✅ Done
+Phase 28: Integration tests (TCP E2E)        ████████████████████  P1 ✅ Done
+Phase 29: Crash recovery integration tests   ████████████████████  P1 ✅ Done
+Phase 30: Criterion benchmarks               ████████████████████  P1 ✅ Done
+Phase 31: Fuzz protocol & json parsers       ████████████████████  P1 ✅ Done
+Phase 32: Workspace version alignment        ████████████████████  P1 ✅ Done
+Phase 33: Unify B+Tree (generic over Key)    ████████████████████  P2 ✅ Done
+Phase 34: Retire GrumpyDb wrapper            ████████████████████  P2 ✅ Done
+Phase 35: Rate limiting & connection caps    ████████████████████  P2 ✅ Done
+Phase 36: Health, readiness, metrics HTTP    ████████████████████  P2 ✅ Done
+Phase 37: Docker + docker-compose            ████████████████████  P2 ✅ Done
+Phase 38: Snapshot & restore tooling         ████████████████████  P2 ✅ Done
+Phase 39:  RS256 JWT + JWKS                  ████████████░░░░░░░░  P3 ★
+Phase 40a: Cluster identity + static memb.   ████████░░░░░░░░░░░░  P3 ★
+Phase 40b: HLC + vector clocks (WAL v2)      ████████████░░░░░░░░  P3 ★ (format-locking)
+Phase 40c: Ring + vnodes module              ████████████░░░░░░░░  P3 ★
+Phase 40d: Tombstones in the engine          ████████░░░░░░░░░░░░  P3 ★
+Phase 40e: WAL-stream replication (1-writer) ████████████████████  P3 ★
+Phase 40f: Coordinator + tunable consistency ████████████░░░░░░░░  P3 ★ (protocol-locking)
+Phase 41:  MVCC read snapshots (HLC-indexed) ████████████████░░░░  P3 ★
+Phase 42:  Smart drivers (Rust + TS)         ████████████░░░░░░░░  P3
+Phase 43:  v5.0.0 release                    ██░░░░░░░░░░░░░░░░░░  P3
+─── Streams E (v6) and F (v7) below: out of v5 scope ───────────────
+Phase 44:  Gossip membership                 ──────────────────── v6
+Phase 45:  Multi-writer ack pipeline (W>1)   ──────────────────── v6
+Phase 46:  Conflict resolution (LWW + CRDT)  ──────────────────── v6
+Phase 47:  Read repair + tunable R>1         ──────────────────── v6
+Phase 48:  Hinted handoff                    ──────────────────── v6
+Phase 49:  Ring rebalancing on add/remove    ──────────────────── v6
+Phase 50:  Merkle-tree anti-entropy          ──────────────────── v7
+Phase 51:  Multi-region replication          ──────────────────── v7
+Phase 52:  Schema validation (JSON-Schema)   ──────────────────── v7
+Phase 53:  Time-series optimisations         ──────────────────── v7
 ```
 
 ★ = required by the downstream distributed project.
+
+> **Format & protocol locks**: phases 40b (WAL format) and 40f (wire
+> protocol) introduce on-disk and on-the-wire structures that v6 and v7
+> rely on without modification. Get these right in v5, and v6 ships with
+> zero data migration.
 
 ---
 
@@ -668,6 +717,25 @@ Backup-able, restorable database. Foundation for replication seeding (Phase 40).
 
 # Stream D — Distribution (P3, mandatory)
 
+> **Architectural intent (v5 → v7).** GrumpyDB is moving toward a Dynamo-style
+> distributed engine: consistent hashing with vnodes, multi-writer concurrent
+> writes, tunable consistency `(N, R, W)`. v5 lands the **structural foundations**
+> (cluster identity, vector clocks in WAL, ring module, coordinator skeleton,
+> protocol with N/R/W tokens) but only enables a single-writer regime end-to-end;
+> v6 turns on multi-writer + gossip membership; v7 adds anti-entropy at scale.
+>
+> Design decisions taken before the v5 build (see `docs/ARCHITECTURE.md`
+> §"Distributed Roadmap"):
+>
+> | Decision | Choice | Rationale |
+> |----------|--------|-----------|
+> | Vnodes | Cassandra-style, ~256 per physical node | Smooth rebalancing, industry default |
+> | Conflict resolution | LWW by HLC + opt-in CRDT types (`Value::CRDT(...)`) | Simple default, no silent loss for sensitive data |
+> | Coordinator | Server-side proxy **and** smart client | Smart driver path is fast; dumb clients (`nc`) still work |
+> | Membership | Static TOML in v5 → gossip in v6, no Raft | Eventual-consistent membership, no leader election |
+> | Anti-entropy | Read repair in v6, Merkle trees in v7 | Progressive deployment of cost |
+> | Consistency tunable | `(R, W) ∈ [1, N]` exposed in protocol | True Dynamo semantics |
+
 ## Phase 39: RS256 JWT + JWKS
 
 ### Goal
@@ -685,122 +753,381 @@ Asymmetric tokens. Any node (or external service) can verify a token using only 
    - Rotation operation: `next` becomes `current`, fresh `next` generated. Old tokens still verify until expiry.
 5. **Client driver updates**:
    - Both Rust and TS drivers cache the JWKS, refresh on `kid` miss, retry once.
+6. **Inter-node auth (Phase 40+ prep)**: a special role `cluster_peer` issued
+   to every node at bootstrap, used to authenticate WAL stream connections
+   between peers. Token is long-lived (1 year), renewable.
 
 ### Acceptance
 - A token issued by node A is verifiable by node B given only B knows A's JWKS URL.
 - Unit tests for rotation, expiry, kid mismatch.
+- Inter-node `cluster_peer` token allows the replication endpoints, denies user data ops.
 - Documented in `docs/AUTH.md`.
 
 ---
 
-## Phase 40: WAL-Shipping Replication
+## Phase 40a: Cluster Identity & Static Membership
 
 ### Goal
-A primary streams its WAL to N async replicas. Replicas are read-only and lag-bounded.
+Establish the durable identity of a node and the static topology config that
+v5 uses (and v6 will replace with gossip). All later phases (HLC, ring,
+replication) depend on `node_id`.
+
+### Deliverables
+1. **Persistent node identity**:
+   - On first start, generate a random `node_id: Uuid` and persist it to
+     `data/_cluster/node.json` along with `cluster_id` (random) and a
+     creation timestamp.
+   - On subsequent starts, load and verify. Refuse to start if the file is
+     present but malformed.
+   - CLI: `grumpydb-server cluster init --cluster-id <UUID>` to join an
+     existing cluster (writes the supplied `cluster_id`, generates a fresh
+     `node_id`).
+2. **Static peer list** in server config:
+   ```toml
+   [cluster]
+   # Required if [replication] is enabled.
+   cluster_id = "..."
+   listen_peer = "0.0.0.0:6390"   # node-to-node TCP+TLS port
+   peers = [
+     { node_id = "...", addr = "node-2:6390" },
+     { node_id = "...", addr = "node-3:6390" },
+   ]
+   ```
+   The format reserves room for fields that gossip will populate dynamically
+   in v6 (`status`, `last_seen_at`, `vnode_assignments`).
+3. **Cluster handshake**: when two nodes connect over the peer port, they
+   exchange `(cluster_id, node_id)` first. Mismatched `cluster_id` → close
+   immediately with `Response::Error("cluster_id mismatch")`.
+4. **Tracing/metrics fields**: every span and Prometheus metric carries a
+   `node_id` label so multi-node logs can be cross-referenced.
+5. **Inter-node TLS**: separate cert chain per cluster (recommended) or
+   shared cert (allowed). Documented in `docs/CLUSTER.md`.
+
+### Acceptance
+- Spawning two `TestServer` instances with the same `cluster_id` lets them
+  handshake successfully; mismatched IDs cleanly refuse.
+- `node_id` is stable across restarts (round-trip test).
+- All structured logs include `node_id`.
+
+---
+
+## Phase 40b: Hybrid Logical Clocks + Vector Clocks
+
+### Goal
+Replace bare LSN time-ordering with a clock that is comparable across nodes
+and detects concurrent writes. **No on-disk format change is acceptable
+after v5 ships** — this is the moment to pay the format cost.
+
+### Deliverables
+1. **HLC module** at `grumpydb-server/src/clock.rs` (or shared in
+   `grumpydb-replication`):
+   - `Hlc(u64)` packs 48 bits of physical milliseconds + 16 bits of logical
+     counter.
+   - `now()`, `tick()`, `update(remote_hlc)` — standard Lamport-Kulkarni
+     hybrid clock semantics.
+   - Bounded skew tolerance: refuse `update` from a remote HLC more than
+     1 hour ahead of local wall-clock.
+2. **Vector clocks**: `VectorClock(BTreeMap<NodeId, u64>)`.
+   - Supports `compare(a, b) -> {Equal, LessThan, GreaterThan, Concurrent}`.
+   - Serialised as a length-prefixed list of `(node_id, counter)` pairs.
+   - For storage efficiency, the entries are sorted by `node_id` and a per-WAL
+     "common prefix" is reserved for the future "delta encoding" optimisation.
+3. **WAL format v2** (bumped from v1):
+   - Each `WalRecord` gains:
+     - `origin_node_id: u128` (16 B)
+     - `hlc: u64` (8 B)
+     - `vector_clock: Vec<(u128, u64)>` (length-prefixed; usually 1 entry in v5)
+   - Backward compatibility: WAL v1 records still readable. They are mapped
+     to `origin_node_id = NIL_UUID`, `hlc = lsn`, `vector_clock = [(NIL, lsn)]`
+     during recovery.
+   - The WAL header carries `version: u16` so future bumps stay safe.
+4. **HLC stamping at write time**: every `Database::insert/update/delete`
+   bumps the local HLC and stamps the WAL record. In v5 single-writer regime
+   the vector_clock has a single entry; in v6+ it grows on conflict-detected
+   merges.
+5. **Idempotent replay**: a small `applied_set` (`BTreeMap<NodeId, last_hlc>`)
+   persisted at `data/_replication/state.json`. Replay of the same
+   `(origin_node_id, hlc)` is a no-op. Cost is zero in v5 (single source).
+
+### Acceptance
+- All 515 existing tests still pass after the WAL format bump (recovery
+  reads v1 records, writes v2 going forward).
+- New unit tests for HLC update under simulated clock skew.
+- Vector clock comparison property test (`proptest`): for any random
+  `(a, b)` triple respect the partial-order axioms.
+- WAL records visible to `tracing` carry the new fields.
+
+---
+
+## Phase 40c: Consistent Hash Ring with Virtual Nodes
+
+### Goal
+Independent module that supports today's single-node deployment and
+tomorrow's N-node ring without changing call sites.
+
+### Deliverables
+1. **New crate `grumpydb-ring`** (workspace member, `publish = false`
+   initially):
+   - `Ring<NodeId>` with **256 vnodes per physical node** by default
+     (configurable via `[cluster] vnodes_per_node = 256`).
+   - Hash function: `Murmur3` over the canonical key
+     `database || \0 || collection || \0 || key_bytes`.
+   - `ring.preference_list(key, n) -> Vec<NodeId>` returns the first `N`
+     **distinct physical** nodes around the ring (so replicas land on
+     different machines, not different vnodes of the same one).
+   - `ring.add_node(node_id)` / `ring.remove_node(node_id)` returning the
+     `Vec<KeyRange>` to transfer (for v6 rebalancing).
+   - Pure data structure: no I/O, no async. Easy to unit-test exhaustively.
+2. **Singleton "live ring"** in the server: an `Arc<RwLock<Ring>>` built from
+   `[cluster].peers` at startup. v5 never modifies it after boot; v6 will.
+3. **Routing decision API** (used by Phase 40e coordinator):
+   - `Coordinator::owners_for(database, collection, key) -> Vec<NodeId>`
+   - `Coordinator::is_local(database, collection, key) -> bool`
+4. **Tests**:
+   - Distribution uniformity (chi-squared on 1M keys → no node holds more
+     than +20% of average).
+   - Membership change deltas (adding a node moves only ~1/N of the keys).
+
+### Acceptance
+- `cargo bench --bench ring` shows `preference_list` < 1µs.
+- Distribution test passes.
+- v5 single-node deployment routes 100% of keys to the local node and
+  emits no "forward" decision.
+
+---
+
+## Phase 40d: Tombstones in the Engine
+
+### Goal
+Make `delete` safe under replication: a deleted key must not "resurrect"
+when an out-of-date replica comes back online.
+
+### Deliverables
+1. **New `Value::Tombstone { vector_clock, deleted_at_hlc }`** variant.
+   - Slot header in `data.db` page gains a 1-bit flag `is_tombstone`.
+   - Reads return `None` for tombstoned keys (they're invisible to clients).
+2. **GC parameter**: `[cluster] gc_grace_seconds = 864000` (10 days default).
+   Tombstones older than `gc_grace_seconds` are eligible for compaction.
+   Compactor refuses to run if any peer is unreachable for more than
+   `gc_grace_seconds` (would risk resurrection).
+3. **WAL implications**: `Delete` WAL records carry the same vector clock
+   as a tombstone write would. Replay of an old `Insert` against an existing
+   tombstone with a more-recent vector clock is dropped.
+
+### Acceptance
+- After `delete` then 30s wait then GET → returns `None`.
+- After `delete` + simulated replica 5-minute downtime + replay → key still
+  absent.
+- Tombstones are visible in scan when `--include-tombstones` flag is set
+  on the CLI (admin-only).
+
+---
+
+## Phase 40e: WAL-Stream Replication (Single-Writer, Ring-Ready)
+
+### Goal
+Stream WAL records between peers. v5 enforces a single-active-writer regime
+(any node can be the writer at any time, but only one at a time per
+collection); v6 will lift this constraint to true multi-writer.
 
 ### Architecture
 
 ```
-┌──────────────┐   wal record stream   ┌──────────────┐
-│   Primary    │ ────────────────────► │   Replica    │
-│              │                       │              │
-│  WAL writer  │                       │  WAL applier │
-│  + ship task │                       │  + apply loop│
-└──────────────┘                       └──────────────┘
-       ▲                                      │
-       │                                      │
-       │      writes rejected on replica      │
-       │  ◄─────────────────────────────────  │
-                  (returned to client)
+       ┌──────────┐                    ┌──────────┐
+       │  Node A  │ ◄───── peer ─────► │  Node B  │
+       │ (writer) │                    │ (reader) │
+       └─────┬────┘                    └─────┬────┘
+             │                               │
+             ▼                               ▼
+       data/wal.log                    data/wal.log
+                       (each peer holds the full WAL,
+                        idempotent on replay)
 ```
 
 ### Deliverables
-1. **New crate `grumpydb-replication`** (workspace member):
-   - `ShipServer`: TCP server on the primary, streams WAL records to replicas.
-   - `ShipClient`: replica side, requests records from a given LSN, applies them locally.
-2. **WAL changes** (minor):
-   - `WalRecord` already has LSN + tx_id; add a `replicated_at` optional timestamp on the receive side.
-   - Allow tailing the WAL log file (long-lived read).
-3. **Bootstrap**: a fresh replica syncs via Phase 38 snapshot (catch-up via WAL after the snapshot LSN).
-4. **Consistency model**:
-   - Async replication, primary acks writes immediately.
-   - `READ_CONCERN=primary|local|majority` token in protocol; v5 supports `primary` (always primary) and `local` (any replica). `majority` deferred.
-5. **Failover**: **manual only** in v5. Operator promotes a replica via CLI (`grumpydb-server promote`). Automatic election (Raft) is v6.
-6. **Monitoring**:
-   - Metrics `grumpydb_replication_lag_seconds{replica}`, `grumpydb_replication_records_shipped_total`.
-   - `/readyz` on replica returns 503 if lag > threshold.
-7. **Server config**:
-   ```toml
-   [replication]
-   role = "primary"           # or "replica"
-   listen_ship = "0.0.0.0:6390"
-   primary_addr = "primary:6390"  # replicas only
-   max_lag_seconds = 5
+1. **New crate `grumpydb-replication`** (workspace member). Single API:
+   ```rust
+   pub struct ReplicationPeer { /* … */ }
+
+   impl ReplicationPeer {
+       /// Accepts inbound WAL streams from other peers.
+       pub async fn serve(&self) -> Result<()>;
+       /// Connects out to a peer and pulls WAL records starting at
+       /// `(node_id, hlc)` watermarks.
+       pub async fn fetch_from(&self, peer: NodeId) -> Result<()>;
+   }
    ```
-8. **Authentication between nodes**: RS256 JWT (Phase 39) with role `replication_peer`. Node-to-node TLS mandatory.
-9. **Read on replica**:
-   - All reads work transparently.
-   - Writes return `ReadOnlyReplica` error with primary address hint.
+   Both directions use the same protocol: a long-lived TCP+TLS stream with
+   length-prefixed WAL records and ack-LSN frames.
+2. **Authentication**: `cluster_peer` JWT (Phase 39) on connect; the JWT
+   carries the issuing `node_id` so a peer can detect spoofing.
+3. **WAL tailer**: a long-lived reader on `wal.log` that yields new records
+   as they're appended. fsync barrier-aware: never yield a record before its
+   commit barrier is durable.
+4. **Bootstrap**: a fresh peer joins via:
+   - Phase 38 `restore` from a recent snapshot taken on an existing peer.
+   - Then `fetch_from(...)` continues from the snapshot's last HLC.
+5. **Single-writer enforcement (v5 only)**: every collection has a `writer_node_id`
+   field in cluster state. Writes addressed to a non-writer node return
+   `Response::Error("not the writer for collection X; current writer is Y")`.
+   v6 removes this and accepts writes anywhere.
+6. **Failover (manual, v5)**: `grumpydb-server elect-writer <node_id> <database> [collection]`
+   transfers the writer role. The verb is `elect-writer` to signal that v6
+   will automate this via gossip+heartbeat. Old writer steps down on next
+   heartbeat round.
+7. **Monitoring**:
+   - `grumpydb_replication_lag_seconds{peer}` (gauge)
+   - `grumpydb_replication_records_shipped_total{peer,direction}` (counter)
+   - `grumpydb_replication_records_applied_total` (counter)
+   - `/readyz` returns 503 if the local lag against the cluster max HLC
+     exceeds `[cluster] max_lag_seconds`.
+8. **Server config**:
+   ```toml
+   [cluster]
+   cluster_id = "…"
+   listen_peer = "0.0.0.0:6390"
+   peers = [ … ]
+   vnodes_per_node = 256
+   gc_grace_seconds = 864000
+   max_lag_seconds = 5
+   # writers list (v5 manual; v6 dynamic)
+   writers = [ { collection = "*", node_id = "node-A-uuid" } ]
+   ```
 
 ### Tests
-- Integration: 1 primary + 2 replicas, 1 000 inserts, verify lag < 1s, verify all data on replicas.
-- Network partition: replica reconnects from last LSN, catches up.
-- Snapshot bootstrap: replica joins after primary already has 100k docs.
+- Integration: 3 nodes, writer = node-A. 1 000 inserts on A. Verify all data
+  appears on B and C with lag < 1s. `kill -9 A`. `elect-writer node-B`.
+  Continue inserting. Verify C catches up.
+- Network partition: B disconnects from A for 10s, reconnects, catches up
+  via WAL tail.
+- Snapshot bootstrap: D joins after A has 100k docs. D restores, then
+  catches up. End state identical.
+- Idempotence: replay the same WAL fragment twice; final state unchanged.
 
 ### Acceptance
-- `grumpydb-replication` crate compiles, tests pass.
 - 3-node integration test green in CI.
 - Documented in `docs/REPLICATION.md`.
 
 ---
 
-## Phase 41: MVCC Foundations (Read Snapshots)
+## Phase 40f: Coordinator Pattern & Tunable Consistency Protocol
 
 ### Goal
-Unblock reader/writer concurrency. Full multi-writer is v6; v5 ships single-writer + snapshot reads.
+Wire up server-side request routing and freeze the protocol surface for
+tunable consistency `(N, R, W)`. v5 only honours `(N=1, R=1, W=1)` end-to-end,
+but the wire format is final.
 
 ### Deliverables
-1. **Page-level versioning**: each page write produces a new version with the writer's `tx_id`.
-2. **Read transaction** with a snapshot LSN: a reader sees the state as-of its snapshot, regardless of concurrent writes.
-3. **Garbage collection**: old page versions pruned once no active reader needs them (tracked LSN watermark).
+1. **Coordinator** (new module in `grumpydb-server`):
+   - On every command, look up the key's owners via `Ring::preference_list`.
+   - **v5 enforcement**: if the local node is in the preference list →
+     execute locally. If not → `Response::Error("forward to <node>; not the
+     owner")` with the owning node's address. (v6 enables transparent
+     forwarding.)
+2. **Protocol additions** (final wire format):
+   - `WRITE_CONCERN W=<n>` and `READ_CONCERN R=<n>` optional tokens prepended
+     to the affected commands. `N` is implicit (= ring replication factor,
+     server-decided).
+   - In v5, the server validates `(R, W) ∈ [1, N]` and returns
+     `Response::Error("v5 only supports R=1, W=1")` for any other combination.
+   - The new tokens follow the existing RESP-like grammar; clients that don't
+     send them get the v5 default `(R=1, W=1)`.
+3. **Smart-client capability**:
+   - New command `TOPOLOGY` returns the JSON cluster snapshot (peers + ring +
+     writers map). Smart clients fetch this once at login and route writes
+     directly to the writer; reads to any in-preference-list node.
+   - Drivers (Phase 42) implement TOPOLOGY refresh on `Forward(node)` errors.
+4. **Sibling-value API in protocol**:
+   - `GET` may return a `Response::Array([Bulk(value, vector_clock), …])`
+     when multiple concurrent versions exist. v5 always returns a singleton
+     because there's only one writer.
+   - `PUT_WITH_VC <key> <value> <vector_clock>` lets the client write a
+     reconciled value that subsumes the siblings. Optional in v5; mandatory
+     for CRDT round-trips in v6.
+5. **CRDT type sketch (v5 spec, v6 logic)**:
+   - `Value::CRDT { kind: CrdtKind, payload: Bytes }` variant.
+   - `CrdtKind` enum reserved: `GCounter`, `PNCounter`, `LwwSet`, `OrSet`,
+     `Mvr`. Encoding stable.
+   - In v5: stored and round-tripped opaquely; merge logic implemented in v6.
+
+### Acceptance
+- Wire protocol regression test: a v5 client speaking only `R=1, W=1` works
+  unchanged.
+- A v6 client speaking `R=2, W=2` against a v5 server gets the correct
+  "v5 only supports R=1, W=1" error.
+- `TOPOLOGY` returns a valid JSON document parseable by the Rust + TS drivers.
+
+---
+
+## Phase 41: MVCC Read Snapshots (HLC-indexed)
+
+### Goal
+Unblock reader/writer concurrency. Snapshots are indexed by `Hlc`, not LSN,
+so they are comparable across nodes.
+
+### Deliverables
+1. **Page-level versioning**: each page write produces a new version stamped
+   with the writer's `(node_id, hlc)`.
+2. **Read transaction** with a `snapshot_hlc: Hlc`: a reader sees the state
+   as-of its snapshot, regardless of concurrent writes.
+3. **Garbage collection**: old page versions pruned once no active reader
+   needs them (tracked HLC watermark, identical mechanism to today's LSN
+   watermark but the field is HLC).
 4. **API additions**:
-   - `Database::begin_read()` → `ReadTx`.
+   - `Database::begin_read()` → `ReadTx { snapshot_hlc }`.
    - `ReadTx::get`, `scan`, `query` … all without taking the writer lock.
-5. **Existing single-writer path unchanged** — full MVCC writes deferred.
-6. **Replica wins big here**: replicas get long-running snapshot reads "for free".
+5. **Existing single-writer path unchanged** — full multi-writer MVCC writes
+   deferred to v6.
+6. **Replica wins big here**: replicas get long-running snapshot reads
+   "for free", and the snapshot HLC is meaningful network-wide for v6
+   `READ_CONCERN R=quorum`.
 
 ### Acceptance
 - Benchmark: 1 writer + 64 concurrent readers shows readers do not block on writer.
 - Property test: snapshot reads always see a consistent point in time.
+- `ReadTx::snapshot_hlc()` returned to clients via the protocol so v6
+  clients can pin reads at a known HLC.
 - Documented in `docs/MVCC.md`.
 
 ---
 
-## Phase 42: TypeScript Driver Hardening
+## Phase 42: Smart Client Drivers (Rust + TypeScript)
 
 ### Status
-**Deferred** out of the P1 stream. The TS driver hardening was intentionally
-held out of the P1 batch (Phases 27\u201332): the existing `drivers/typescript/`
-package remains usable against the v4.1 protocol, and the additional work
-listed below requires Phase 39 (RS256/JWKS) and Phase 40 (replication) to
-land first. Will be picked up alongside the v5 release commit (Phase 43).
+**Deferred** out of the P1 stream. Picked up here once Phases 39, 40a–f, and
+41 land. Smart-client routing is a pre-requisite for the v5 release demo.
 
 ### Goal
-First-class TS driver: published, typed, tested, documented.
+First-class drivers, ring-aware, sibling-aware, RS256-aware, published.
 
 ### Deliverables
-1. Update `drivers/typescript/`:
-   - Support RS256 (JWKS fetch).
-   - Replication-aware: connection pool of {primary, replicas}, route writes/reads correctly.
-   - Comprehensive types for all commands/responses.
-2. **CI** (separate job): `npm ci && npm run lint && npm test && npm run build`.
-3. **Publish to npm** as `@grumpydb/client@5.0.0`.
-4. **Examples** in `drivers/typescript/examples/`: basic CRUD, replicated read, JWKS rotation.
-5. **README at the top level** prominently links to npm.
+1. **Rust driver `grumpydb-client`**:
+   - `GrumpyClient::connect_cluster(seeds: &[&str])` — connects to any seed,
+     fetches `TOPOLOGY`, builds a connection pool to all owners.
+   - Routes writes to the active writer; reads to any in-preference-list
+     node. Falls back to server-side forward on `Forward(...)` error.
+   - Handles `Response::Array(siblings)` by exposing
+     `db.get_with_siblings("k") -> Vec<(Value, VectorClock)>` for app-level
+     reconciliation; `db.get("k")` keeps the LWW value transparently.
+   - JWKS cache + RS256 verify.
+2. **TypeScript driver `@grumpydb/client`**:
+   - Same routing model (connection pool, smart routing).
+   - Same sibling API (`getWithSiblings`).
+   - Comprehensive types for all commands/responses including the new
+     `(N, R, W)` tokens.
+3. **CI**:
+   - Rust: existing CI covers it.
+   - TS: new job `npm ci && npm run lint && npm test && npm run build`.
+4. **Publish to npm** as `@grumpydb/client@5.0.0`.
+5. **Examples** in `drivers/typescript/examples/`: basic CRUD, replicated
+   read with `R=quorum` (will return the v5 stub error today, works in v6),
+   sibling reconciliation, JWKS rotation.
+6. **README** prominently links to npm.
 
 ### Acceptance
-- `npm install @grumpydb/client` works.
-- All TS tests green in CI.
+- Rust driver: integration tests against a 3-node `TestCluster` (similar to
+  `TestServer` but spawns N peers).
+- TS driver: same integration tests, npm publish dry-run green.
 
 ---
 
@@ -810,46 +1137,81 @@ First-class TS driver: published, typed, tested, documented.
 Cut a versioned release that delivers the full plan.
 
 ### Deliverables
-1. **CHANGELOG**: structured entry summarizing each phase.
+1. **CHANGELOG**: structured entry summarising each phase.
 2. **Version bump**: all Rust crates → 5.0.0, TS driver → 5.0.0.
 3. **Migration guide** `docs/MIGRATING_4_to_5.md`:
-   - Bootstrap behavior change.
+   - Bootstrap behaviour change (Phase 26).
    - HS256 → RS256 (with opt-in HS256 for legacy).
    - `GrumpyDb` deprecation.
-   - Configuration file new sections.
+   - WAL format v1 → v2 (auto-upgrade on first write; documented).
+   - New `[cluster]` config section (mandatory for multi-node deployments,
+     optional for single-node).
+   - Protocol additions (`(N, R, W)` tokens, `TOPOLOGY` command).
 4. **Release artifacts**:
    - GitHub release with binary builds (amd64 + arm64) for the server.
    - Docker images on ghcr.io.
    - All Rust crates on crates.io.
    - npm package.
-5. **Blog post / release notes** highlighting replication as the headline.
+5. **Blog post / release notes** highlighting the **distributed roadmap**:
+   "v5 lays the foundation; v6 turns on multi-writer."
+6. **3-node demo** in `docker-compose.cluster.yml` showcasing the cluster
+   handshake, single-writer replication, and the new `TOPOLOGY` command.
 
 ### Acceptance
 - `cargo install grumpydb-server` works on a clean machine and starts.
 - Docker image runs.
-- Replication demo (3 nodes via docker-compose) showcased.
+- 3-node cluster demo green: insert on writer, read on either replica,
+  observe HLC-stamped WAL records flowing.
+
+---
+
+# Stream E — v6 (multi-writer, gossip, read repair)
+
+The v5 work above is structurally complete for v6 to slot in without
+on-disk format changes. Six follow-up phases planned, **out of v5 scope**:
+
+| Phase | Title | Notes |
+|---|---|---|
+| 44 | Gossip membership protocol | Replaces static peers list. Eventually-consistent, no leader. SWIM-style failure detection. |
+| 45 | Multi-writer ack pipeline (W>1) | Lift the single-writer restriction. Coordinator waits for `W` acks before responding. |
+| 46 | Conflict resolution (LWW + CRDT runtime) | Activate the merge logic for `Value::CRDT(...)` variants registered in v5. LWW remains default. |
+| 47 | Read repair + tunable `R>1` | Coordinator collects R responses, repairs divergence in background. |
+| 48 | Hinted handoff | Coordinator buffers writes for unreachable peers, replays on recovery. |
+| 49 | Ring rebalancing | Add/remove physical nodes triggers transfer of the `vnode -> node` deltas computed by Phase 40c. |
+
+# Stream F — v7 (anti-entropy at scale, cross-region)
+
+| Phase | Title | Notes |
+|---|---|---|
+| 50 | Merkle-tree anti-entropy | Active background reconciliation. Costly; gated behind `[cluster] anti_entropy = true`. |
+| 51 | Multi-region replication | Per-region rings with cross-region async replication. Token: `READ_CONCERN R=local-quorum`. |
+| 52 | Schema validation (JSON-Schema per collection) | Optional, opt-in. |
+| 53 | Time-series optimisations | Append-only collections with LSM-friendly compaction. |
 
 ---
 
 ## Module dependency graph (end of v5)
 
 ```
-grumpydb (engine, MVCC reads)
+grumpydb (engine: HLC, vector clocks, tombstones, MVCC reads, WAL v2)
    ▲
    │
-   ├─── grumpydb-protocol (RS256 token schema)
+   ├──── grumpydb-protocol (RS256 schema, (N, R, W) tokens, TOPOLOGY)
+   │
+   ├──── grumpydb-ring  (consistent hashing + vnodes; pure data structure)
    │
 grumpydb-server  ────► grumpydb-protocol
-   ▲   ▲
+   ▲   ▲   ▲
+   │   │   └──── grumpydb-replication (WAL stream peer; bidirectional API)
    │   │
-   │   └─── grumpydb-replication (WAL shipping)
+   │   └──── grumpydb-ring
    │
 grumpydb-client ────► grumpydb-protocol
-   ▲
+   │ (smart-routing, JWKS cache, sibling-aware)
    │
 grumpy-repl ─────────► grumpydb-client + grumpydb (embedded mode)
 
-drivers/typescript ──► grumpydb-protocol (over-the-wire spec only)
+drivers/typescript ──► grumpydb-protocol (smart-routing, sibling-aware)
 ```
 
 ---
@@ -876,15 +1238,34 @@ P2 (parallelizable, low coupling)
              ├──► Phase 37 (docker)
              └──► Phase 38 (snapshot)
 
-P3 (sequential dependencies)
-             Phase 39 (RS256/JWKS) ──► Phase 40 (replication)
-                                              │
-                                              └──► Phase 41 (MVCC reads)
-                                              │
-             Phase 42 (TS driver) ────────────┤
-                                              ▼
-                                        Phase 43 (release)
+P3 (sequential where dependencies exist; parallel where they don't)
+
+  Phase 39 (RS256/JWKS) ───┐
+                           │
+  Phase 40a (cluster id) ──┤
+                           │
+  Phase 40b (HLC + VC,     ├──► Phase 40e (replication) ──┐
+            WAL v2) ───────┤      │                         │
+                           │      │                         │
+  Phase 40c (ring) ────────┤      │                         │
+                           │      │                         │
+  Phase 40d (tombstones) ──┘      │                         │
+                                  ▼                         │
+                           Phase 40f (coordinator + N/R/W   │
+                                      protocol; final wire) │
+                                          │                 │
+                                          ▼                 │
+                                  Phase 41 (MVCC reads)     │
+                                          │                 │
+                                          ▼                 │
+                                  Phase 42 (smart drivers) ─┤
+                                                            │
+                                                            ▼
+                                                    Phase 43 (release)
 ```
+
+Critical path inside P3 = `40b → 40f → 41 → 42 → 43`. Phases 40a, 40c, 40d
+can run in parallel with 40b. 39 has no dependency on the cluster work.
 
 ### Suggested commit cadence
 - One phase per feature branch, one commit per logical sub-step inside the phase.
@@ -892,16 +1273,38 @@ P3 (sequential dependencies)
 
 ---
 
-## Out of scope for v5 (deferred to v6+)
+## Out of scope for v5 (deferred to v6 / v7)
 
-- **Automatic failover** (Raft / consensus protocol).
-- **Multi-writer MVCC** (full snapshot isolation with concurrent writers).
-- **Sharding / horizontal partitioning**.
-- **Synchronous replication** (`READ_CONCERN=majority`).
-- **Cross-region replication** with conflict resolution.
-- **Schema validation** (JSON-Schema per collection).
-- **Full-text search**.
-- **Time-series optimizations**.
+### v6 (Stream E)
+
+- **Gossip-based membership** (replaces static `[cluster].peers`).
+  Phase 44.
+- **Multi-writer ack pipeline** with `W>1`. v5 only supports `W=1`. Phase 45.
+- **Conflict resolution runtime** for `Value::CRDT(...)` and the LWW resolver
+  for vector-clock-incomparable concurrent writes. Phase 46. (The CRDT type
+  variants and vector-clock format are frozen in v5 so v6 only touches
+  merge logic, not encoding.)
+- **Read repair** + tunable `R>1` consistency. Phase 47.
+- **Hinted handoff**. Phase 48.
+- **Ring rebalancing** when peers are added/removed. Phase 49.
+
+### v7 (Stream F)
+
+- **Merkle-tree active anti-entropy**. Phase 50.
+- **Multi-region replication** with `READ_CONCERN R=local-quorum`. Phase 51.
+- **Schema validation** (JSON-Schema per collection). Phase 52.
+- **Time-series optimisations** (LSM-friendly compaction). Phase 53.
+
+### Never (explicit non-goals)
+
+- **Raft / Paxos for general consensus**. Membership stays gossip-based;
+  the only consensus needed is per-key versioning, which vector clocks
+  + LWW handle. (v5 uses a simpler "writer election by config"; v6 uses
+  gossip's eventually-consistent writer assignment.)
+- **Strong serialisability across the cluster**. The system is
+  eventually-consistent by design (Dynamo lineage). Per-key linearisability
+  is achievable via `R + W > N`; cross-key serialisability is not.
+- **Full-text search**. Out of scope for the data engine; build it on top.
 
 ---
 
@@ -911,7 +1314,7 @@ P3 (sequential dependencies)
 |---|---|
 | `cargo clippy --workspace --all-targets -- -D warnings` | passes |
 | `unwrap` in `src/` | 0 |
-| Test count | ≥ 700 (vs 460 today) |
+| Test count | ≥ 700 (vs 515 at end of P2) |
 | Code coverage (tarpaulin) | ≥ 80% on `src/` |
 | CI runtime (full pipeline) | ≤ 10 min |
 | Documented benchmarks | yes (README section) |
@@ -920,3 +1323,31 @@ P3 (sequential dependencies)
 | Docker images on ghcr.io | yes (amd64 + arm64) |
 | TS driver on npm | yes |
 | Migration guide v4 → v5 | yes |
+| **Cluster identity** (`node_id`, `cluster_id` in every log line) | yes |
+| **WAL format v2** with HLC + vector clocks | yes |
+| **Ring + vnodes** module shipped (single-node uses N=1) | yes |
+| **Tombstones** + `gc_grace_seconds` | yes |
+| **Wire protocol** with `(N, R, W)` tokens (v5 enforces R=W=1) | yes |
+| **`TOPOLOGY` command** + smart routing in drivers | yes |
+| **MVCC reads** indexed by HLC | yes |
+
+## Forward-compatibility guarantees (v5 → v6 → v7)
+
+The whole point of v5's distributed groundwork is that **on-disk format
+and wire protocol stay frozen** through v6 and v7. Specifically:
+
+- **WAL format v2** is the format v6 and v7 use. No migration when v6
+  enables multi-writer.
+- **Wire protocol** with `(N, R, W)` tokens, `TOPOLOGY` command, sibling
+  arrays in `GET` responses, and the `Value::CRDT(...)` variant is final.
+  v6 changes only the *behaviour* (W>1, R>1, CRDT merge logic), never
+  the bytes.
+- **Cluster identity** (`node_id` / `cluster_id`) and the `[cluster]`
+  config section format are forward-compatible: gossip in v6 simply
+  populates additional fields v5 reserved (`status`, `last_seen_at`,
+  `vnode_assignments`).
+- **Ring API** (`preference_list`, `add_node`, `remove_node`) is the API
+  v6 uses for online rebalancing.
+- **Vector clock encoding** is final. CRDT type variants (`GCounter`,
+  `PNCounter`, `LwwSet`, `OrSet`, `Mvr`) are reserved enum values in v5,
+  with merge logic activated in v6.
