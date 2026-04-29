@@ -57,8 +57,10 @@
 #![warn(missing_docs)]
 
 mod frame;
+mod tailer;
 
 pub use frame::{
     Ack, Bye, Frame, FrameError, FrameType, Heartbeat, Hello, HelloAck, MAX_FRAME_PAYLOAD,
     PROTOCOL_VERSION, ReplicationError, Subscribe, decode_frame, encode_frame,
 };
+pub use tailer::{DEFAULT_POLL_INTERVAL, TailedRecord, WalTailer};
