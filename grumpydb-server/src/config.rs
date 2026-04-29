@@ -18,6 +18,8 @@ pub struct ServerConfig {
     pub limits: LimitsSection,
     #[serde(default)]
     pub http: HttpSection,
+    #[serde(default)]
+    pub cluster: ClusterSection,
 }
 
 /// Network and data directory settings.
@@ -65,6 +67,93 @@ impl Default for HttpSection {
     fn default() -> Self {
         Self {
             bind: "0.0.0.0:6381".to_string(),
+        }
+    }
+}
+
+/// Cluster topology and membership configuration (Phase 40a).
+///
+/// In v5 the peer list is fully static — operators write each peer's
+/// `node_id` and address into `grumpydb.toml`. v6 will repurpose the
+/// same struct as the live view of the gossip-derived membership;
+/// reserved fields like [`PeerEntry::status`] and
+/// [`PeerEntry::vnode_assignments`] are part of the schema today even
+/// though v5 ignores them, so the v5 → v6 transition is a behavior
+/// change, not a config schema change.
+///
+/// All fields are optional. The all-default value (no peers, empty
+/// `listen_peer`) leaves the server in single-node mode.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ClusterSection {
+    /// Required if any peer is configured. Must match every peer.
+    /// Encoded as a UUID string in TOML. When `None`, the value is
+    /// taken from the on-disk `node.json` (see
+    /// [`crate::cluster::NodeIdentity`]).
+    pub cluster_id: Option<String>,
+    /// Bind address for the inter-node WAL stream port (Phase 40e).
+    /// Empty string disables inter-node TCP entirely (single-node
+    /// deployment).
+    pub listen_peer: String,
+    /// Static peer list. Each entry MUST include the peer's stable
+    /// `node_id` so spoofing is detectable at the handshake stage.
+    pub peers: Vec<PeerEntry>,
+    /// Number of virtual nodes per physical node on the consistent
+    /// hash ring (Phase 40c). Default 256, Cassandra-style.
+    pub vnodes_per_node: u32,
+    /// Tombstone GC grace period in seconds (Phase 40d). Default 10
+    /// days.
+    pub gc_grace_seconds: u64,
+    /// Replication-lag threshold in seconds: above this, `/readyz`
+    /// returns 503 (Phase 40e).
+    pub max_lag_seconds: u64,
+    /// Per-collection writer assignment. v5 manual; v6 dynamic.
+    pub writers: Vec<WriterEntry>,
+}
+
+/// Static description of a single peer node.
+///
+/// `node_id` is verified during the cluster handshake — a peer that
+/// presents a different id is rejected even if its `cluster_id` matches.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct PeerEntry {
+    /// Stable identifier of the peer (UUID string).
+    pub node_id: String,
+    /// Network address of the peer's `listen_peer` port (`host:port`).
+    pub addr: String,
+    /// Reserved for v6 gossip: live status enum (`up`, `down`, …).
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Reserved for v6 gossip: wall-clock seconds when the peer was
+    /// last heard from.
+    #[serde(default)]
+    pub last_seen_at_unix: Option<u64>,
+    /// Reserved for v6 gossip: ring slots owned by this peer.
+    #[serde(default)]
+    pub vnode_assignments: Vec<u32>,
+}
+
+/// Static writer assignment for a collection (single-writer mode).
+///
+/// `collection` may be the literal `*` to assign the database default.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct WriterEntry {
+    /// Either an exact collection name or `*` for the database default.
+    pub collection: String,
+    /// `node_id` of the node responsible for accepting writes.
+    pub node_id: String,
+}
+
+impl Default for ClusterSection {
+    fn default() -> Self {
+        Self {
+            cluster_id: None,
+            listen_peer: String::new(),
+            peers: Vec::new(),
+            vnodes_per_node: 256,
+            gc_grace_seconds: 864_000,
+            max_lag_seconds: 5,
+            writers: Vec::new(),
         }
     }
 }
@@ -160,6 +249,7 @@ impl Default for ServerConfig {
             auth: AuthSection::default(),
             limits: LimitsSection::default(),
             http: HttpSection::default(),
+            cluster: ClusterSection::default(),
         }
     }
 }
@@ -212,6 +302,21 @@ access_token_ttl_secs = 1800
 
 [http]
 bind = "127.0.0.1:7777"
+
+[cluster]
+cluster_id = "5b1f3a40-7e21-4fa9-8d3a-1b6c0a7b8e9f"
+listen_peer = "0.0.0.0:6390"
+vnodes_per_node = 128
+gc_grace_seconds = 3600
+max_lag_seconds = 10
+peers = [
+  { node_id = "11111111-1111-1111-1111-111111111111", addr = "node-2:6390" },
+  { node_id = "22222222-2222-2222-2222-222222222222", addr = "node-3:6390", status = "up", last_seen_at_unix = 1700000000, vnode_assignments = [0, 1, 2] },
+]
+writers = [
+  { collection = "*", node_id = "11111111-1111-1111-1111-111111111111" },
+  { collection = "events", node_id = "22222222-2222-2222-2222-222222222222" },
+]
 "#;
         let cfg: ServerConfig = toml::from_str(toml).unwrap();
         assert_eq!(cfg.server.bind, "127.0.0.1:9999");
@@ -220,6 +325,35 @@ bind = "127.0.0.1:7777"
         assert_eq!(cfg.tls.cert_file.as_deref(), Some("cert.pem"));
         assert_eq!(cfg.auth.access_token_ttl_secs, 1800);
         assert_eq!(cfg.http.bind, "127.0.0.1:7777");
+
+        assert_eq!(
+            cfg.cluster.cluster_id.as_deref(),
+            Some("5b1f3a40-7e21-4fa9-8d3a-1b6c0a7b8e9f")
+        );
+        assert_eq!(cfg.cluster.listen_peer, "0.0.0.0:6390");
+        assert_eq!(cfg.cluster.vnodes_per_node, 128);
+        assert_eq!(cfg.cluster.gc_grace_seconds, 3600);
+        assert_eq!(cfg.cluster.max_lag_seconds, 10);
+        assert_eq!(cfg.cluster.peers.len(), 2);
+        assert_eq!(cfg.cluster.peers[0].addr, "node-2:6390");
+        assert_eq!(cfg.cluster.peers[1].status.as_deref(), Some("up"));
+        assert_eq!(cfg.cluster.peers[1].last_seen_at_unix, Some(1700000000));
+        assert_eq!(cfg.cluster.peers[1].vnode_assignments, vec![0, 1, 2]);
+        assert_eq!(cfg.cluster.writers.len(), 2);
+        assert_eq!(cfg.cluster.writers[0].collection, "*");
+        assert_eq!(cfg.cluster.writers[1].collection, "events");
+    }
+
+    #[test]
+    fn test_default_cluster_section() {
+        let cfg = ServerConfig::default();
+        assert!(cfg.cluster.cluster_id.is_none());
+        assert!(cfg.cluster.listen_peer.is_empty());
+        assert!(cfg.cluster.peers.is_empty());
+        assert!(cfg.cluster.writers.is_empty());
+        assert_eq!(cfg.cluster.vnodes_per_node, 256);
+        assert_eq!(cfg.cluster.gc_grace_seconds, 864_000);
+        assert_eq!(cfg.cluster.max_lag_seconds, 5);
     }
 
     #[test]

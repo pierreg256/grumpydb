@@ -12,6 +12,7 @@ use tracing::{Instrument, info_span};
 use grumpydb::SharedServer;
 
 use crate::auth::store::AuthStore;
+use crate::cluster::NodeIdentity;
 use crate::config::ServerConfig;
 use crate::http::HttpState;
 use crate::limits::{AcquireConnError, Limits, LimitsConfig};
@@ -23,6 +24,7 @@ pub async fn listen(
     auth_store: Arc<parking_lot::RwLock<AuthStore>>,
     shared_server: SharedServer,
     http_state: Arc<HttpState>,
+    identity: Arc<NodeIdentity>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(&config.server.bind).await?;
 
@@ -47,6 +49,8 @@ pub async fn listen(
     tracing::info!(
         bind = %config.server.bind,
         tls = config.tls.enabled,
+        node_id = %identity.node_id,
+        cluster_id = %identity.cluster_id,
         max_conns_global = limits.config().max_conns_global,
         max_conns_per_ip = limits.config().max_conns_per_ip,
         commands_per_sec_per_ip = limits.config().commands_per_sec_per_ip,
@@ -54,6 +58,13 @@ pub async fn listen(
         config.server.bind,
         config.tls.enabled
     );
+
+    // Phase 40a: optionally spin up the inter-node handshake stub.
+    // Phase 40e will graft the WAL streaming protocol onto the
+    // accepted connections; v5 just performs the handshake and closes.
+    if !config.cluster.listen_peer.is_empty() {
+        crate::cluster::handshake::serve(config.clone(), identity.clone()).await?;
+    }
 
     // Signal HTTP `/readyz` that we are now accepting connections.
     http_state.ready.store(true, Ordering::Release);
@@ -89,7 +100,12 @@ pub async fn listen(
                 let limits_for_conn = limits.clone();
                 let peer_ip = addr.ip();
 
-                let span = info_span!("connection", peer = %addr, tls = acceptor.is_some());
+                let span = info_span!(
+                    "connection",
+                    peer = %addr,
+                    tls = acceptor.is_some(),
+                    node_id = %identity.node_id,
+                );
 
                 tokio::spawn(async move {
                     tracing::debug!("connection accepted");

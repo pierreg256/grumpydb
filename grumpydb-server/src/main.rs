@@ -6,12 +6,14 @@ use std::sync::atomic::AtomicBool;
 
 use grumpydb::SharedServer;
 use grumpydb_server::auth::store::AuthStore;
+use grumpydb_server::cluster::NodeIdentity;
 use grumpydb_server::config::ServerConfig;
 use grumpydb_server::http::{self, HttpState};
 use grumpydb_server::snapshot::{self, Location, SnapshotOptions};
 use grumpydb_server::tcp::listener;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,6 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args.get(1).map(String::as_str) {
         Some("snapshot") => return run_snapshot(&args[2..]).await,
         Some("restore") => return run_restore(&args[2..]).await,
+        Some("cluster") => return run_cluster(&args[2..]).await,
         Some("--help") | Some("-h") => {
             print_usage();
             return Ok(());
@@ -92,6 +95,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "starting GrumpyDB server"
     );
 
+    // Phase 40a: load (or generate on first start) the persistent
+    // node identity. The data directory must exist before this call.
+    std::fs::create_dir_all(&config.server.data_dir)?;
+    let identity = Arc::new(NodeIdentity::load_or_create(&config.server.data_dir)?);
+    tracing::info!(
+        node_id = %identity.node_id,
+        cluster_id = %identity.cluster_id,
+        identity_version = identity.identity_version,
+        "node identity loaded"
+    );
+
     // Bootstrap password resolution (Phase 26): require an explicit password
     // for the first-ever start. After the initial admin exists on disk, this
     // value is ignored.
@@ -122,6 +136,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // only `/healthz`, `/readyz`, Prometheus `/metrics` aggregates, and the
     // JWKS public-keyset (`/.well-known/jwks.json`, Phase 39).
     let prom = http::init_metrics();
+    // Phase 40a: publish a static info gauge so every Prometheus
+    // query can join on `node_id` / `cluster_id` / `version`.
+    metrics::gauge!(
+        "grumpydb_node_info",
+        "node_id" => identity.node_id.to_string(),
+        "cluster_id" => identity.cluster_id.to_string(),
+        "version" => env!("CARGO_PKG_VERSION").to_string(),
+    )
+    .set(1.0);
     let http_state = Arc::new(HttpState {
         ready: AtomicBool::new(false),
         prometheus: prom,
@@ -134,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Start listening
-    listener::listen(&config, auth_store, shared_server, http_state).await?;
+    listener::listen(&config, auth_store, shared_server, http_state, identity).await?;
 
     Ok(())
 }
@@ -243,6 +266,45 @@ async fn run_restore(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     );
     snapshot::restore(&opts, &src).await?;
     tracing::info!("restore complete");
+    Ok(())
+}
+
+/// `cluster <subcommand>` dispatch (Phase 40a).
+///
+/// Recognised verbs:
+///   - `init` — generate or join a cluster identity at `<data>/_cluster/node.json`.
+async fn run_cluster(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    init_cli_tracing();
+    match args.first().map(String::as_str) {
+        Some("init") => run_cluster_init(&args[1..]).await,
+        Some(other) => Err(format!("cluster: unknown subcommand '{other}'").into()),
+        None => Err("cluster: missing subcommand (try `cluster init`)".into()),
+    }
+}
+
+async fn run_cluster_init(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let data_dir = get_arg(args, "--data").ok_or("cluster init: --data <dir> is required")?;
+    let cluster_id_str = get_arg(args, "--cluster-id");
+    let cluster_id = match cluster_id_str.as_deref() {
+        Some(s) => Some(
+            Uuid::parse_str(s)
+                .map_err(|e| format!("cluster init: invalid --cluster-id '{s}': {e}"))?,
+        ),
+        None => None,
+    };
+
+    let path = PathBuf::from(&data_dir);
+    let identity = grumpydb_server::cluster::NodeIdentity::create(&path, cluster_id)
+        .map_err(|e| format!("cluster init: {e}"))?;
+
+    tracing::info!(
+        node_id = %identity.node_id,
+        cluster_id = %identity.cluster_id,
+        path = %path.join("_cluster/node.json").display(),
+        "cluster identity initialised"
+    );
+    println!("node_id    = {}", identity.node_id);
+    println!("cluster_id = {}", identity.cluster_id);
     Ok(())
 }
 

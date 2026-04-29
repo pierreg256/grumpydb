@@ -121,6 +121,16 @@ pub fn init_metrics() -> PrometheusHandle {
          {command, login, conn_per_ip, conn_global})."
     );
 
+    // Phase 40a: static info gauge (always 1.0) labelled with the
+    // node identity. Joining other series on `node_id` makes
+    // multi-node Prometheus dashboards trivial to write.
+    describe_gauge!(
+        "grumpydb_node_info",
+        Unit::Count,
+        "Static node information (always 1.0) labelled with \
+         `node_id`, `cluster_id`, `version`."
+    );
+
     handle
 }
 

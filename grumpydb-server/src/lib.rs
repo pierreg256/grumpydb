@@ -4,6 +4,7 @@
 //! authorization on top of the GrumpyDB storage engine.
 
 pub mod auth;
+pub mod cluster;
 pub mod config;
 pub mod http;
 pub mod limits;
