@@ -16,7 +16,7 @@ services:
     container_name: grumpydb-node1
     command: ["--config", "/etc/grumpydb/grumpydb.toml", "--data", "/data", "--no-tls", "--log-format", "json"]
     environment:
-      GRUMPYDB_BOOTSTRAP_PASSWORD: "${GRUMPYDB_BOOTSTRAP_PASSWORD:?Set GRUMPYDB_BOOTSTRAP_PASSWORD}"
+      GRUMPYDB_BOOTSTRAP_PASSWORD: "${GRUMPYDB_BOOTSTRAP_PASSWORD:-admin}"
     volumes:
       - ./docker/cluster/node1.toml:/etc/grumpydb/grumpydb.toml:ro
       - ./docker/cluster/data/node1:/data
@@ -33,7 +33,7 @@ services:
     container_name: grumpydb-node2
     command: ["--config", "/etc/grumpydb/grumpydb.toml", "--data", "/data", "--no-tls", "--log-format", "json"]
     environment:
-      GRUMPYDB_BOOTSTRAP_PASSWORD: "${GRUMPYDB_BOOTSTRAP_PASSWORD:?Set GRUMPYDB_BOOTSTRAP_PASSWORD}"
+      GRUMPYDB_BOOTSTRAP_PASSWORD: "${GRUMPYDB_BOOTSTRAP_PASSWORD:-admin}"
     volumes:
       - ./docker/cluster/node2.toml:/etc/grumpydb/grumpydb.toml:ro
       - ./docker/cluster/data/node2:/data
@@ -50,7 +50,7 @@ services:
     container_name: grumpydb-node3
     command: ["--config", "/etc/grumpydb/grumpydb.toml", "--data", "/data", "--no-tls", "--log-format", "json"]
     environment:
-      GRUMPYDB_BOOTSTRAP_PASSWORD: "${GRUMPYDB_BOOTSTRAP_PASSWORD:?Set GRUMPYDB_BOOTSTRAP_PASSWORD}"
+      GRUMPYDB_BOOTSTRAP_PASSWORD: "${GRUMPYDB_BOOTSTRAP_PASSWORD:-admin}"
     volumes:
       - ./docker/cluster/node3.toml:/etc/grumpydb/grumpydb.toml:ro
       - ./docker/cluster/data/node3:/data

@@ -14,11 +14,14 @@ WORKDIR /workspace
 # `COPY . .` so .dockerignore exclusions stay tight.
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY benches ./benches
 COPY grumpydb-server ./grumpydb-server
 COPY grumpydb-client ./grumpydb-client
 COPY grumpydb-protocol ./grumpydb-protocol
 COPY grumpydb-testing ./grumpydb-testing
 COPY grumpy-repl ./grumpy-repl
+COPY grumpydb-ring ./grumpydb-ring
+COPY grumpydb-replication ./grumpydb-replication
 
 # Build with cache mounts for faster rebuilds. BuildKit is required.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

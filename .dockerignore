@@ -13,7 +13,6 @@ CONTRIBUTING.md
 
 # Tests, benches, examples, fuzzing
 tests/
-benches/
 examples/
 fuzz/
 .cargo/audit.toml
