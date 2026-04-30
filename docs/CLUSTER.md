@@ -88,7 +88,8 @@ vnodes_per_node = 256
 # Tombstone GC grace period in seconds (Phase 40d). 10 days default.
 gc_grace_seconds = 864000
 
-# Replication lag threshold (Phase 40e). Above this /readyz returns 503.
+# Replication lag threshold (Phase 40e). Config is available; end-to-end
+# lag-gate wiring to /readyz is still in progress.
 max_lag_seconds = 5
 
 # Per-collection writer assignment. v5: manual. v6: dynamic via gossip.

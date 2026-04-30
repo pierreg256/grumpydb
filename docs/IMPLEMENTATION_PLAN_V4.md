@@ -103,7 +103,7 @@ Phase 40a: Cluster identity + static memb.   ███████████�
 Phase 40b: HLC + vector clocks (WAL v2)      ████████████████████  P3 ★ ✅ Done (format-locked)
 Phase 40c: Ring + vnodes module              ████████████████████  P3 ★ ✅ Done
 Phase 40d: Tombstones in the engine          ████████░░░░░░░░░░░░  P3 ★ 🟡 Format-locked; semantics deferred to v6 Phase 46
-Phase 40e: WAL-stream replication (1-writer) ████░░░░░░░░░░░░░░░░  P3 ★ 🟡 In progress (40e.8 integration test landed)
+Phase 40e: WAL-stream replication (1-writer) ████░░░░░░░░░░░░░░░░  P3 ★ 🟡 In progress (40e.8 integration + 40e.9 docs sync)
 Phase 40f: Coordinator + tunable consistency ░░░░░░░░░░░░░░░░░░░░  P3 ★ ⏳ Not started (protocol-locking)
 Phase 41:  MVCC read snapshots (HLC-indexed) ░░░░░░░░░░░░░░░░░░░░  P3 ★ ⏳ Not started
 Phase 42:  Smart drivers (Rust + TS)         ░░░░░░░░░░░░░░░░░░░░  P3 ⏳ Not started

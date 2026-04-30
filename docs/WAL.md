@@ -180,8 +180,9 @@ already applied from that origin. Recovery consults the set; records with
 `(origin, hlc)` already at-or-below the recorded high-water-mark are
 skipped (logged at debug level).
 
-In v5 single-writer the set has at most one entry (self) and replay never
-hits the duplicate path. Phase 40e turns the set into a hot path.
+In v5 single-writer-per-collection mode, there is one active writer at a
+time, but failover can introduce multiple origins over time. The set can
+therefore contain multiple `node_id` entries and is exercised by Phase 40e.
 
 ## Engine integration
 

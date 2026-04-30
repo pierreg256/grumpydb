@@ -410,6 +410,9 @@ foundations needed by the downstream distributed project.
     (`grumpydb-replication/src/tasks.rs`) validating node-1 writer
     replication to node-2/node-3, manual election node-1 -> node-2,
     and node-3 replication from the new writer.
+  - 40e.9: synchronized replication documentation for consistency across
+    `docs/REPLICATION.md`, `docs/CLUSTER.md`, `docs/WAL.md`, and
+    `docs/IMPLEMENTATION_PLAN_V4.md`.
 - Phase 40f: coordinator + tunable `(N, R, W)` protocol — not started.
 - Phase 41: MVCC reads (HLC-indexed) — not started.
 - Phase 42: smart drivers (Rust + TS, JWKS-aware) — not started.
