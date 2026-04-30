@@ -15,9 +15,9 @@ Implemented slices:
 - 40e.6: single-writer assignment and manual election model
 - 40e.7: lag tracking primitive (`LagTracker`)
 - 40e.8: 3-node in-process integration test with failover flow
+- 40e.9: documentation sync checkpoint (cross-doc consistency pass)
 
-Remaining in 40e line:
-- 40e.9: documentation sync checkpoint (this pass)
+All slices 40e.1–40e.9 are complete.
 
 ## Module Map
 

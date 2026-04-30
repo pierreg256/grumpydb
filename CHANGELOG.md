@@ -403,16 +403,26 @@ foundations needed by the downstream distributed project.
   resurrection a real risk. The format is final; no v5→v6 migration.
 - Documented in `docs/TOMBSTONES.md`.
 
+#### Added — Phase 40e: WAL-stream replication (single-writer, ring-ready)
+- New workspace crate **`grumpydb-replication`** with 8 modules:
+  `frame` (wire codec), `session` (cluster handshake + framed session),
+  `tailer` (WAL log follower), `tasks` (`LeaderTask` / `FollowerTask`),
+  `idempotent` (replay-safe apply + high-water helpers),
+  `writer_control` (static writer assignment + `elect()`),
+  `lag_tracker` (`LagTracker` — per-peer lag accounting), and `lib`.
+- 3-node in-process integration test
+  `test_three_node_replication_with_failover`
+  (`grumpydb-replication/src/tasks.rs`) validates: node-1 writer
+  replicates to node-2/node-3, manual election node-1 → node-2, and
+  node-3 catches up from the new writer. Origin UUID byte-order fix
+  (`Uuid::from_u128(u128::from_le_bytes(...))`) confirmed correct.
+- New reference doc `docs/REPLICATION.md` covering module map, wire
+  protocol frames, single-writer model, lag/readiness, security, test
+  coverage, and deferred items.
+- Cross-doc consistency pass: `docs/CLUSTER.md`, `docs/WAL.md`, and
+  `docs/IMPLEMENTATION_PLAN_V4.md` updated.
+
 #### Pending — remaining Stream D phases
-- Phase 40e: WAL-stream replication — **in progress**.
-  - 40e.8: added 3-node in-process integration test
-    `test_three_node_replication_with_failover`
-    (`grumpydb-replication/src/tasks.rs`) validating node-1 writer
-    replication to node-2/node-3, manual election node-1 -> node-2,
-    and node-3 replication from the new writer.
-  - 40e.9: synchronized replication documentation for consistency across
-    `docs/REPLICATION.md`, `docs/CLUSTER.md`, `docs/WAL.md`, and
-    `docs/IMPLEMENTATION_PLAN_V4.md`.
 - Phase 40f: coordinator + tunable `(N, R, W)` protocol — not started.
 - Phase 41: MVCC reads (HLC-indexed) — not started.
 - Phase 42: smart drivers (Rust + TS, JWKS-aware) — not started.

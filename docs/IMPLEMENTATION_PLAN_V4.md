@@ -103,7 +103,7 @@ Phase 40a: Cluster identity + static memb.   ███████████�
 Phase 40b: HLC + vector clocks (WAL v2)      ████████████████████  P3 ★ ✅ Done (format-locked)
 Phase 40c: Ring + vnodes module              ████████████████████  P3 ★ ✅ Done
 Phase 40d: Tombstones in the engine          ████████░░░░░░░░░░░░  P3 ★ 🟡 Format-locked; semantics deferred to v6 Phase 46
-Phase 40e: WAL-stream replication (1-writer) ████░░░░░░░░░░░░░░░░  P3 ★ 🟡 In progress (40e.8 integration + 40e.9 docs sync)
+Phase 40e: WAL-stream replication (1-writer) ████████████████████  P3 ★ ✅ Done
 Phase 40f: Coordinator + tunable consistency ░░░░░░░░░░░░░░░░░░░░  P3 ★ ⏳ Not started (protocol-locking)
 Phase 41:  MVCC read snapshots (HLC-indexed) ░░░░░░░░░░░░░░░░░░░░  P3 ★ ⏳ Not started
 Phase 42:  Smart drivers (Rust + TS)         ░░░░░░░░░░░░░░░░░░░░  P3 ⏳ Not started
@@ -967,12 +967,12 @@ when an out-of-date replica comes back online.
 
 ## Phase 40e: WAL-Stream Replication (Single-Writer, Ring-Ready)
 
-**Status: 🟡 In progress.** `grumpydb-replication` now includes
-integration coverage for manual failover flow in
-`test_three_node_replication_with_failover` (`grumpydb-replication/src/tasks.rs`).
-Milestone **40e.8** validates: node-1 writer replicates to node-2/node-3,
-manual election node-1 -> node-2, then node-3 replicates from the new
-writer.
+**Status: ✅ Done.** All 9 slices (40e.1–40e.9) delivered. The
+`grumpydb-replication` crate ships 8 modules: `frame`, `session`,
+`tailer`, `tasks`, `idempotent`, `writer_control`, `lag_tracker`, and
+`lib`. The 3-node in-process integration test
+`test_three_node_replication_with_failover` validates the full leader →
+follower streaming path plus manual failover.
 
 ### Goal
 Stream WAL records between peers. v5 enforces a single-active-writer regime
@@ -1054,8 +1054,8 @@ collection); v6 will lift this constraint to true multi-writer.
   catches up. End state identical.
 - Idempotence: replay the same WAL fragment twice; final state unchanged.
 
-### Acceptance
-- 3-node integration test green in CI.
+### Acceptance — met
+- 3-node integration test green (`test_three_node_replication_with_failover`).
 - Documented in `docs/REPLICATION.md`.
 
 ---
