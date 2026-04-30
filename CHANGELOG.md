@@ -404,8 +404,12 @@ foundations needed by the downstream distributed project.
 - Documented in `docs/TOMBSTONES.md`.
 
 #### Pending — remaining Stream D phases
-- Phase 40e: WAL-stream replication — **not started** (only RBAC
-  scaffolding present).
+- Phase 40e: WAL-stream replication — **in progress**.
+  - 40e.8: added 3-node in-process integration test
+    `test_three_node_replication_with_failover`
+    (`grumpydb-replication/src/tasks.rs`) validating node-1 writer
+    replication to node-2/node-3, manual election node-1 -> node-2,
+    and node-3 replication from the new writer.
 - Phase 40f: coordinator + tunable `(N, R, W)` protocol — not started.
 - Phase 41: MVCC reads (HLC-indexed) — not started.
 - Phase 42: smart drivers (Rust + TS, JWKS-aware) — not started.

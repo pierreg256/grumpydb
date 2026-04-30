@@ -566,6 +566,7 @@ mod tests {
     use super::*;
     use crate::frame::PROTOCOL_VERSION;
     use crate::session::{PeerAuthenticator, PeerIdentity};
+    use crate::writer_control::WriterAssignment;
 
     /// Captures every record the follower applies, in order.
     struct CaptureApplier {
@@ -945,5 +946,196 @@ mod tests {
         let rec = t.poll_once().unwrap().unwrap();
         let hlc = peek_record_hlc(&rec.raw).unwrap();
         assert_eq!(hlc, rec.record.hlc.0);
+    }
+
+    /// 3-node integration: node-1 replicates to node-2 and node-3,
+    /// then a manual writer election promotes node-2 and node-3
+    /// replicates from the new writer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_three_node_replication_with_failover() {
+        let cluster = Uuid::from_u128(0xc5);
+        let node1 = Uuid::new_v4();
+        let node2 = Uuid::new_v4();
+        let node3 = Uuid::new_v4();
+
+        // Writer assignment starts with node-1 for db1/users.
+        let mut writers = WriterAssignment::empty();
+        writers.elect(node1.to_string(), "db1", Some("users"));
+        assert!(
+            writers
+                .check_writer(&node1.to_string(), "db1", "users")
+                .is_ok()
+        );
+        assert!(
+            writers
+                .check_writer(&node2.to_string(), "db1", "users")
+                .is_err()
+        );
+
+        // --- Phase A: node-1 (writer) -> node-2 and node-3.
+        let dir1 = TempDir::new().unwrap();
+        let wal1 = write_commits(&dir1, node1.as_u128(), 3);
+
+        let (l12, f12) = tokio::io::duplex(64 * 1024);
+        let (l13, f13) = tokio::io::duplex(64 * 1024);
+
+        let leader_id = PeerIdentity {
+            cluster_id: cluster,
+            node_id: node1,
+        };
+        let leader_id_b = leader_id.clone();
+        let follower2_id = PeerIdentity {
+            cluster_id: cluster,
+            node_id: node2,
+        };
+        let follower3_id = PeerIdentity {
+            cluster_id: cluster,
+            node_id: node3,
+        };
+
+        let leader12 = tokio::spawn(async move {
+            let auth = Arc::new(AlwaysAcceptAuth(node2));
+            let session = PeerSession::accept_responder(l12, leader_id, 0, auth)
+                .await
+                .unwrap();
+            let tailer = WalTailer::open(&wal1).unwrap();
+            LeaderTask::new(session, tailer).run().await
+        });
+
+        let wal1_for_second_leader = write_commits(&dir1, node1.as_u128(), 0);
+        let leader13 = tokio::spawn(async move {
+            let auth = Arc::new(AlwaysAcceptAuth(node3));
+            let session = PeerSession::accept_responder(l13, leader_id_b, 0, auth)
+                .await
+                .unwrap();
+            let tailer = WalTailer::open(&wal1_for_second_leader).unwrap();
+            LeaderTask::new(session, tailer).run().await
+        });
+
+        let cap2 = Arc::new(CaptureApplier::new());
+        let cap2_for_task = Arc::clone(&cap2);
+        let follower2 = tokio::spawn(async move {
+            let session = PeerSession::connect_initiator(f12, follower2_id, "tok".into())
+                .await
+                .unwrap();
+            FollowerTask::new(session, cap2_for_task)
+                .with_ack_policy(AckPolicy {
+                    every_n: 1,
+                    interval: Duration::from_millis(20),
+                })
+                .run(node1, 0)
+                .await
+        });
+
+        let cap3 = Arc::new(CaptureApplier::new());
+        let cap3_for_task = Arc::clone(&cap3);
+        let follower3 = tokio::spawn(async move {
+            let session = PeerSession::connect_initiator(f13, follower3_id, "tok".into())
+                .await
+                .unwrap();
+            FollowerTask::new(session, cap3_for_task)
+                .with_ack_policy(AckPolicy {
+                    every_n: 1,
+                    interval: Duration::from_millis(20),
+                })
+                .run(node1, 0)
+                .await
+        });
+
+        // 3 commits => 6 records per follower.
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if cap2.snapshot().len() >= 6 && cap3.snapshot().len() >= 6 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("followers did not catch up from node-1");
+
+        leader12.abort();
+        leader13.abort();
+        let _ = timeout(Duration::from_secs(2), follower2).await;
+        let _ = timeout(Duration::from_secs(2), follower3).await;
+
+        assert_eq!(cap2.snapshot().len(), 6);
+        assert_eq!(cap3.snapshot().len(), 6);
+
+        // --- Phase B: failover election node-1 -> node-2.
+        writers.elect(node2.to_string(), "db1", Some("users"));
+        assert!(
+            writers
+                .check_writer(&node2.to_string(), "db1", "users")
+                .is_ok()
+        );
+        assert!(
+            writers
+                .check_writer(&node1.to_string(), "db1", "users")
+                .is_err()
+        );
+
+        // New writer node-2 emits fresh WAL; node-3 follows node-2.
+        let dir2 = TempDir::new().unwrap();
+        let wal2 = write_commits(&dir2, node2.as_u128(), 2);
+        let (l23, f23) = tokio::io::duplex(64 * 1024);
+
+        let leader2_id = PeerIdentity {
+            cluster_id: cluster,
+            node_id: node2,
+        };
+        let follower3b_id = PeerIdentity {
+            cluster_id: cluster,
+            node_id: node3,
+        };
+
+        let leader23 = tokio::spawn(async move {
+            let auth = Arc::new(AlwaysAcceptAuth(node3));
+            let session = PeerSession::accept_responder(l23, leader2_id, 0, auth)
+                .await
+                .unwrap();
+            let tailer = WalTailer::open(&wal2).unwrap();
+            LeaderTask::new(session, tailer).run().await
+        });
+
+        let cap3_after_failover = Arc::new(CaptureApplier::new());
+        let cap3_after_failover_for_task = Arc::clone(&cap3_after_failover);
+        let follower3_after_failover = tokio::spawn(async move {
+            let session = PeerSession::connect_initiator(f23, follower3b_id, "tok".into())
+                .await
+                .unwrap();
+            FollowerTask::new(session, cap3_after_failover_for_task)
+                .with_ack_policy(AckPolicy {
+                    every_n: 1,
+                    interval: Duration::from_millis(20),
+                })
+                .run(node2, 0)
+                .await
+        });
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if cap3_after_failover.snapshot().len() >= 4 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("node-3 did not catch up from node-2 after failover");
+
+        leader23.abort();
+        let _ = timeout(Duration::from_secs(2), follower3_after_failover).await;
+
+        // 2 commits => 4 records; every record should be stamped with node-2 origin.
+        let applied = cap3_after_failover.snapshot();
+        assert_eq!(applied.len(), 4);
+        for raw in &applied {
+            assert!(raw.len() >= 37, "record too short to read origin");
+            let mut id_le = [0u8; 16];
+            id_le.copy_from_slice(&raw[21..37]);
+            let origin = Uuid::from_u128(u128::from_le_bytes(id_le));
+            assert_eq!(origin, node2, "record origin is not the elected writer");
+        }
     }
 }
