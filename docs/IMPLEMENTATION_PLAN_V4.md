@@ -1056,6 +1056,7 @@ collection); v6 will lift this constraint to true multi-writer.
 
 ### Acceptance — met
 - 3-node integration test green (`test_three_node_replication_with_failover`).
+- Full workspace test count: **673** (was 609 at end of Phase 40c).
 - Documented in `docs/REPLICATION.md`.
 
 ---

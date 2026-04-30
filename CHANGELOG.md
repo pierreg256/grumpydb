@@ -421,6 +421,7 @@ foundations needed by the downstream distributed project.
   coverage, and deferred items.
 - Cross-doc consistency pass: `docs/CLUSTER.md`, `docs/WAL.md`, and
   `docs/IMPLEMENTATION_PLAN_V4.md` updated.
+- `cargo test --workspace` — **673 tests pass** (was 609 at end of Phase 40c).
 
 #### Pending — remaining Stream D phases
 - Phase 40f: coordinator + tunable `(N, R, W)` protocol — not started.
