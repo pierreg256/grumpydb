@@ -15,6 +15,7 @@ use crate::database::Database;
 use crate::document::value::Value;
 use crate::error::{GrumpyError, Result};
 use crate::server::GrumpyServer;
+use crate::wal::hlc::Hlc;
 
 // ── SharedDatabase ──────────────────────────────────────────────────────
 
@@ -25,6 +26,85 @@ use crate::server::GrumpyServer;
 #[derive(Clone)]
 pub struct SharedDatabase {
     inner: Arc<RwLock<Database>>,
+}
+
+/// Snapshot-pinned read handle for [`SharedDatabase`].
+///
+/// Phase 41 (tranche 1): the handle keeps a stable `snapshot_hlc` and offers
+/// read helpers. Reads currently reuse the existing engine path.
+pub struct SharedReadTx {
+    inner: Arc<RwLock<Database>>,
+    snapshot_hlc: Hlc,
+}
+
+impl Clone for SharedReadTx {
+    fn clone(&self) -> Self {
+        self.inner
+            .write()
+            .register_reader_snapshot(self.snapshot_hlc);
+        Self {
+            inner: Arc::clone(&self.inner),
+            snapshot_hlc: self.snapshot_hlc,
+        }
+    }
+}
+
+impl Drop for SharedReadTx {
+    fn drop(&mut self) {
+        self.inner
+            .write()
+            .unregister_reader_snapshot(self.snapshot_hlc);
+    }
+}
+
+impl SharedReadTx {
+    /// HLC snapshot associated with this read transaction.
+    pub fn snapshot_hlc(&self) -> Hlc {
+        self.snapshot_hlc
+    }
+
+    /// Reads one document at this transaction snapshot.
+    pub fn get(&self, collection: &str, key: &Uuid) -> Result<Option<Value>> {
+        self.inner
+            .write()
+            .snapshot_get(collection, key, self.snapshot_hlc)
+    }
+
+    /// Scans a range at this transaction snapshot.
+    pub fn scan(
+        &self,
+        collection: &str,
+        range: impl std::ops::RangeBounds<Uuid>,
+    ) -> Result<Vec<(Uuid, Value)>> {
+        self.inner
+            .write()
+            .snapshot_scan(collection, range, self.snapshot_hlc)
+    }
+
+    /// Queries an index at this transaction snapshot.
+    pub fn query(
+        &self,
+        collection: &str,
+        index_name: &str,
+        value: &Value,
+    ) -> Result<Vec<(Uuid, Value)>> {
+        self.inner
+            .write()
+            .snapshot_query(collection, index_name, value, self.snapshot_hlc)
+    }
+
+    /// Range-query on an index at this transaction snapshot.
+    pub fn query_range(
+        &self,
+        collection: &str,
+        index_name: &str,
+        start: &Value,
+        end: &Value,
+    ) -> Result<Vec<(Uuid, Value)>> {
+        self.inner
+            .write()
+            .snapshot_query_range(collection, index_name, start, end, self.snapshot_hlc)
+    }
 }
 
 impl SharedDatabase {
@@ -39,6 +119,18 @@ impl SharedDatabase {
     pub fn open(path: &Path) -> Result<Self> {
         let db = Database::open(path)?;
         Ok(Self::new(db))
+    }
+
+    /// Begins a snapshot-pinned read transaction.
+    pub fn begin_read(&self) -> SharedReadTx {
+        let mut db = self.inner.write();
+        let snapshot_hlc = db.current_hlc();
+        db.register_reader_snapshot(snapshot_hlc);
+        drop(db);
+        SharedReadTx {
+            inner: Arc::clone(&self.inner),
+            snapshot_hlc,
+        }
     }
 
     // ── Collection management ───────────────────────────────────────
@@ -355,6 +447,66 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
+    }
+
+    #[test]
+    fn test_shared_database_begin_read_snapshot() {
+        let (_dir, db) = setup_shared_db();
+        db.create_collection("c").unwrap();
+        let key = Uuid::from_u128(1);
+        db.insert("c", key, Value::Integer(7)).unwrap();
+
+        let tx = db.begin_read();
+        assert_eq!(tx.get("c", &key).unwrap(), Some(Value::Integer(7)));
+        assert!(tx.snapshot_hlc().0 > 0);
+    }
+
+    #[test]
+    fn test_shared_read_tx_clone_tracks_watermark() {
+        let (_dir, db) = setup_shared_db();
+        db.create_collection("c").unwrap();
+        db.insert("c", Uuid::from_u128(1), Value::Integer(1)).unwrap();
+
+        let tx1 = db.begin_read();
+        let snapshot = tx1.snapshot_hlc();
+        assert_eq!(db.inner.read().reader_watermark(), Some(snapshot));
+
+        let tx2 = tx1.clone();
+        assert_eq!(db.inner.read().reader_watermark(), Some(snapshot));
+
+        drop(tx1);
+        assert_eq!(db.inner.read().reader_watermark(), Some(snapshot));
+
+        drop(tx2);
+        assert_eq!(db.inner.read().reader_watermark(), None);
+    }
+
+    #[test]
+    fn test_shared_read_tx_drop_triggers_version_gc() {
+        let (_dir, db) = setup_shared_db();
+        db.create_collection("c").unwrap();
+
+        let key = Uuid::from_u128(11);
+        db.insert("c", key, Value::Integer(1)).unwrap();
+
+        let tx1 = db.begin_read();
+        let snapshot = tx1.snapshot_hlc();
+        let tx2 = tx1.clone();
+
+        db.update("c", &key, Value::Integer(2)).unwrap();
+        db.update("c", &key, Value::Integer(3)).unwrap();
+
+        assert_eq!(tx1.get("c", &key).unwrap(), Some(Value::Integer(1)));
+        assert_eq!(db.inner.read().reader_watermark(), Some(snapshot));
+        assert!(db.inner.read().debug_version_len("c", &key) >= 3);
+
+        drop(tx1);
+        assert_eq!(db.inner.read().reader_watermark(), Some(snapshot));
+
+        drop(tx2);
+        assert_eq!(db.inner.read().reader_watermark(), None);
+        assert_eq!(db.inner.read().debug_version_len("c", &key), 1);
+        assert_eq!(db.get("c", &key).unwrap(), Some(Value::Integer(3)));
     }
 
     #[test]

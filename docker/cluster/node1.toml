@@ -1,0 +1,31 @@
+[server]
+bind = "0.0.0.0:6380"
+data_dir = "/data"
+
+[http]
+bind = "0.0.0.0:6381"
+
+[auth]
+jwt_algorithm = "rs256"
+
+[cluster]
+cluster_id = "11111111-1111-1111-1111-111111111111"
+listen_peer = "0.0.0.0:7390"
+vnodes_per_node = 128
+max_lag_seconds = 10
+
+[[cluster.peers]]
+node_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1"
+addr = "node1:7390"
+
+[[cluster.peers]]
+node_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2"
+addr = "node2:7390"
+
+[[cluster.peers]]
+node_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3"
+addr = "node3:7390"
+
+[[cluster.writers]]
+collection = "*"
+node_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1"

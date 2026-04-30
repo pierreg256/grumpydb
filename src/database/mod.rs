@@ -14,7 +14,7 @@
 //!     idx_*.idx        ← secondary indexes
 //! ```
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -24,6 +24,7 @@ use crate::collection::Collection;
 use crate::document::Document;
 use crate::document::value::Value;
 use crate::error::{GrumpyError, Result};
+use crate::index::encoding::{encode_sortable_value, extract_field};
 use crate::naming::validate_name;
 use crate::wal::applied_set::AppliedSet;
 use crate::wal::hlc::{Hlc, HlcClock, HlcError};
@@ -67,6 +68,77 @@ pub struct Database {
     /// persisted from Phase 40b onward; not consulted on the write path
     /// in v5 (Phase 40e will start using it).
     applied_set: AppliedSet,
+    /// Per-collection key history used by snapshot reads (Phase 41
+    /// tranche 2). Each key stores append-only committed versions.
+    versions: HashMap<String, HashMap<Uuid, Vec<VersionedValue>>>,
+    /// Active readers grouped by their snapshot HLC.
+    active_readers: BTreeMap<Hlc, usize>,
+}
+
+#[derive(Debug, Clone)]
+struct VersionedValue {
+    hlc: Hlc,
+    value: Option<Value>,
+}
+
+/// Read-only transaction pinned to a point-in-time HLC snapshot.
+///
+/// Phase 41 (tranche 1): the snapshot timestamp is captured and exposed via
+/// [`ReadTx::snapshot_hlc`]. Reads are routed through the current engine read
+/// path while preserving a stable API for future MVCC page-version selection.
+pub struct ReadTx<'a> {
+    db: &'a mut Database,
+    snapshot_hlc: Hlc,
+}
+
+impl Drop for ReadTx<'_> {
+    fn drop(&mut self) {
+        self.db.unregister_reader_snapshot(self.snapshot_hlc);
+    }
+}
+
+impl ReadTx<'_> {
+    /// HLC value representing this read transaction's snapshot point.
+    pub fn snapshot_hlc(&self) -> Hlc {
+        self.snapshot_hlc
+    }
+
+    /// Reads one document at the transaction snapshot.
+    pub fn get(&mut self, collection: &str, key: &Uuid) -> Result<Option<Value>> {
+        self.db.snapshot_get(collection, key, self.snapshot_hlc)
+    }
+
+    /// Scans a key range at the transaction snapshot.
+    pub fn scan(
+        &mut self,
+        collection: &str,
+        range: impl std::ops::RangeBounds<Uuid>,
+    ) -> Result<Vec<(Uuid, Value)>> {
+        self.db.snapshot_scan(collection, range, self.snapshot_hlc)
+    }
+
+    /// Queries a secondary index at the transaction snapshot.
+    pub fn query(
+        &mut self,
+        collection: &str,
+        index_name: &str,
+        value: &Value,
+    ) -> Result<Vec<(Uuid, Value)>> {
+        self.db
+            .snapshot_query(collection, index_name, value, self.snapshot_hlc)
+    }
+
+    /// Range-query on a secondary index at the transaction snapshot.
+    pub fn query_range(
+        &mut self,
+        collection: &str,
+        index_name: &str,
+        start: &Value,
+        end: &Value,
+    ) -> Result<Vec<(Uuid, Value)>> {
+        self.db
+            .snapshot_query_range(collection, index_name, start, end, self.snapshot_hlc)
+    }
 }
 
 impl Database {
@@ -121,7 +193,25 @@ impl Database {
             node_id,
             clock,
             applied_set,
+            versions: HashMap::new(),
+            active_readers: BTreeMap::new(),
         })
+    }
+
+    // ── Read snapshots (Phase 41) ───────────────────────────────────
+
+    /// Begins a read transaction pinned to the current HLC snapshot.
+    ///
+    /// The returned [`ReadTx`] exposes read methods and carries the snapshot
+    /// timestamp through [`ReadTx::snapshot_hlc`] so callers can correlate
+    /// reads with replication/consistency workflows.
+    pub fn begin_read(&mut self) -> ReadTx<'_> {
+        let snapshot_hlc = self.current_hlc();
+        self.register_reader_snapshot(snapshot_hlc);
+        ReadTx {
+            db: self,
+            snapshot_hlc,
+        }
     }
 
     // ── Collection management ───────────────────────────────────────────
@@ -146,6 +236,7 @@ impl Database {
             .collections
             .remove(name)
             .ok_or_else(|| GrumpyError::CollectionNotFound(name.into()))?;
+        self.versions.remove(name);
         let coll_path = coll.path().to_path_buf();
         drop(coll);
         std::fs::remove_dir_all(&coll_path)?;
@@ -187,7 +278,8 @@ impl Database {
                 .log_page_write(tx_id, rec.page_id, &rec.before, &rec.after)?;
         }
 
-        self.wal.log_commit(tx_id)?;
+        let (_, commit_hlc) = self.wal.log_commit(tx_id)?;
+        self.append_version(collection, key, commit_hlc, Some(value));
         self.maybe_checkpoint()?;
         Ok(())
     }
@@ -212,6 +304,7 @@ impl Database {
         let old_value = self
             .get(collection, key)?
             .ok_or(GrumpyError::KeyNotFound(*key))?;
+        self.ensure_baseline_version(collection, *key, old_value.clone());
 
         // Delete old (with unindexing)
         let tx_id = self.wal.begin_tx();
@@ -241,7 +334,8 @@ impl Database {
                 .log_page_write(tx_id, rec.page_id, &rec.before, &rec.after)?;
         }
 
-        self.wal.log_commit(tx_id)?;
+        let (_, commit_hlc) = self.wal.log_commit(tx_id)?;
+        self.append_version(collection, *key, commit_hlc, Some(value));
         self.maybe_checkpoint()?;
         Ok(())
     }
@@ -252,6 +346,7 @@ impl Database {
         let value = self
             .get(collection, key)?
             .ok_or(GrumpyError::KeyNotFound(*key))?;
+        self.ensure_baseline_version(collection, *key, value.clone());
 
         let tx_id = self.wal.begin_tx();
         let coll = self
@@ -265,7 +360,8 @@ impl Database {
                 .log_page_write(tx_id, rec.page_id, &rec.before, &rec.after)?;
         }
 
-        self.wal.log_commit(tx_id)?;
+        let (_, commit_hlc) = self.wal.log_commit(tx_id)?;
+        self.append_version(collection, *key, commit_hlc, None);
         self.maybe_checkpoint()?;
         Ok(())
     }
@@ -482,6 +578,235 @@ impl Database {
             self.flush()?;
         }
         Ok(())
+    }
+
+    fn append_version(&mut self, collection: &str, key: Uuid, hlc: Hlc, value: Option<Value>) {
+        let versions = self
+            .versions
+            .entry(collection.to_string())
+            .or_default()
+            .entry(key)
+            .or_default();
+        versions.push(VersionedValue { hlc, value });
+        self.gc_versions();
+    }
+
+    fn ensure_baseline_version(&mut self, collection: &str, key: Uuid, value: Value) {
+        let versions = self
+            .versions
+            .entry(collection.to_string())
+            .or_default()
+            .entry(key)
+            .or_default();
+        if versions.is_empty() {
+            versions.push(VersionedValue {
+                hlc: Hlc::ZERO,
+                value: Some(value),
+            });
+        }
+    }
+
+    fn lookup_snapshot_version(&self, collection: &str, key: &Uuid, snapshot: Hlc) -> Option<Option<Value>> {
+        let key_versions = self.versions.get(collection)?.get(key)?;
+        let mut selected = None;
+        let mut found = false;
+        for version in key_versions {
+            if version.hlc <= snapshot {
+                selected = version.value.clone();
+                found = true;
+            } else {
+                break;
+            }
+        }
+        if found {
+            Some(selected)
+        } else {
+            // History exists, but key was created after snapshot.
+            Some(None)
+        }
+    }
+
+    pub(crate) fn register_reader_snapshot(&mut self, snapshot: Hlc) {
+        *self.active_readers.entry(snapshot).or_insert(0) += 1;
+    }
+
+    pub(crate) fn unregister_reader_snapshot(&mut self, snapshot: Hlc) {
+        let mut remove = false;
+        if let Some(count) = self.active_readers.get_mut(&snapshot) {
+            if *count > 1 {
+                *count -= 1;
+            } else {
+                remove = true;
+            }
+        }
+        if remove {
+            self.active_readers.remove(&snapshot);
+        }
+        self.gc_versions();
+    }
+
+    pub(crate) fn reader_watermark(&self) -> Option<Hlc> {
+        self.active_readers.first_key_value().map(|(hlc, _)| *hlc)
+    }
+
+    fn gc_versions(&mut self) {
+        let watermark = self.reader_watermark();
+        for by_key in self.versions.values_mut() {
+            for versions in by_key.values_mut() {
+                if versions.len() <= 1 {
+                    continue;
+                }
+
+                match watermark {
+                    Some(wm) => {
+                        let mut anchor_idx = None;
+                        for (idx, version) in versions.iter().enumerate() {
+                            if version.hlc <= wm {
+                                anchor_idx = Some(idx);
+                            } else {
+                                break;
+                            }
+                        }
+
+                        let mut retained = Vec::with_capacity(versions.len());
+                        if let Some(idx) = anchor_idx {
+                            retained.push(versions[idx].clone());
+                            for version in versions.iter().skip(idx + 1) {
+                                retained.push(version.clone());
+                            }
+                        } else {
+                            for version in versions.iter() {
+                                retained.push(version.clone());
+                            }
+                        }
+                        *versions = retained;
+                    }
+                    None => {
+                        if let Some(last) = versions.last().cloned() {
+                            versions.clear();
+                            versions.push(last);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_version_len(&self, collection: &str, key: &Uuid) -> usize {
+        self.versions
+            .get(collection)
+            .and_then(|by_key| by_key.get(key))
+            .map(Vec::len)
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn snapshot_get(&mut self, collection: &str, key: &Uuid, snapshot: Hlc) -> Result<Option<Value>> {
+        if let Some(value) = self.lookup_snapshot_version(collection, key, snapshot) {
+            return Ok(value);
+        }
+        self.get(collection, key)
+    }
+
+    pub(crate) fn snapshot_scan(
+        &mut self,
+        collection: &str,
+        range: impl std::ops::RangeBounds<Uuid>,
+        snapshot: Hlc,
+    ) -> Result<Vec<(Uuid, Value)>> {
+        let mut visible = BTreeMap::new();
+        for (key, value) in self.scan(collection, ..)? {
+            if range.contains(&key) {
+                visible.insert(key, value);
+            }
+        }
+
+        if let Some(by_key) = self.versions.get(collection) {
+            for key in by_key.keys() {
+                if !range.contains(key) {
+                    continue;
+                }
+                if let Some(maybe_value) = self.lookup_snapshot_version(collection, key, snapshot) {
+                    match maybe_value {
+                        Some(value) => {
+                            visible.insert(*key, value);
+                        }
+                        None => {
+                            visible.remove(key);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(visible.into_iter().collect())
+    }
+
+    pub(crate) fn snapshot_query(
+        &mut self,
+        collection: &str,
+        index_name: &str,
+        value: &Value,
+        snapshot: Hlc,
+    ) -> Result<Vec<(Uuid, Value)>> {
+        let field_path = {
+            let coll = self
+                .collections
+                .get(collection)
+                .ok_or_else(|| GrumpyError::CollectionNotFound(collection.into()))?;
+            coll.list_indexes()
+                .iter()
+                .find(|def| def.name == index_name)
+                .ok_or_else(|| GrumpyError::IndexNotFound(index_name.into()))?
+                .field_path
+                .clone()
+        };
+
+        let rows = self.snapshot_scan(collection, .., snapshot)?;
+        Ok(rows
+            .into_iter()
+            .filter(|(_, doc)| extract_field(doc, &field_path) == Some(value))
+            .collect())
+    }
+
+    pub(crate) fn snapshot_query_range(
+        &mut self,
+        collection: &str,
+        index_name: &str,
+        start: &Value,
+        end: &Value,
+        snapshot: Hlc,
+    ) -> Result<Vec<(Uuid, Value)>> {
+        let field_path = {
+            let coll = self
+                .collections
+                .get(collection)
+                .ok_or_else(|| GrumpyError::CollectionNotFound(collection.into()))?;
+            coll.list_indexes()
+                .iter()
+                .find(|def| def.name == index_name)
+                .ok_or_else(|| GrumpyError::IndexNotFound(index_name.into()))?
+                .field_path
+                .clone()
+        };
+
+        let start_key = encode_sortable_value(start)?;
+        let end_key = encode_sortable_value(end)?;
+
+        let rows = self.snapshot_scan(collection, .., snapshot)?;
+        let mut out = Vec::new();
+        for (key, doc) in rows {
+            let Some(field) = extract_field(&doc, &field_path) else {
+                continue;
+            };
+            let Ok(encoded) = encode_sortable_value(field) else {
+                continue;
+            };
+            if encoded >= start_key && encoded < end_key {
+                out.push((key, doc));
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -714,6 +1039,110 @@ mod tests {
         let (_dir, mut db) = setup();
         assert!(db.create_collection("Bad-Name").is_err());
         assert!(db.create_collection("").is_err());
+    }
+
+    #[test]
+    fn test_begin_read_exposes_snapshot_hlc() {
+        let (_dir, mut db) = setup();
+        db.create_collection("c").unwrap();
+        db.insert("c", Uuid::new_v4(), Value::Integer(1)).unwrap();
+
+        let before = db.current_hlc();
+        let tx = db.begin_read();
+        assert!(tx.snapshot_hlc() >= before);
+    }
+
+    #[test]
+    fn test_read_tx_get_and_scan() {
+        let (_dir, mut db) = setup();
+        db.create_collection("c").unwrap();
+
+        let k1 = Uuid::from_u128(1);
+        let k2 = Uuid::from_u128(2);
+        db.insert("c", k1, Value::Integer(10)).unwrap();
+        db.insert("c", k2, Value::Integer(20)).unwrap();
+
+        let mut tx = db.begin_read();
+        assert_eq!(tx.get("c", &k1).unwrap(), Some(Value::Integer(10)));
+        let rows = tx.scan("c", ..).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn test_read_tx_snapshot_hides_future_update() {
+        let (_dir, mut db) = setup();
+        db.create_collection("c").unwrap();
+
+        let key = Uuid::from_u128(7);
+        db.insert("c", key, Value::Integer(1)).unwrap();
+        let snapshot = db.current_hlc();
+        db.register_reader_snapshot(snapshot);
+
+        db.update("c", &key, Value::Integer(2)).unwrap();
+
+        assert_eq!(db.snapshot_get("c", &key, snapshot).unwrap(), Some(Value::Integer(1)));
+        db.unregister_reader_snapshot(snapshot);
+        assert_eq!(db.get("c", &key).unwrap(), Some(Value::Integer(2)));
+    }
+
+    #[test]
+    fn test_snapshot_delete_preserves_pre_snapshot_visibility() {
+        let (_dir, mut db) = setup();
+        db.create_collection("c").unwrap();
+
+        let key = Uuid::from_u128(8);
+        db.insert("c", key, Value::Integer(10)).unwrap();
+
+        // Simulate pre-Phase 41 data without history and ensure delete seeds
+        // a baseline version for older snapshots.
+        db.versions.clear();
+        let snapshot = db.current_hlc();
+        db.register_reader_snapshot(snapshot);
+        db.delete("c", &key).unwrap();
+
+        assert_eq!(db.snapshot_get("c", &key, snapshot).unwrap(), Some(Value::Integer(10)));
+        db.unregister_reader_snapshot(snapshot);
+        assert_eq!(db.get("c", &key).unwrap(), None);
+    }
+
+    #[test]
+    fn test_read_tx_drop_clears_reader_watermark() {
+        let (_dir, mut db) = setup();
+        db.create_collection("c").unwrap();
+        db.insert("c", Uuid::new_v4(), Value::Integer(1)).unwrap();
+
+        let snapshot = {
+            let tx = db.begin_read();
+            let s = tx.snapshot_hlc();
+            assert_eq!(tx.db.reader_watermark(), Some(s));
+            s
+        };
+
+        assert_eq!(db.reader_watermark(), None);
+        assert!(snapshot > Hlc::ZERO);
+    }
+
+    #[test]
+    fn test_gc_versions_when_last_reader_drops() {
+        let (_dir, mut db) = setup();
+        db.create_collection("c").unwrap();
+
+        let key = Uuid::from_u128(11);
+        db.insert("c", key, Value::Integer(1)).unwrap();
+        let snapshot = db.current_hlc();
+        db.register_reader_snapshot(snapshot);
+
+        db.update("c", &key, Value::Integer(2)).unwrap();
+        db.update("c", &key, Value::Integer(3)).unwrap();
+
+        assert_eq!(db.snapshot_get("c", &key, snapshot).unwrap(), Some(Value::Integer(1)));
+        assert!(db.debug_version_len("c", &key) >= 3);
+
+        db.unregister_reader_snapshot(snapshot);
+
+        assert_eq!(db.reader_watermark(), None);
+        assert_eq!(db.debug_version_len("c", &key), 1);
+        assert_eq!(db.get("c", &key).unwrap(), Some(Value::Integer(3)));
     }
 
     #[test]

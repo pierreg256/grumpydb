@@ -35,4 +35,8 @@ History is persisted to `~/.grumpy_repl_history`. The default embedded data dire
 
 ## License
 
-MIT — see the [LICENSE](https://github.com/pierreg256/grumpydb/blob/master/LICENSE) file in the parent repository.
+Dual-licensed under MIT or Apache-2.0, at your option.
+See [LICENSE](https://github.com/pierreg256/grumpydb/blob/master/LICENSE),
+[LICENSE-MIT](https://github.com/pierreg256/grumpydb/blob/master/LICENSE-MIT), and
+[LICENSE-APACHE](https://github.com/pierreg256/grumpydb/blob/master/LICENSE-APACHE)
+in the parent repository.

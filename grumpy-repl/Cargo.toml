@@ -16,9 +16,9 @@ name = "grumpy-repl"
 path = "src/main.rs"
 
 [dependencies]
-grumpydb = { path = "..", version = "4.1" }
-grumpydb-client = { path = "../grumpydb-client", version = "1" }
-grumpydb-protocol = { path = "../grumpydb-protocol", version = "1" }
+grumpydb = { path = "..", version = "5" }
+grumpydb-client = { path = "../grumpydb-client", version = "5" }
+grumpydb-protocol = { path = "../grumpydb-protocol", version = "5" }
 uuid = { version = "1", features = ["v4", "serde"] }
 rustyline = "15"
 serde_json = "1"

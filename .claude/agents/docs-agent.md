@@ -21,11 +21,15 @@ This agent must be run after each work session of an agent (page-agent, btree-ag
 | `docs/IMPLEMENTATION_PLAN.md` | Check off completed tasks, add discovered tasks |
 | `docs/IMPLEMENTATION_PLAN_V2.md` | Check off completed tasks, add discovered tasks |
 | `docs/IMPLEMENTATION_PLAN_V3.md` | Check off completed tasks, add discovered tasks |
+| `docs/IMPLEMENTATION_PLAN_V4.md` | Check off completed tasks, add discovered tasks |
 | `.claude/skills/*.md` | Constants, formats, algorithms, test patterns |
 | `.claude/agents/*.md` | Scope, files, dependencies, rules |
-| `grumpydb-protocol/` | Crate structure, module docs (when it exists) |
-| `grumpydb-server/` | Crate structure, module docs (when it exists) |
 | `grumpydb-client/` | Crate structure, module docs (when it exists) |
+| `grumpydb-protocol/` | Crate structure, module docs (when it exists) |
+| `grumpydb-replication/` | Crate structure, module docs (when it exists) |
+| `grumpydb-ring/` | Crate structure, module docs (when it exists) |
+| `grumpydb-server/` | Crate structure, module docs (when it exists) |
+| `grumpydb-testing/` | Crate structure, module docs (when it exists) |
 | `drivers/typescript/` | Package structure, README (when it exists) |
 
 > If `README.md` or `CONTRIBUTING.md` do not exist, create them from the existing code.

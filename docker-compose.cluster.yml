@@ -1,0 +1,60 @@
+# 3-node GrumpyDB cluster demo (v5).
+#
+# Start:
+#   GRUMPYDB_BOOTSTRAP_PASSWORD=admin docker compose -f docker-compose.cluster.yml up --build
+#
+# Notes:
+# - Node identities are pre-seeded under docker/cluster/data/node*/_cluster/node.json.
+# - Writer assignment is pinned to node1 in docker/cluster/node*.toml.
+
+services:
+  node1:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: grumpydb-server:cluster-demo
+    container_name: grumpydb-node1
+    command: ["--config", "/etc/grumpydb/grumpydb.toml", "--data", "/data", "--no-tls", "--log-format", "json"]
+    environment:
+      GRUMPYDB_BOOTSTRAP_PASSWORD: "${GRUMPYDB_BOOTSTRAP_PASSWORD:?Set GRUMPYDB_BOOTSTRAP_PASSWORD}"
+    volumes:
+      - ./docker/cluster/node1.toml:/etc/grumpydb/grumpydb.toml:ro
+      - ./docker/cluster/data/node1:/data
+    ports:
+      - "6380:6380"
+      - "8081:6381"
+      - "7390:7390"
+
+  node2:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: grumpydb-server:cluster-demo
+    container_name: grumpydb-node2
+    command: ["--config", "/etc/grumpydb/grumpydb.toml", "--data", "/data", "--no-tls", "--log-format", "json"]
+    environment:
+      GRUMPYDB_BOOTSTRAP_PASSWORD: "${GRUMPYDB_BOOTSTRAP_PASSWORD:?Set GRUMPYDB_BOOTSTRAP_PASSWORD}"
+    volumes:
+      - ./docker/cluster/node2.toml:/etc/grumpydb/grumpydb.toml:ro
+      - ./docker/cluster/data/node2:/data
+    ports:
+      - "6382:6380"
+      - "8082:6381"
+      - "7392:7390"
+
+  node3:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: grumpydb-server:cluster-demo
+    container_name: grumpydb-node3
+    command: ["--config", "/etc/grumpydb/grumpydb.toml", "--data", "/data", "--no-tls", "--log-format", "json"]
+    environment:
+      GRUMPYDB_BOOTSTRAP_PASSWORD: "${GRUMPYDB_BOOTSTRAP_PASSWORD:?Set GRUMPYDB_BOOTSTRAP_PASSWORD}"
+    volumes:
+      - ./docker/cluster/node3.toml:/etc/grumpydb/grumpydb.toml:ro
+      - ./docker/cluster/data/node3:/data
+    ports:
+      - "6383:6380"
+      - "8083:6381"
+      - "7393:7390"

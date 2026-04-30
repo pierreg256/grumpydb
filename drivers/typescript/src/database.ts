@@ -40,6 +40,22 @@ export class DatabaseHandle {
     throw new ServerError("unexpected response");
   }
 
+  /**
+   * Return siblings for app-level reconciliation.
+   *
+   * v5 returns at most one sibling with an empty vector-clock token.
+   */
+  async getWithSiblings(
+    collection: string,
+    key: string,
+  ): Promise<Array<{ value: Value; vectorClock: string }>> {
+    const value = await this.get(collection, key);
+    if (value === null) {
+      return [];
+    }
+    return [{ value, vectorClock: "{}" }];
+  }
+
   async update(collection: string, key: string, value: Value): Promise<void> {
     await this.ensureDb();
     const json = JSON.stringify(value);

@@ -30,33 +30,30 @@ ship with **zero on-disk migration**:
 
 ### Target architecture (end of v7)
 
-```
-   ┌────────────────────────────────────────────────────────────────┐
-   │                     Smart clients (Rust + TS)                  │
-   │     - JWKS cache, RS256 verify                                 │
-   │     - TOPOLOGY-aware routing                                   │
-   │     - Sibling reconciliation (LWW or CRDT)                     │
-   └────────┬───────────────────────────────────────────────────────┘
-            │
-            ▼
-   ┌──────────────────────────────────────────────────────────────────┐
-   │  Cluster (consistent-hash ring with N=256 vnodes per phys node)  │
-   │                                                                  │
-   │  ┌────────┐ gossip+WAL  ┌────────┐ gossip+WAL  ┌────────┐        │
-   │  │ Node A │ ◄─────────► │ Node B │ ◄─────────► │ Node C │  …     │
-   │  │        │             │        │             │        │        │
-   │  │ HLC +  │             │ HLC +  │             │ HLC +  │        │
-   │  │ VClock │             │ VClock │             │ VClock │        │
-   │  └────────┘             └────────┘             └────────┘        │
-   │                                                                  │
-   │   - Each node carries the FULL data set in v6 (no sharding yet)  │
-   │   - N = replication factor (=cluster size in v5/v6)              │
-   │   - (R, W) tunable per-request: R + W > N for strong consistency │
-   │   - Conflict resolution: LWW by HLC, opt-in CRDT types           │
-   └──────────────────────────────────────────────────────────────────┘
-            │
-            ▼
-   Snapshot / Restore ──► local / S3 / Azure Blob
+```mermaid
+flowchart TB
+   subgraph clients["Smart Clients"]
+      rc["Rust Driver<br/>JWKS cache, RS256 verify"]
+      tc["TypeScript Driver<br/>Topology-aware routing"]
+      recon["Sibling reconciliation<br/>LWW or CRDT"]
+   end
+
+   subgraph cluster["Cluster: Consistent-hash ring (256 vnodes per physical node)"]
+      a["Node A<br/>HLC + VClock"]
+      b["Node B<br/>HLC + VClock"]
+      c["Node C<br/>HLC + VClock"]
+   end
+
+   snap["Snapshot / Restore<br/>local / S3 / Azure Blob"]
+
+   rc --> cluster
+   tc --> cluster
+   recon --> cluster
+
+   a <--> b
+   b <--> c
+
+   cluster --> snap
 ```
 
 ### Key design decisions (v5 → v7)
@@ -98,16 +95,16 @@ Phase 35: Rate limiting & connection caps    ███████████�
 Phase 36: Health, readiness, metrics HTTP    ████████████████████  P2 ✅ Done
 Phase 37: Docker + docker-compose            ████████████████████  P2 ✅ Done
 Phase 38: Snapshot & restore tooling         ████████████████████  P2 ✅ Done
-Phase 39:  RS256 JWT + JWKS                  ████████████████████  P3 ★ ✅ Done (server-side; driver JWKS cache → Phase 42)
+Phase 39:  RS256 JWT + JWKS                  ████████████████████  P3 ★ ✅ Done (server + driver support)
 Phase 40a: Cluster identity + static memb.   ████████████████████  P3 ★ ✅ Done
 Phase 40b: HLC + vector clocks (WAL v2)      ████████████████████  P3 ★ ✅ Done (format-locked)
 Phase 40c: Ring + vnodes module              ████████████████████  P3 ★ ✅ Done
 Phase 40d: Tombstones in the engine          ████████░░░░░░░░░░░░  P3 ★ 🟡 Format-locked; semantics deferred to v6 Phase 46
 Phase 40e: WAL-stream replication (1-writer) ████████████████████  P3 ★ ✅ Done
-Phase 40f: Coordinator + tunable consistency ░░░░░░░░░░░░░░░░░░░░  P3 ★ ⏳ Not started (protocol-locking)
-Phase 41:  MVCC read snapshots (HLC-indexed) ░░░░░░░░░░░░░░░░░░░░  P3 ★ ⏳ Not started
-Phase 42:  Smart drivers (Rust + TS)         ░░░░░░░░░░░░░░░░░░░░  P3 ⏳ Not started
-Phase 43:  v5.0.0 release                    ░░░░░░░░░░░░░░░░░░░░  P3 ⏳ Not started
+Phase 40f: Coordinator + tunable consistency ████████████████████  P3 ★ ✅ Done (protocol-locking)
+Phase 41:  MVCC read snapshots (HLC-indexed) ███████████████████░  P3 ★ ✅ Done (v5 scope)
+Phase 42:  Smart drivers (Rust + TS)         ███████████████████░  P3 ✅ Done (v5 scope)
+Phase 43:  v5.0.0 release                    ███████████████████░  P3 ✅ Done (repo scope)
 ─── Streams E (v6) and F (v7) below: out of v5 scope ───────────────
 Phase 44:  Gossip membership                 ──────────────────── v6
 Phase 45:  Multi-writer ack pipeline (W>1)   ──────────────────── v6
@@ -148,7 +145,7 @@ Zero clippy warnings on `--workspace --all-targets`, every push validated by Git
      `const { assert!(...) }` blocks.
    - `examples/taskman/store.rs` — fixed `drop with reference` warning by
      introducing a scope block.
-3. **README badges**: CI status, crates.io version, docs.rs, MIT license.
+3. **README badges**: CI status, crates.io version, docs.rs, dual license (MIT OR Apache-2.0).
 
 ### Deferred (tracked for a follow-up)
 - `.github/workflows/release.yml` (manual dispatch publish workflow).
@@ -1063,6 +1060,29 @@ collection); v6 will lift this constraint to true multi-writer.
 
 ## Phase 40f: Coordinator Pattern & Tunable Consistency Protocol
 
+**Status: ✅ Done (v5 protocol-locking scope).**
+
+### Delivered
+1. **Coordinator module** (`grumpydb-server/src/coordinator.rs`):
+   - Builds a static ring view from local identity + configured peers.
+   - Enforces v5 owner placement (`N=1`) and returns
+     `forward to <node>@<addr>; not the owner` hints when the request must be
+     routed elsewhere.
+   - Exposes a topology JSON snapshot for smart clients.
+2. **Protocol additions shipped** (`grumpydb-protocol`):
+   - Consistency wrapper command with `READ_CONCERN R=<n>` and
+     `WRITE_CONCERN W=<n>` prefixes.
+   - New `TOPOLOGY` command.
+   - New `PUT_WITH_VC <collection> <key> <value> <vector_clock>` command.
+   - `ELECT-WRITER` parsing is now wired in the protocol parser.
+3. **v5 concern enforcement wired in server handler**:
+   - Validates concern prefixes on data commands.
+   - Rejects any non-default concern with
+     `Response::Error("v5 only supports R=1, W=1")`.
+4. **End-to-end coverage**:
+   - `test_e2e_topology_returns_json_snapshot` verifies the topology contract.
+   - `test_e2e_v5_rejects_non_default_concerns` verifies v5 concern rejection.
+
 ### Goal
 Wire up server-side request routing and freeze the protocol surface for
 tunable consistency `(N, R, W)`. v5 only honours `(N=1, R=1, W=1)` end-to-end,
@@ -1073,7 +1093,8 @@ but the wire format is final.
    - On every command, look up the key's owners via `Ring::preference_list`.
    - **v5 enforcement**: if the local node is in the preference list →
      execute locally. If not → `Response::Error("forward to <node>; not the
-     owner")` with the owning node's address. (v6 enables transparent
+       owner")` with the owning node's address. (Implemented format in v5:
+       `forward to <node>@<addr>; not the owner`; v6 enables transparent
      forwarding.)
 2. **Protocol additions** (final wire format):
    - `WRITE_CONCERN W=<n>` and `READ_CONCERN R=<n>` optional tokens prepended
@@ -1092,7 +1113,7 @@ but the wire format is final.
    - `GET` may return a `Response::Array([Bulk(value, vector_clock), …])`
      when multiple concurrent versions exist. v5 always returns a singleton
      because there's only one writer.
-   - `PUT_WITH_VC <key> <value> <vector_clock>` lets the client write a
+   - `PUT_WITH_VC <collection> <key> <value> <vector_clock>` lets the client write a
      reconciled value that subsumes the siblings. Optional in v5; mandatory
      for CRDT round-trips in v6.
 5. **CRDT type sketch (v5 spec, v6 logic)**:
@@ -1108,9 +1129,68 @@ but the wire format is final.
   "v5 only supports R=1, W=1" error.
 - `TOPOLOGY` returns a valid JSON document parseable by the Rust + TS drivers.
 
+### Notes
+- `GET` sibling fan-out stays singleton in v5 (single-writer regime); the
+   protocol surface is now in place for v6 conflict responses.
+- CRDT merge semantics remain scheduled for v6 Phase 46.
+
 ---
 
 ## Phase 41: MVCC Read Snapshots (HLC-indexed)
+
+**Status: ✅ Done (v5 scope).**
+
+### Tranche 1 delivered
+1. Core API introduced:
+   - `Database::begin_read() -> ReadTx`
+   - `ReadTx::snapshot_hlc()`
+   - `ReadTx::{get, scan, query, query_range}`
+2. Shared wrapper API introduced:
+   - `SharedDatabase::begin_read() -> SharedReadTx`
+   - `SharedReadTx::snapshot_hlc()` + read helpers
+3. Tests added for snapshot API wiring in `src/database/mod.rs` and
+   `src/concurrency/shared.rs`.
+
+### Tranche 2 delivered
+1. Snapshot visibility now selects per-key versions by `snapshot_hlc`
+   in `src/database/mod.rs` using in-memory per-collection version
+   histories (`versions: HashMap<..., Vec<VersionedValue>>`).
+2. CRUD write path appends committed versions for insert/update/delete;
+   update/delete also seed a baseline version (`Hlc::ZERO`) when
+   operating on pre-history keys so older snapshots remain visible.
+3. `snapshot_get` / `snapshot_scan` / `snapshot_query` /
+   `snapshot_query_range` now route through version-history selection
+   (`latest version with hlc <= snapshot_hlc`) instead of only current
+   value reads.
+4. `SharedReadTx` reads now route through snapshot-aware database
+   methods (`snapshot_get`, `snapshot_scan`, `snapshot_query`,
+   `snapshot_query_range`).
+5. Snapshot visibility tests now cover hiding future updates and
+   preserving pre-snapshot visibility across deletes.
+
+### Tranche 3 delivered
+1. Reader watermark tracking is now wired for snapshot transactions:
+   active snapshot readers are accounted and the effective low watermark
+   tracks the oldest still-active reader.
+2. In-memory version GC now prunes historical versions while preserving
+   every version still needed by active readers.
+3. When no readers remain, in-memory version history collapses to the
+   latest version per key.
+4. `SharedReadTx` clone/drop now integrates with reader accounting so
+   reader lifetime tracking remains correct across cloned handles.
+
+### Tranche 4 delivered
+1. Wire protocol now exposes snapshot HLC to clients via
+   `SNAPSHOT_HLC` (with `SNAPSHOT-HLC` accepted by parser aliasing).
+2. TCP handler executes `SNAPSHOT_HLC` against the currently selected
+   database and returns the value as an integer response.
+3. End-to-end coverage validates client visibility and monotonicity of
+   returned snapshot HLC values.
+
+### Deferred to v6+
+- Persisted version chains/page-version storage (history is currently
+   in-memory only).
+- Lock-free immutable read path under concurrent writes.
 
 ### Goal
 Unblock reader/writer concurrency. Snapshots are indexed by `Hlc`, not LSN,
@@ -1145,8 +1225,49 @@ so they are comparable across nodes.
 ## Phase 42: Smart Client Drivers (Rust + TypeScript)
 
 ### Status
-**Deferred** out of the P1 stream. Picked up here once Phases 39, 40a–f, and
-41 land. Smart-client routing is a pre-requisite for the v5 release demo.
+**✅ Done (v5 scope)**. Tranches 1-2 are landed and v5-closing items are
+implemented: driver-side JWKS verification, TS CI lane, and TypeScript
+examples/README.
+
+### Tranche 1 delivered
+1. **Rust driver `grumpydb-client`**:
+    - `GrumpyClient::connect_cluster(seeds: &[&str], tls: bool)` added for
+       seed fallback bootstrap.
+    - Topology APIs landed: `refresh_topology()`, `topology()`,
+       `cached_topology()`.
+    - E2E coverage added for seed fallback and topology-cache bootstrap.
+2. **TypeScript driver `@grumpydb/client`**:
+    - `GrumpyClient.connectCluster({ seeds, ... })` added for seed fallback
+       bootstrap.
+    - Topology APIs landed: `refreshTopology()`, `topology()`.
+    - New exported cluster/topology types:
+       `ClusterConnectOptions`, `ClusterTopology`.
+
+### Tranche 2 delivered (next recommended tranche)
+1. **Automatic one-hop forward fallback (Rust + TypeScript)**:
+    - Both drivers now parse server hints in the form
+       `forward to <node>@<host>:<port>; not the owner` and perform a single
+       automatic retry against the forwarded target.
+    - On the forwarded connection, drivers replay the session (`TOKEN`, then
+       `USE`) before retrying the original request.
+    - The fallback is intentionally bounded to one hop in v5.
+2. **Forward-target parser hardening**:
+    - Rust driver adds a dedicated parser helper and unit tests for forward
+       target extraction in `grumpydb-client/src/connection.rs`.
+    - TypeScript driver implements the equivalent forward-target parser in
+       `drivers/typescript/src/connection.ts`.
+3. **v5 siblings API surface (placeholder semantics)**:
+    - Rust: `DatabaseHandle::get_with_siblings(...)` now exists and returns a
+       singleton sibling list with placeholder vector clock `"{}"`.
+    - TypeScript: `DatabaseHandle.getWithSiblings(...)` now exists and returns
+       the same singleton shape with placeholder vector clock `"{}"`.
+    - This preserves v6 API compatibility while v5 remains single-writer.
+
+### Deferred to v6+
+- Ring-aware request routing beyond one-hop server-forward hints.
+- Sibling reconciliation semantics (multi-sibling conflict handling and
+  reconcile-write flow); v5 API currently returns singleton placeholder
+  clocks (`"{}"`).
 
 ### Goal
 First-class drivers, ring-aware, sibling-aware, RS256-aware, published.
@@ -1184,6 +1305,8 @@ First-class drivers, ring-aware, sibling-aware, RS256-aware, published.
 
 ## Phase 43: v5.0.0 Release
 
+**Status: ✅ Repo scope done.**
+
 ### Goal
 Cut a versioned release that delivers the full plan.
 
@@ -1207,6 +1330,11 @@ Cut a versioned release that delivers the full plan.
    "v5 lays the foundation; v6 turns on multi-writer."
 6. **3-node demo** in `docker-compose.cluster.yml` showcasing the cluster
    handshake, single-writer replication, and the new `TOPOLOGY` command.
+
+### Delivered in-repo
+- Version bump aligned to `5.0.0` across workspace crates and TS driver.
+- Migration guide added at `docs/MIGRATING_4_to_5.md`.
+- 3-node demo added: `docker-compose.cluster.yml` + `docker/cluster/*`.
 
 ### Acceptance
 - `cargo install grumpydb-server` works on a clean machine and starts.

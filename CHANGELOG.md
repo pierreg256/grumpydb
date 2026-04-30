@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### v5 release prep — Phases 41/42/43 closure
+
+- Version alignment for v5 release:
+  - Workspace and Rust crates moved to `5.0.0`.
+  - TypeScript package `@grumpydb/client` moved to `5.0.0`.
+- Smart driver completion (v5 scope):
+  - Rust driver adds optional JWKS URL configuration and RS256 token
+    verification on login.
+  - TypeScript driver adds `jwksUrl` option with JWKS cache + RS256 token
+    verification and refresh-on-`kid`-miss behavior.
+  - TypeScript CI lane added (`npm ci`, `npm run lint`, `npm test`,
+    `npm run build`).
+  - TypeScript examples and dedicated README added under `drivers/typescript/`.
+- Release and migration artifacts:
+  - Added migration guide `docs/MIGRATING_4_to_5.md`.
+  - Added 3-node demo stack `docker-compose.cluster.yml` with cluster
+    config and pre-seeded identities under `docker/cluster/`.
+  - Added `docs/MVCC.md` documenting v5 snapshot-read behavior and deferred
+    MVCC items for v6+.
+
 ### v5 stream — Hardening (P0)
 
 This unreleased section tracks Stream H of the v5 plan
@@ -16,7 +36,7 @@ bump or crates.io publication yet.
 #### Phase 24 — CI / Clippy / Hygiene
 - Added `.github/workflows/ci.yml` with jobs `fmt`, `clippy`, `test`
   (matrix: stable + 1.85 MSRV), `docs`, `audit`.
-- README badges added: CI status, crates.io version, docs.rs, MIT license.
+- README badges added: CI status, crates.io version, docs.rs, dual license (MIT OR Apache-2.0).
 - Fixed three clippy issues:
   - `grumpy-repl/src/json_parser.rs` — replaced PI approximation literal in a test.
   - `grumpydb-protocol/src/lib.rs` — converted constant assertions to `const { assert!(...) }` blocks.
@@ -423,11 +443,117 @@ foundations needed by the downstream distributed project.
   `docs/IMPLEMENTATION_PLAN_V4.md` updated.
 - `cargo test --workspace` — **673 tests pass** (was 609 at end of Phase 40c).
 
+#### Added — Phase 40f: coordinator + tunable consistency protocol (v5 lock)
+- New server module `grumpydb-server/src/coordinator.rs`:
+  static ring view from local identity + configured peers, v5 owner check
+  (`N=1`) and explicit forward hints
+  (`forward to <node>@<addr>; not the owner`).
+- Protocol surface extended in `grumpydb-protocol`:
+  - `READ_CONCERN R=<n>` / `WRITE_CONCERN W=<n>` preamble wrapper,
+  - `TOPOLOGY` command,
+  - `PUT_WITH_VC <collection> <key> <value> <vector_clock>` command,
+  - `ELECT-WRITER` parser wiring.
+- Server-side v5 concern enforcement in TCP handler:
+  non-default concerns now return
+  `Response::Error("v5 only supports R=1, W=1")`.
+- New e2e tests in `tests/server_e2e.rs`:
+  `test_e2e_topology_returns_json_snapshot` and
+  `test_e2e_v5_rejects_non_default_concerns`.
+
+#### Added — Phase 42 (tranche 1): smart driver bootstrap + topology cache APIs
+- **Rust driver (`grumpydb-client`)**:
+  - Added `GrumpyClient::connect_cluster(seeds: &[&str], tls: bool)` for
+    multi-seed bootstrap with fallback.
+  - Added topology cache APIs: `refresh_topology()`, `topology()`,
+    `cached_topology()`.
+  - Added e2e coverage in `tests/server_e2e.rs`:
+    `test_e2e_rust_client_connect_cluster_seed_fallback` and
+    `test_e2e_rust_client_topology_cache_after_login`.
+- **TypeScript driver (`@grumpydb/client`)**:
+  - Added `GrumpyClient.connectCluster(options)` with seed fallback.
+  - Added topology cache APIs: `refreshTopology()`, `topology()`.
+  - Added exported cluster/topology types:
+    `ClusterConnectOptions`, `ClusterTopology`.
+
+#### Added — Phase 42 (tranche 2): one-hop forward fallback + v5 sibling API surface
+- **Rust driver (`grumpydb-client`)**:
+  - `connection.rs` now supports automatic one-hop forward fallback when the
+    server returns `-ERR forward to <node>@<host>:<port>; not the owner`.
+  - Forwarding replays session context on the new connection (`TOKEN`, then
+    `USE`) before retrying the original request.
+  - Added a forward-target parser helper plus unit tests for extraction
+    behavior.
+  - `DatabaseHandle::get_with_siblings` added in `lib.rs`; in v5 it returns a
+    singleton sibling with placeholder vector clock `"{}"`.
+- **TypeScript driver (`@grumpydb/client`)**:
+  - `drivers/typescript/src/connection.ts` now mirrors the same one-hop
+    forward fallback and session replay behavior.
+  - Added equivalent forward-target parsing logic.
+  - `DatabaseHandle.getWithSiblings` added in
+    `drivers/typescript/src/database.ts`; in v5 it returns a singleton sibling
+    with placeholder vector clock `"{}"`.
+- **Repository hygiene**:
+  - Root `.gitignore` now ignores TypeScript driver artifacts under
+    `drivers/typescript/` (`node_modules`, `dist`, `.npm`, `.vite`,
+    `coverage`, `*.tsbuildinfo`).
+  - Rust client doctest runtime annotation updated to
+    `#[tokio::main(flavor = "current_thread")]`.
+
 #### Pending — remaining Stream D phases
-- Phase 40f: coordinator + tunable `(N, R, W)` protocol — not started.
-- Phase 41: MVCC reads (HLC-indexed) — not started.
-- Phase 42: smart drivers (Rust + TS, JWKS-aware) — not started.
+- Phase 41: MVCC reads (HLC-indexed) — in progress (tranches 1-4 landed).
+- Phase 42: smart drivers (Rust + TS, JWKS-aware) — in progress (tranches 1-2 landed; pending ring-aware routing beyond one hop, sibling reconciliation semantics, JWKS/RS256 verify, CI+publish, examples).
 - Phase 43: v5.0.0 release — not started.
+
+### v5 stream — MVCC reads (P3, Phase 41)
+
+#### Added — Phase 41 (tranche 1): snapshot read API scaffolding
+- New core API in `src/database/mod.rs`:
+  - `Database::begin_read() -> ReadTx`
+  - `ReadTx::snapshot_hlc()`
+  - `ReadTx::{get, scan, query, query_range}`
+- New shared API in `src/concurrency/shared.rs`:
+  - `SharedDatabase::begin_read() -> SharedReadTx`
+  - `SharedReadTx::snapshot_hlc()` and read helpers.
+- New crate exports in `src/lib.rs`: `ReadTx` and `SharedReadTx`.
+- Unit tests added for snapshot-hlc capture and read-path coverage.
+
+#### Added — Phase 41 (tranche 2): HLC-based snapshot visibility on in-memory version history
+- `src/database/mod.rs` now keeps per-collection per-key version history in
+  memory (`versions: HashMap<collection, HashMap<Uuid, Vec<VersionedValue>>>`).
+- Insert/update/delete append committed versions (`commit_hlc`) into that
+  history. Update/delete seed a baseline `Hlc::ZERO` version when mutating
+  pre-history keys so older snapshots remain visible.
+- `snapshot_get`, `snapshot_scan`, `snapshot_query`, and
+  `snapshot_query_range` now select visibility by snapshot HLC
+  (`latest version where hlc <= snapshot_hlc`).
+- `SharedReadTx` now routes read helpers through snapshot-aware database
+  methods (`snapshot_*`) instead of plain current-state reads.
+- New coverage in `src/database/mod.rs` includes:
+  `test_read_tx_snapshot_hides_future_update` and
+  `test_snapshot_delete_preserves_pre_snapshot_visibility`.
+
+#### Added — Phase 41 (tranche 3): reader watermark accounting + in-memory version GC
+- Snapshot reader watermark tracking is now integrated with Phase 41
+  snapshot transactions so the active-reader floor follows the oldest
+  still-live snapshot.
+- In-memory version GC now keeps historical versions required by active
+  readers and prunes the rest.
+- When there are no active snapshot readers, version history collapses
+  to the latest version per key.
+- `SharedReadTx` clone/drop now participates in reader accounting so
+  cloned read handles maintain correct lifecycle tracking.
+
+#### Added — Phase 41 (tranche 4): protocol exposure of snapshot HLC
+- Wire protocol surface now includes `SNAPSHOT_HLC` (parser also accepts
+  `SNAPSHOT-HLC`) mapped to `Command::SnapshotHlc`.
+- Server execution path now returns the current selected database snapshot
+  HLC as `Response::Integer(...)`, so clients can pin follow-up reads.
+- New e2e coverage in `tests/server_e2e.rs`:
+  `test_e2e_snapshot_hlc_exposed_to_clients`.
+
+#### Pending for full Phase 41
+- Persisted version chains/page-version storage (history is in-memory only in v5).
+- Lock-free immutable read path under concurrent writes.
 
 ## [4.1.0] - 2026-04-28
 

@@ -19,3 +19,11 @@ Thumbs.db
 # Test Data Files
 .grumpysh_data/
 .grumpy_repl_data/
+
+# TypeScript driver artifacts
+drivers/typescript/node_modules/
+drivers/typescript/dist/
+drivers/typescript/.npm/
+drivers/typescript/.vite/
+drivers/typescript/coverage/
+drivers/typescript/*.tsbuildinfo

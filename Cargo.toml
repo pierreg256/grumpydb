@@ -7,10 +7,10 @@ exclude = ["fuzz"]
 # `version` field here is the canonical workspace version: bumping it
 # here cascades to every member that uses `version.workspace = true`.
 [workspace.package]
-version = "4.1.0"
+version = "5.0.0"
 edition = "2024"
 rust-version = "1.88"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/pierreg256/grumpydb"
 homepage = "https://github.com/pierreg256/grumpydb"
 

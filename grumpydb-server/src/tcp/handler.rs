@@ -15,6 +15,7 @@ use grumpydb_protocol::{Command, MAX_LINE_LENGTH, PROTOCOL_VERSION, Response, pa
 
 use crate::auth::role::{ResourceScope, RoleAssignment, RoleName};
 use crate::auth::store::AuthStore;
+use crate::coordinator::Coordinator;
 use crate::limits::Limits;
 use crate::session::SessionContext;
 
@@ -25,6 +26,7 @@ pub async fn handle_connection<S>(
     auth_store: Arc<parking_lot::RwLock<AuthStore>>,
     shared_server: SharedServer,
     limits: Arc<Limits>,
+    coordinator: Arc<Coordinator>,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
@@ -92,7 +94,7 @@ where
         };
 
         consecutive_errors = 0;
-        let cmd_name = command_name(&command);
+        let cmd_name = command_name(base_command(&command));
         let cmd_span = tracing::info_span!(
             "command",
             cmd = cmd_name,
@@ -100,6 +102,12 @@ where
             tenant = session.tenant().ok().unwrap_or("-"),
         );
         let _enter = cmd_span.enter();
+
+        if let Err(e) = validate_consistency_command(&command, coordinator.as_ref()) {
+            tracing::warn!(error = %e, "consistency validation failed");
+            write_resp(&mut writer, &Response::Error(e)).await?;
+            continue;
+        }
 
         // QUIT
         if matches!(command, Command::Quit) {
@@ -153,10 +161,11 @@ where
         // must not tear down the entire server. Surface as Corruption error.)
         let started = std::time::Instant::now();
         let response = AssertUnwindSafe(execute_command(
-            &command,
+            base_command(&command),
             &mut session,
             &auth_store,
             &shared_server,
+            coordinator.as_ref(),
         ))
         .catch_unwind()
         .await
@@ -216,10 +225,13 @@ where
 /// Returns a stable string identifier for a command (for tracing fields).
 fn command_name(cmd: &Command) -> &'static str {
     match cmd {
+        Command::WithConsistency { command, .. } => command_name(command),
         Command::Login { .. } => "LOGIN",
         Command::Token(_) => "TOKEN",
         Command::Refresh(_) => "REFRESH",
         Command::WhoAmI => "WHOAMI",
+        Command::Topology => "TOPOLOGY",
+        Command::SnapshotHlc => "SNAPSHOT_HLC",
         Command::Use(_) => "USE",
         Command::Ping => "PING",
         Command::Quit => "QUIT",
@@ -233,6 +245,7 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::Get { .. } => "GET",
         Command::Update { .. } => "UPDATE",
         Command::Delete { .. } => "DELETE",
+        Command::PutWithVc { .. } => "PUT_WITH_VC",
         Command::Scan { .. } => "SCAN",
         Command::CreateIndex { .. } => "CREATE_INDEX",
         Command::DropIndex { .. } => "DROP_INDEX",
@@ -265,6 +278,53 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+fn base_command(command: &Command) -> &Command {
+    match command {
+        Command::WithConsistency { command, .. } => command,
+        other => other,
+    }
+}
+
+fn consistency_values(command: &Command) -> (Option<u16>, Option<u16>) {
+    match command {
+        Command::WithConsistency {
+            read_concern,
+            write_concern,
+            ..
+        } => (*read_concern, *write_concern),
+        _ => (None, None),
+    }
+}
+
+fn supports_consistency(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Insert { .. }
+            | Command::Get { .. }
+            | Command::Update { .. }
+            | Command::Delete { .. }
+            | Command::PutWithVc { .. }
+            | Command::Scan { .. }
+            | Command::Query { .. }
+            | Command::QueryRange { .. }
+            | Command::Count(_)
+    )
+}
+
+fn validate_consistency_command(command: &Command, coordinator: &Coordinator) -> Result<(), String> {
+    let (r, w) = consistency_values(command);
+    if r.is_none() && w.is_none() {
+        return Ok(());
+    }
+
+    let base = base_command(command);
+    if !supports_consistency(base) {
+        return Err("consistency concerns are only supported for data commands".into());
+    }
+
+    coordinator.validate_concerns(r, w)
+}
+
 async fn write_resp<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     response: &Response,
@@ -278,8 +338,13 @@ async fn execute_command(
     session: &mut SessionContext,
     auth_store: &Arc<parking_lot::RwLock<AuthStore>>,
     shared_server: &SharedServer,
+    coordinator: &Coordinator,
 ) -> Response {
     match command {
+        Command::WithConsistency { .. } => {
+            Response::Error("internal error: consistency wrapper not unwrapped".into())
+        }
+
         // ── Auth ────────────────────────────────────────────────
         Command::Login {
             tenant,
@@ -354,6 +419,13 @@ async fn execute_command(
             }
             None => Response::Error("not authenticated".into()),
         },
+        Command::Topology => Response::Bulk(Some(coordinator.topology_json().to_string())),
+        Command::SnapshotHlc => with_db(session, shared_server, |db| {
+            let snapshot = db.begin_read().snapshot_hlc().0;
+            let value = i64::try_from(snapshot)
+                .map_err(|_| format!("snapshot HLC {snapshot} does not fit in i64"))?;
+            Ok(Response::Integer(value))
+        }),
 
         // ── Session ─────────────────────────────────────────────
         Command::Use(db_name) => {
@@ -424,12 +496,22 @@ async fn execute_command(
             key,
             value,
         } => with_db(session, shared_server, |db| {
+            if let Some(db_name) = session.current_db()
+                && let Err(e) = coordinator.enforce_local_owner(db_name, collection, key.as_bytes())
+            {
+                return Err(e);
+            }
             let uuid = parse_uuid(key)?;
             let val = parse_json_value(value)?;
             s(db.insert(collection, uuid, val))?;
             Ok(Response::Ok("OK".into()))
         }),
         Command::Get { collection, key } => with_db(session, shared_server, |db| {
+            if let Some(db_name) = session.current_db()
+                && let Err(e) = coordinator.enforce_local_owner(db_name, collection, key.as_bytes())
+            {
+                return Err(e);
+            }
             let uuid = parse_uuid(key)?;
             match s(db.get(collection, &uuid))? {
                 Some(val) => Ok(Response::Bulk(Some(value_to_json(&val)))),
@@ -441,14 +523,48 @@ async fn execute_command(
             key,
             value,
         } => with_db(session, shared_server, |db| {
+            if let Some(db_name) = session.current_db()
+                && let Err(e) = coordinator.enforce_local_owner(db_name, collection, key.as_bytes())
+            {
+                return Err(e);
+            }
             let uuid = parse_uuid(key)?;
             let val = parse_json_value(value)?;
             s(db.update(collection, &uuid, val))?;
             Ok(Response::Ok("OK".into()))
         }),
         Command::Delete { collection, key } => with_db(session, shared_server, |db| {
+            if let Some(db_name) = session.current_db()
+                && let Err(e) = coordinator.enforce_local_owner(db_name, collection, key.as_bytes())
+            {
+                return Err(e);
+            }
             let uuid = parse_uuid(key)?;
             s(db.delete(collection, &uuid))?;
+            Ok(Response::Ok("OK".into()))
+        }),
+        Command::PutWithVc {
+            collection,
+            key,
+            value,
+            vector_clock,
+        } => with_db(session, shared_server, |db| {
+            if let Some(db_name) = session.current_db()
+                && let Err(e) = coordinator.enforce_local_owner(db_name, collection, key.as_bytes())
+            {
+                return Err(e);
+            }
+            // v5 stores the reconciled value through the regular write path;
+            // the vector clock is accepted at protocol level for v6 interop.
+            let _: serde_json::Value = serde_json::from_str(vector_clock)
+                .map_err(|e| format!("invalid vector_clock JSON: {e}"))?;
+            let uuid = parse_uuid(key)?;
+            let val = parse_json_value(value)?;
+            if s(db.get(collection, &uuid))?.is_some() {
+                s(db.update(collection, &uuid, val))?;
+            } else {
+                s(db.insert(collection, uuid, val))?;
+            }
             Ok(Response::Ok("OK".into()))
         }),
         Command::Scan {

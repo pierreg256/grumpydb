@@ -51,8 +51,8 @@ pub mod wal;
 // `GrumpyDb`; prefer `SharedDatabase` (multi-collection) for new code.
 #[allow(deprecated)]
 pub use concurrency::lock_manager::SharedDb;
-pub use concurrency::shared::{SharedDatabase, SharedServer};
-pub use database::Database;
+pub use concurrency::shared::{SharedDatabase, SharedReadTx, SharedServer};
+pub use database::{Database, ReadTx};
 pub use document::value::Value;
 pub use engine::CompactResult;
 // `GrumpyDb` is deprecated in v5 and removed in v6 — kept here for the

@@ -7,6 +7,18 @@
 /// A parsed command from the client.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    // ── Consistency wrappers (Phase 40f) ───────────────────────────
+    /// Wraps another command with optional read/write concerns.
+    ///
+    /// In v5 servers, only `R=1` and `W=1` are accepted. The wrapper is
+    /// preserved at the protocol layer so v6 can honor higher values without
+    /// changing wire grammar.
+    WithConsistency {
+        read_concern: Option<u16>,
+        write_concern: Option<u16>,
+        command: Box<Command>,
+    },
+
     // ── Authentication ──────────────────────────────────────────────
     /// Authenticate with tenant, username, and password.
     Login {
@@ -20,6 +32,10 @@ pub enum Command {
     Refresh(String),
     /// Display current session info.
     WhoAmI,
+    /// Return cluster topology snapshot as JSON.
+    Topology,
+    /// Return the current database snapshot HLC so clients can pin reads.
+    SnapshotHlc,
 
     // ── Session ─────────────────────────────────────────────────────
     /// Select the active database.
@@ -62,6 +78,16 @@ pub enum Command {
     },
     /// Delete a document by key.
     Delete { collection: String, key: String },
+    /// Insert/update a reconciled value using an explicit vector clock.
+    ///
+    /// v5 stores the value through the regular write path and validates the
+    /// vector-clock payload syntactically at the protocol boundary.
+    PutWithVc {
+        collection: String,
+        key: String,
+        value: String,
+        vector_clock: String,
+    },
     /// Scan documents in a key range.
     Scan {
         collection: String,
@@ -181,6 +207,8 @@ impl Command {
     /// Returns the action type required by this command.
     pub fn required_action(&self) -> Action {
         match self {
+            Command::WithConsistency { command, .. } => command.required_action(),
+
             // Read
             Command::Get { .. }
             | Command::Scan { .. }
@@ -189,7 +217,10 @@ impl Command {
             | Command::Count(_) => Action::Read,
 
             // Write
-            Command::Insert { .. } | Command::Update { .. } | Command::Delete { .. } => {
+            Command::Insert { .. }
+            | Command::Update { .. }
+            | Command::Delete { .. }
+            | Command::PutWithVc { .. } => {
                 Action::Write
             }
 
@@ -228,6 +259,8 @@ impl Command {
             | Command::Token(_)
             | Command::Refresh(_)
             | Command::WhoAmI
+            | Command::Topology
+            | Command::SnapshotHlc
             | Command::Use(_)
             | Command::Ping
             | Command::Quit => Action::Session,
@@ -240,6 +273,8 @@ impl Command {
     /// that operate within the current database context.
     pub fn target_resource(&self, current_db: Option<&str>) -> Resource {
         match self {
+            Command::WithConsistency { command, .. } => command.target_resource(current_db),
+
             // Server-level
             Command::CreateTenant(_) | Command::DropTenant(_) | Command::ListTenants => {
                 Resource::Server
@@ -257,6 +292,7 @@ impl Command {
             | Command::Get { collection, .. }
             | Command::Update { collection, .. }
             | Command::Delete { collection, .. }
+            | Command::PutWithVc { collection, .. }
             | Command::Scan { collection, .. }
             | Command::Query { collection, .. }
             | Command::QueryRange { collection, .. }
@@ -272,6 +308,7 @@ impl Command {
             Command::CreateCollection(_)
             | Command::DropCollection(_)
             | Command::ListCollections
+            | Command::SnapshotHlc
             | Command::Flush => {
                 let db = current_db.unwrap_or("").to_string();
                 Resource::Database(db)
@@ -292,6 +329,7 @@ impl Command {
             | Command::Token(_)
             | Command::Refresh(_)
             | Command::WhoAmI
+            | Command::Topology
             | Command::Use(_)
             | Command::Ping
             | Command::Quit => Resource::None,
@@ -307,6 +345,9 @@ impl Command {
     /// going through full `LOGIN` again.
     pub fn is_pre_auth(&self) -> bool {
         matches!(
+            self,
+            Command::WithConsistency { command, .. } if command.is_pre_auth()
+        ) || matches!(
             self,
             Command::Login { .. }
                 | Command::Ping
@@ -341,6 +382,14 @@ mod tests {
             key: "abc".into(),
         };
         assert_eq!(delete.required_action(), Action::Write);
+
+        let put_with_vc = Command::PutWithVc {
+            collection: "users".into(),
+            key: "abc".into(),
+            value: "{}".into(),
+            vector_clock: "{}".into(),
+        };
+        assert_eq!(put_with_vc.required_action(), Action::Write);
     }
 
     #[test]
@@ -372,6 +421,8 @@ mod tests {
         assert_eq!(Command::Ping.required_action(), Action::Session);
         assert_eq!(Command::Quit.required_action(), Action::Session);
         assert_eq!(Command::Use("db".into()).required_action(), Action::Session);
+        assert_eq!(Command::Topology.required_action(), Action::Session);
+        assert_eq!(Command::SnapshotHlc.required_action(), Action::Session);
         assert_eq!(
             Command::Login {
                 tenant: "t".into(),
@@ -403,6 +454,19 @@ mod tests {
 
         let create_tenant = Command::CreateTenant("acme".into());
         assert_eq!(create_tenant.target_resource(None), Resource::Server);
+
+        let with_consistency = Command::WithConsistency {
+            read_concern: Some(1),
+            write_concern: None,
+            command: Box::new(Command::Get {
+                collection: "users".into(),
+                key: "k".into(),
+            }),
+        };
+        assert_eq!(
+            with_consistency.target_resource(Some("mydb")),
+            Resource::Collection("mydb".into(), "users".into())
+        );
     }
 
     #[test]
@@ -431,5 +495,12 @@ mod tests {
 
         assert!(!Command::ListDatabases.is_pre_auth());
         assert!(!Command::WhoAmI.is_pre_auth());
+
+        let pre_auth_with_concern = Command::WithConsistency {
+            read_concern: Some(1),
+            write_concern: None,
+            command: Box::new(Command::Ping),
+        };
+        assert!(pre_auth_with_concern.is_pre_auth());
     }
 }

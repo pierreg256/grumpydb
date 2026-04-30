@@ -14,6 +14,7 @@ use grumpydb::SharedServer;
 use crate::auth::store::AuthStore;
 use crate::cluster::NodeIdentity;
 use crate::config::ServerConfig;
+use crate::coordinator::Coordinator;
 use crate::http::HttpState;
 use crate::limits::{AcquireConnError, Limits, LimitsConfig};
 use crate::tcp::handler::handle_connection;
@@ -45,6 +46,12 @@ pub async fn listen(
     } else {
         None
     };
+
+    let coordinator = Arc::new(Coordinator::from_config(
+        identity.as_ref(),
+        &config.cluster,
+        &config.server.bind,
+    ));
 
     tracing::info!(
         bind = %config.server.bind,
@@ -98,6 +105,7 @@ pub async fn listen(
                 let server = shared_server.clone();
                 let acceptor = tls_acceptor.clone();
                 let limits_for_conn = limits.clone();
+                let coordinator_for_conn = coordinator.clone();
                 let peer_ip = addr.ip();
 
                 let span = info_span!(
@@ -113,7 +121,15 @@ pub async fn listen(
                     let result = if let Some(acceptor) = acceptor {
                         match acceptor.accept(tcp_stream).await {
                             Ok(tls_stream) => {
-                                handle_connection(tls_stream, addr, auth, server, limits_for_conn.clone()).await
+                                handle_connection(
+                                    tls_stream,
+                                    addr,
+                                    auth,
+                                    server,
+                                    limits_for_conn.clone(),
+                                    coordinator_for_conn.clone(),
+                                )
+                                .await
                             }
                             Err(e) => {
                                 tracing::warn!(error = %e, "TLS handshake failed");
@@ -121,7 +137,15 @@ pub async fn listen(
                             }
                         }
                     } else {
-                        handle_connection(tcp_stream, addr, auth, server, limits_for_conn.clone()).await
+                        handle_connection(
+                            tcp_stream,
+                            addr,
+                            auth,
+                            server,
+                            limits_for_conn.clone(),
+                            coordinator_for_conn.clone(),
+                        )
+                        .await
                     };
 
                     if let Err(e) = result {

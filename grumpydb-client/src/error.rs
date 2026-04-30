@@ -15,6 +15,10 @@ pub enum ClientError {
     #[error("protocol error: {0}")]
     Protocol(String),
 
+    /// JWT verification / JWKS errors.
+    #[error("jwt verification error: {0}")]
+    Jwt(String),
+
     /// Server returned an error.
     #[error("server error: {0}")]
     Server(String),

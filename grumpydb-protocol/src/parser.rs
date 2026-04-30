@@ -34,11 +34,16 @@ pub fn parse_command(line: &str) -> Result<Command, ProtocolError> {
         return Err(ProtocolError::Empty);
     }
 
+    // Optional consistency preamble (Phase 40f):
+    //   READ_CONCERN R=<n> WRITE_CONCERN W=<n> <COMMAND...>
+    //   WRITE_CONCERN W=<n> READ_CONCERN R=<n> <COMMAND...>
+    let (trimmed, read_concern, write_concern) = parse_consistency_prefix(trimmed)?;
+
     // Split into verb + rest
     let (verb, rest) = split_first_word(trimmed);
     let verb_upper = verb.to_ascii_uppercase();
 
-    match verb_upper.as_str() {
+    let base = match verb_upper.as_str() {
         // ── Authentication ──────────────────────────────────────────
         "LOGIN" => parse_login(rest),
         "TOKEN" => {
@@ -50,6 +55,8 @@ pub fn parse_command(line: &str) -> Result<Command, ProtocolError> {
             Ok(Command::Refresh(token.to_string()))
         }
         "WHOAMI" => Ok(Command::WhoAmI),
+        "TOPOLOGY" => Ok(Command::Topology),
+        "SNAPSHOT_HLC" | "SNAPSHOT-HLC" => Ok(Command::SnapshotHlc),
 
         // ── Session ─────────────────────────────────────────────────
         "USE" => {
@@ -65,12 +72,14 @@ pub fn parse_command(line: &str) -> Result<Command, ProtocolError> {
         "LIST" => parse_list(rest),
         "GRANT" => parse_grant(rest),
         "REVOKE" => parse_revoke(rest),
+        "ELECT-WRITER" | "ELECT_WRITER" => parse_elect_writer(rest),
 
         // ── CRUD ────────────────────────────────────────────────────
         "INSERT" => parse_insert(rest),
         "GET" => parse_get(rest),
         "UPDATE" => parse_update(rest),
         "DELETE" => parse_delete(rest),
+        "PUT_WITH_VC" => parse_put_with_vc(rest),
         "SCAN" => parse_scan(rest),
 
         // ── Index queries ───────────────────────────────────────────
@@ -89,6 +98,16 @@ pub fn parse_command(line: &str) -> Result<Command, ProtocolError> {
         }
 
         _ => Err(ProtocolError::UnknownCommand(verb.to_string())),
+    }?;
+
+    if read_concern.is_some() || write_concern.is_some() {
+        Ok(Command::WithConsistency {
+            read_concern,
+            write_concern,
+            command: Box::new(base),
+        })
+    } else {
+        Ok(base)
     }
 }
 
@@ -102,6 +121,14 @@ fn split_first_word(s: &str) -> (&str, &str) {
     }
 }
 
+/// Split on the last whitespace. Returns (left, word).
+fn split_last_word(s: &str) -> (&str, &str) {
+    match s.rfind(char::is_whitespace) {
+        Some(pos) => (s[..pos].trim_end(), s[pos..].trim_start()),
+        None => ("", s),
+    }
+}
+
 /// Require a non-empty argument.
 fn require_arg<'a>(rest: &'a str, command: &str, arg_name: &str) -> Result<&'a str, ProtocolError> {
     if rest.is_empty() {
@@ -111,6 +138,64 @@ fn require_arg<'a>(rest: &'a str, command: &str, arg_name: &str) -> Result<&'a s
     } else {
         Ok(rest)
     }
+}
+
+fn parse_concern_token(token: &str, expected: char, keyword: &str) -> Result<u16, ProtocolError> {
+    let (k, v) = token
+        .split_once('=')
+        .ok_or_else(|| ProtocolError::MissingArgument(format!("{keyword} requires {expected}=<n>")))?;
+    if !k.eq_ignore_ascii_case(&expected.to_string()) {
+        return Err(ProtocolError::MissingArgument(format!(
+            "{keyword} requires {expected}=<n>"
+        )));
+    }
+    v.parse::<u16>().map_err(|_| {
+        ProtocolError::MissingArgument(format!("{keyword} requires {expected}=<n>"))
+    })
+}
+
+fn parse_consistency_prefix(mut input: &str) -> Result<(&str, Option<u16>, Option<u16>), ProtocolError> {
+    let mut read_concern = None;
+    let mut write_concern = None;
+
+    for _ in 0..2 {
+        let (word, rest) = split_first_word(input);
+        if word.eq_ignore_ascii_case("READ_CONCERN") {
+            if read_concern.is_some() {
+                return Err(ProtocolError::MissingArgument(
+                    "READ_CONCERN specified more than once".into(),
+                ));
+            }
+            let (token, remainder) = split_first_word(rest);
+            if token.is_empty() {
+                return Err(ProtocolError::MissingArgument(
+                    "READ_CONCERN requires R=<n>".into(),
+                ));
+            }
+            read_concern = Some(parse_concern_token(token, 'R', "READ_CONCERN")?);
+            input = remainder;
+            continue;
+        }
+        if word.eq_ignore_ascii_case("WRITE_CONCERN") {
+            if write_concern.is_some() {
+                return Err(ProtocolError::MissingArgument(
+                    "WRITE_CONCERN specified more than once".into(),
+                ));
+            }
+            let (token, remainder) = split_first_word(rest);
+            if token.is_empty() {
+                return Err(ProtocolError::MissingArgument(
+                    "WRITE_CONCERN requires W=<n>".into(),
+                ));
+            }
+            write_concern = Some(parse_concern_token(token, 'W', "WRITE_CONCERN")?);
+            input = remainder;
+            continue;
+        }
+        break;
+    }
+
+    Ok((input, read_concern, write_concern))
 }
 
 // ── LOGIN ───────────────────────────────────────────────────────────────
@@ -354,6 +439,64 @@ fn parse_delete(rest: &str) -> Result<Command, ProtocolError> {
     })
 }
 
+fn parse_put_with_vc(rest: &str) -> Result<Command, ProtocolError> {
+    let (collection, rest) = split_first_word(rest);
+    if collection.is_empty() {
+        return Err(ProtocolError::MissingArgument(
+            "PUT_WITH_VC requires <collection> <uuid> <json> <vector_clock>".into(),
+        ));
+    }
+    let (key, rest) = split_first_word(rest);
+    if key.is_empty() {
+        return Err(ProtocolError::MissingArgument(
+            "PUT_WITH_VC requires <uuid>".into(),
+        ));
+    }
+    if rest.is_empty() {
+        return Err(ProtocolError::MissingArgument(
+            "PUT_WITH_VC requires <json> <vector_clock>".into(),
+        ));
+    }
+    let (value, vector_clock) = split_last_word(rest);
+    if value.is_empty() || vector_clock.is_empty() {
+        return Err(ProtocolError::MissingArgument(
+            "PUT_WITH_VC requires <json> <vector_clock>".into(),
+        ));
+    }
+    Ok(Command::PutWithVc {
+        collection: collection.to_string(),
+        key: key.to_string(),
+        value: value.to_string(),
+        vector_clock: vector_clock.to_string(),
+    })
+}
+
+fn parse_elect_writer(rest: &str) -> Result<Command, ProtocolError> {
+    let (node_id, rest) = split_first_word(rest);
+    if node_id.is_empty() {
+        return Err(ProtocolError::MissingArgument(
+            "ELECT-WRITER requires <node_id> <database> [collection]".into(),
+        ));
+    }
+    let (database, rest) = split_first_word(rest);
+    if database.is_empty() {
+        return Err(ProtocolError::MissingArgument(
+            "ELECT-WRITER requires <database>".into(),
+        ));
+    }
+    let collection = if rest.is_empty() {
+        None
+    } else {
+        let (coll, _) = split_first_word(rest);
+        Some(coll.to_string())
+    };
+    Ok(Command::ElectWriter {
+        node_id: node_id.to_string(),
+        database: database.to_string(),
+        collection,
+    })
+}
+
 fn parse_scan(rest: &str) -> Result<Command, ProtocolError> {
     let (collection, rest) = split_first_word(rest);
     if collection.is_empty() {
@@ -594,6 +737,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_parse_topology() {
+        assert_eq!(parse_command("TOPOLOGY\r\n").unwrap(), Command::Topology);
+    }
+
+    #[test]
+    fn test_parse_snapshot_hlc() {
+        assert_eq!(
+            parse_command("SNAPSHOT_HLC\r\n").unwrap(),
+            Command::SnapshotHlc
+        );
+        assert_eq!(
+            parse_command("snapshot-hlc\r\n").unwrap(),
+            Command::SnapshotHlc
+        );
+    }
+
+    #[test]
+    fn test_parse_consistency_prefixes() {
+        assert_eq!(
+            parse_command("READ_CONCERN R=1 WRITE_CONCERN W=1 GET users abc\r\n").unwrap(),
+            Command::WithConsistency {
+                read_concern: Some(1),
+                write_concern: Some(1),
+                command: Box::new(Command::Get {
+                    collection: "users".into(),
+                    key: "abc".into(),
+                }),
+            }
+        );
+
+        assert_eq!(
+            parse_command("WRITE_CONCERN W=1 PING\r\n").unwrap(),
+            Command::WithConsistency {
+                read_concern: None,
+                write_concern: Some(1),
+                command: Box::new(Command::Ping),
+            }
+        );
+    }
+
     // ── CRUD commands ───────────────────────────────────────────────
 
     #[test]
@@ -653,6 +837,20 @@ mod tests {
             Command::Delete {
                 collection: "users".into(),
                 key: "abc123".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_put_with_vc() {
+        assert_eq!(
+            parse_command("PUT_WITH_VC users abc123 {\"name\":\"bob\"} {\"n1\":4}\r\n")
+                .unwrap(),
+            Command::PutWithVc {
+                collection: "users".into(),
+                key: "abc123".into(),
+                value: "{\"name\":\"bob\"}".into(),
+                vector_clock: "{\"n1\":4}".into(),
             }
         );
     }
@@ -892,6 +1090,18 @@ mod tests {
         assert_eq!(
             parse_command("LIST TENANTS\r\n").unwrap(),
             Command::ListTenants
+        );
+    }
+
+    #[test]
+    fn test_parse_elect_writer() {
+        assert_eq!(
+            parse_command("ELECT-WRITER node-1 mydb users\r\n").unwrap(),
+            Command::ElectWriter {
+                node_id: "node-1".into(),
+                database: "mydb".into(),
+                collection: Some("users".into()),
+            }
         );
     }
 

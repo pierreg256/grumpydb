@@ -17,6 +17,12 @@ default port 6390, configurable via `[cluster].listen_peer`) is reserved
 for inter-node traffic: handshake, WAL streaming (Phase 40e), and gossip
 (Phase 44).
 
+For a ready-to-run v5 demo topology, use:
+
+- `docker-compose.cluster.yml` (3-node demo stack)
+- `docker/cluster/node1.toml`, `docker/cluster/node2.toml`, `docker/cluster/node3.toml`
+- pre-seeded identities under `docker/cluster/data/node*/_cluster/node.json`
+
 ## Node identity
 
 Every node persists its identity at `<data_dir>/_cluster/node.json`:

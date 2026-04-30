@@ -7,7 +7,7 @@
 //! ```no_run
 //! use grumpydb_client::GrumpyClient;
 //!
-//! #[tokio::main]
+//! #[tokio::main(flavor = "current_thread")]
 //! async fn main() -> Result<(), grumpydb_client::ClientError> {
 //!     let mut client = GrumpyClient::connect("localhost", 6380, false).await?;
 //!     client.login("acme", "alice", "s3cr3t").await?;
@@ -16,20 +16,52 @@
 //! }
 //! ```
 
+
 mod connection;
 mod error;
+mod jwks;
 
 pub use error::ClientError;
 
 use connection::Connection;
 use grumpydb_protocol::Response;
+use jwks::JwksCache;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Topology peer entry returned by TOPOLOGY.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyPeer {
+    pub node_id: String,
+    pub addr: String,
+}
+
+/// Writer ownership hint returned by TOPOLOGY.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyWriter {
+    pub collection: String,
+    pub node_id: String,
+}
+
+/// Cluster topology payload returned by TOPOLOGY.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterTopology {
+    pub cluster_id: String,
+    pub local_node_id: String,
+    pub n: u64,
+    pub vnodes_per_node: u64,
+    pub peers: Vec<TopologyPeer>,
+    #[serde(default)]
+    pub writers: Vec<TopologyWriter>,
+}
 
 /// A GrumpyDB client connected to a server.
 pub struct GrumpyClient {
     conn: Connection,
     access_token: Option<String>,
     refresh_token: Option<String>,
+    topology_cache: Option<ClusterTopology>,
+    jwks_cache: JwksCache,
 }
 
 impl GrumpyClient {
@@ -40,7 +72,35 @@ impl GrumpyClient {
             conn,
             access_token: None,
             refresh_token: None,
+            topology_cache: None,
+            jwks_cache: JwksCache::default(),
         })
+    }
+
+    /// Connect to a cluster using one or more host:port seeds.
+    pub async fn connect_cluster(seeds: &[&str], tls: bool) -> Result<Self, ClientError> {
+        if seeds.is_empty() {
+            return Err(ClientError::Protocol(
+                "connect_cluster requires at least one seed".into(),
+            ));
+        }
+
+        let mut last_err = None;
+        for seed in seeds {
+            let Some((host, port)) = parse_seed(seed) else {
+                last_err = Some(format!("invalid seed '{seed}', expected host:port"));
+                continue;
+            };
+
+            match Self::connect(host, port, tls).await {
+                Ok(client) => return Ok(client),
+                Err(e) => last_err = Some(e.to_string()),
+            }
+        }
+
+        Err(ClientError::Connection(std::io::Error::other(
+            last_err.unwrap_or_else(|| "no reachable seed".to_string()),
+        )))
     }
 
     /// Authenticate with the server.
@@ -61,15 +121,31 @@ impl GrumpyClient {
                 if parts.len() > 1 {
                     self.refresh_token = Some(parts[1].to_string());
                 }
+
+                if self.jwks_cache.configured()
+                    && let Some(token) = self.access_token.clone()
+                {
+                    self.jwks_cache.verify_access_token(&token).await?;
+                }
+
                 // Set session token
                 if let Some(token) = &self.access_token {
                     self.conn.execute(&format!("TOKEN {token}")).await?;
                 }
+                let _ = self.refresh_topology().await;
                 Ok(())
             }
             Response::Error(msg) => Err(ClientError::Auth(msg)),
             _ => Err(ClientError::Protocol("unexpected LOGIN response".into())),
         }
+    }
+
+    /// Configure a JWKS endpoint used to verify RS256 access tokens.
+    ///
+    /// When configured, each successful `LOGIN` verifies the returned
+    /// access token signature and expiration against this JWKS.
+    pub fn set_jwks_url(&mut self, jwks_url: impl Into<String>) {
+        self.jwks_cache.set_url(jwks_url);
     }
 
     /// Select a database, returning a scoped handle.
@@ -110,6 +186,49 @@ impl GrumpyClient {
             Response::Ok(msg) => Ok(msg),
             Response::Error(msg) => Err(ClientError::Server(msg)),
             _ => Err(ClientError::Protocol("unexpected WHOAMI response".into())),
+        }
+    }
+
+    /// Fetch latest TOPOLOGY and refresh local cache.
+    pub async fn refresh_topology(&mut self) -> Result<ClusterTopology, ClientError> {
+        match self.conn.execute("TOPOLOGY").await? {
+            Response::Bulk(Some(json)) => {
+                let topo: ClusterTopology = serde_json::from_str(&json)
+                    .map_err(|e| ClientError::Protocol(format!("invalid TOPOLOGY JSON: {e}")))?;
+                self.topology_cache = Some(topo.clone());
+                Ok(topo)
+            }
+            Response::Error(msg) => Err(ClientError::Server(msg)),
+            _ => Err(ClientError::Protocol("unexpected TOPOLOGY response".into())),
+        }
+    }
+
+    /// Return topology from cache or server.
+    pub async fn topology(&mut self) -> Result<ClusterTopology, ClientError> {
+        if let Some(topo) = &self.topology_cache {
+            return Ok(topo.clone());
+        }
+        self.refresh_topology().await
+    }
+
+    /// Borrow cached topology when available.
+    pub fn cached_topology(&self) -> Option<&ClusterTopology> {
+        self.topology_cache.as_ref()
+    }
+
+    /// Return the current database snapshot HLC for read pinning.
+    ///
+    /// Requires an active database selected with `database(...)` / `USE`.
+    pub async fn snapshot_hlc(&mut self) -> Result<u64, ClientError> {
+        match self.conn.execute("SNAPSHOT_HLC").await? {
+            Response::Integer(n) if n >= 0 => Ok(n as u64),
+            Response::Integer(n) => Err(ClientError::Protocol(format!(
+                "negative SNAPSHOT_HLC response: {n}"
+            ))),
+            Response::Error(msg) => Err(ClientError::Server(msg)),
+            _ => Err(ClientError::Protocol(
+                "unexpected SNAPSHOT_HLC response".into(),
+            )),
         }
     }
 
@@ -175,6 +294,20 @@ impl DatabaseHandle<'_> {
             Response::Bulk(None) => Ok(None),
             Response::Error(msg) => Err(ClientError::Server(msg)),
             _ => Err(ClientError::Protocol("unexpected GET response".into())),
+        }
+    }
+
+    /// Get a document as siblings for app-level reconciliation.
+    ///
+    /// v5 returns at most one sibling (LWW), with an empty vector-clock token.
+    pub async fn get_with_siblings(
+        &mut self,
+        collection: &str,
+        key: &Uuid,
+    ) -> Result<Vec<(serde_json::Value, String)>, ClientError> {
+        match self.get(collection, key).await? {
+            Some(v) => Ok(vec![(v, "{}".to_string())]),
+            None => Ok(vec![]),
         }
     }
 
@@ -363,5 +496,33 @@ fn parse_kv_array(resp: Response) -> Result<Vec<(String, serde_json::Value)>, Cl
         }
         Response::Error(msg) => Err(ClientError::Server(msg)),
         _ => Err(ClientError::Protocol("expected array response".into())),
+    }
+}
+
+fn parse_seed(seed: &str) -> Option<(&str, u16)> {
+    let (host, port_str) = seed.rsplit_once(':')?;
+    let port = port_str.parse::<u16>().ok()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some((host, port))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_seed;
+
+    #[test]
+    fn test_parse_seed_valid() {
+        let parsed = parse_seed("127.0.0.1:6380").expect("seed should parse");
+        assert_eq!(parsed.0, "127.0.0.1");
+        assert_eq!(parsed.1, 6380);
+    }
+
+    #[test]
+    fn test_parse_seed_invalid() {
+        assert!(parse_seed("invalid").is_none());
+        assert!(parse_seed(":6380").is_none());
+        assert!(parse_seed("host:notaport").is_none());
     }
 }

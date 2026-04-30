@@ -8,6 +8,41 @@ export interface ConnectOptions {
   tenant: string;
   username: string;
   password: string;
+  jwksUrl?: string;
+}
+
+/** Cluster connect options (seed list instead of a single host/port). */
+export interface ClusterConnectOptions {
+  seeds: string[];
+  tls?: boolean;
+  rejectUnauthorized?: boolean;
+  ca?: string | Buffer;
+  tenant: string;
+  username: string;
+  password: string;
+  jwksUrl?: string;
+}
+
+/** Topology peer entry. */
+export interface TopologyPeer {
+  node_id: string;
+  addr: string;
+}
+
+/** Topology writer entry. */
+export interface TopologyWriter {
+  collection: string;
+  node_id: string;
+}
+
+/** Cluster topology payload returned by TOPOLOGY. */
+export interface ClusterTopology {
+  cluster_id: string;
+  local_node_id: string;
+  n: number;
+  vnodes_per_node: number;
+  peers: TopologyPeer[];
+  writers?: TopologyWriter[];
 }
 
 /** Session info returned by whoami(). */

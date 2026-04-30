@@ -8,7 +8,7 @@
 [![Fuzz](https://github.com/pierreg256/grumpydb/actions/workflows/fuzz.yml/badge.svg)](https://github.com/pierreg256/grumpydb/actions/workflows/fuzz.yml)
 [![crates.io](https://img.shields.io/crates/v/grumpydb.svg)](https://crates.io/crates/grumpydb)
 [![docs.rs](https://docs.rs/grumpydb/badge.svg)](https://docs.rs/grumpydb)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 
 **A document-oriented object database written in Rust.**
 
@@ -89,7 +89,7 @@ Add GrumpyDB to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-grumpydb = "4"
+grumpydb = "5"
 ```
 
 ### Single-collection (simple key-value)
@@ -289,6 +289,22 @@ LIST USERS @acme
 | `users:mydb@acme` | Collection in database in tenant |
 | `@acme` | Tenant scope (for GRANT/REVOKE) |
 
+### Consistency and topology protocol (Phase 40f)
+
+The TCP protocol now exposes coordinator and consistency-locking primitives:
+
+- `TOPOLOGY` returns a JSON cluster snapshot for smart clients.
+- `READ_CONCERN R=<n>` / `WRITE_CONCERN W=<n>` can prefix data commands.
+- `PUT_WITH_VC <collection> <uuid> <json> <vector_clock>` is accepted for
+  reconciled writes (vector clock validated as JSON).
+
+In v5, the server is intentionally locked to single-owner consistency
+(`N=1`, `R=1`, `W=1`):
+
+- Non-default concerns are rejected with `v5 only supports R=1, W=1`.
+- If a request targets a key owned by another node, the server returns
+  `forward to <node>@<addr>; not the owner`.
+
 ### RBAC roles
 
 | Role | Permissions |
@@ -339,6 +355,7 @@ corresponding hooks).
 use grumpydb_client::GrumpyClient;
 
 let mut client = GrumpyClient::connect("localhost", 6380, false).await?;
+client.set_jwks_url("http://localhost:6381/.well-known/jwks.json");
 client.login("acme", "alice", "s3cr3t").await?;
 
 let db = client.database("myapp").await?;
@@ -355,6 +372,7 @@ import { GrumpyClient } from '@grumpydb/client';
 const client = await GrumpyClient.connect({
   host: 'localhost', port: 6380, tls: false,
   tenant: 'acme', username: 'alice', password: 's3cr3t',
+  jwksUrl: 'http://localhost:6381/.well-known/jwks.json',
 });
 
 const db = client.database('myapp');
@@ -362,6 +380,9 @@ await db.insert('users', crypto.randomUUID(), { name: 'Bob' });
 const doc = await db.get('users', '<uuid>');
 await client.close();
 ```
+
+More TypeScript driver details and examples:
+`drivers/typescript/README.md`.
 
 ---
 
@@ -453,6 +474,12 @@ pre-configured to scrape it (see `docker/prometheus.yml`); Grafana
 ships with the Prometheus datasource provisioned (login `admin`/`admin`
 on first run).
 
+For v5 migration and clustering demo assets:
+
+- Migration guide: `docs/MIGRATING_4_to_5.md`
+- 3-node demo compose: `docker-compose.cluster.yml`
+- Demo node configs: `docker/cluster/node1.toml`, `docker/cluster/node2.toml`, `docker/cluster/node3.toml`
+
 ## Backup & Restore
 
 The `grumpydb-server` binary ships `snapshot` and `restore`
@@ -516,4 +543,9 @@ Full HTML reports land in `target/criterion/report/index.html` after running
 
 ## License
 
-MIT
+Licensed under either of:
+
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+
+at your option.

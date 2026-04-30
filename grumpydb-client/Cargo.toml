@@ -1,6 +1,6 @@
 [package]
 name = "grumpydb-client"
-version = "1.0.0"
+version = "5.0.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -11,10 +11,13 @@ keywords = ["database", "client", "driver", "grumpydb", "async"]
 categories = ["database", "network-programming"]
 
 [dependencies]
-grumpydb-protocol = { path = "../grumpydb-protocol", version = "1" }
+grumpydb-protocol = { path = "../grumpydb-protocol", version = "5" }
 tokio = { version = "1", features = ["net", "io-util", "rt", "macros"] }
 tokio-rustls = "0.26"
 rustls = "0.23"
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+jsonwebtoken = "9"

@@ -16,6 +16,9 @@ enum Stream {
 pub(crate) struct Connection {
     reader: BufReader<tokio::io::ReadHalf<Stream>>,
     writer: tokio::io::WriteHalf<Stream>,
+    tls: bool,
+    session_token: Option<String>,
+    current_db: Option<String>,
 }
 
 impl tokio::io::AsyncRead for Stream {
@@ -94,6 +97,9 @@ impl Connection {
         let mut conn = Self {
             reader: BufReader::new(reader),
             writer,
+            tls,
+            session_token: None,
+            current_db: None,
         };
 
         // Read server banner
@@ -106,6 +112,44 @@ impl Connection {
 
     /// Send a command and read the response.
     pub async fn execute(&mut self, cmd: &str) -> Result<Response, ClientError> {
+        self.execute_with_forward(cmd, true).await
+    }
+
+    async fn execute_with_forward(
+        &mut self,
+        cmd: &str,
+        allow_forward: bool,
+    ) -> Result<Response, ClientError> {
+        let resp = self.send_and_read(cmd).await?;
+        if allow_forward
+            && let Response::Error(msg) = &resp
+            && let Some((host, port)) = parse_forward_target(msg)
+        {
+            return self.forward_once(host, port, cmd).await;
+        }
+
+        Ok(resp)
+    }
+
+    async fn forward_once(
+        &self,
+        host: &str,
+        port: u16,
+        cmd: &str,
+    ) -> Result<Response, ClientError> {
+        let mut conn = Connection::connect(host, port, self.tls).await?;
+
+        if let Some(token) = &self.session_token {
+            let _ = conn.send_and_read(&format!("TOKEN {token}")).await;
+        }
+        if let Some(db) = &self.current_db {
+            let _ = conn.send_and_read(&format!("USE {db}")).await;
+        }
+
+        conn.send_and_read(cmd).await
+    }
+
+    async fn send_and_read(&mut self, cmd: &str) -> Result<Response, ClientError> {
         let line = if cmd.ends_with("\r\n") {
             cmd.to_string()
         } else {
@@ -115,7 +159,24 @@ impl Connection {
         self.writer.write_all(line.as_bytes()).await?;
         self.writer.flush().await?;
 
+        self.update_session_state(cmd);
+
         self.read_response().await
+    }
+
+    fn update_session_state(&mut self, cmd: &str) {
+        let trimmed = cmd.trim();
+        if let Some(token) = trimmed.strip_prefix("TOKEN ")
+            && !token.trim().is_empty()
+        {
+            self.session_token = Some(token.trim().to_string());
+            return;
+        }
+        if let Some(db) = trimmed.strip_prefix("USE ")
+            && !db.trim().is_empty()
+        {
+            self.current_db = Some(db.trim().to_string());
+        }
     }
 
     fn read_response(
@@ -180,6 +241,16 @@ impl Connection {
     }
 }
 
+fn parse_forward_target(msg: &str) -> Option<(&str, u16)> {
+    // Expected server message shape:
+    // "forward to <node_id>@<host:port>; not the owner"
+    let after_at = msg.split_once('@')?.1;
+    let addr = after_at.split_once(';')?.0.trim();
+    let (host, port_str) = addr.rsplit_once(':')?;
+    let port = port_str.parse::<u16>().ok()?;
+    Some((host, port))
+}
+
 /// Accept any TLS certificate (for development with self-signed certs).
 #[derive(Debug)]
 struct NoCertVerifier;
@@ -221,5 +292,24 @@ impl rustls::client::danger::ServerCertVerifier for NoCertVerifier {
             rustls::SignatureScheme::ED25519,
             rustls::SignatureScheme::RSA_PSS_SHA256,
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_forward_target;
+
+    #[test]
+    fn test_parse_forward_target_valid() {
+        let msg = "forward to node-a@127.0.0.1:6380; not the owner";
+        let parsed = parse_forward_target(msg).unwrap();
+        assert_eq!(parsed.0, "127.0.0.1");
+        assert_eq!(parsed.1, 6380);
+    }
+
+    #[test]
+    fn test_parse_forward_target_invalid() {
+        assert!(parse_forward_target("plain error").is_none());
+        assert!(parse_forward_target("forward to node@badport; not the owner").is_none());
     }
 }

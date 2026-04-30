@@ -11,6 +11,11 @@ export class Connection {
   private rl: readline.Interface;
   private lineQueue: string[] = [];
   private lineResolve: ((line: string) => void) | null = null;
+  private useTls = false;
+  private rejectUnauthorized = false;
+  private ca?: string | Buffer;
+  private sessionToken: string | null = null;
+  private currentDb: string | null = null;
 
   private constructor(socket: net.Socket) {
     this.socket = socket;
@@ -37,6 +42,9 @@ export class Connection {
     return new Promise((resolve, reject) => {
       const onConnect = () => {
         const conn = new Connection(socket);
+        conn.useTls = useTls;
+        conn.rejectUnauthorized = rejectUnauthorized;
+        conn.ca = ca;
         // Read server banner
         conn.readLine().then(() => resolve(conn)).catch(reject);
       };
@@ -58,8 +66,35 @@ export class Connection {
 
   /** Send a command and read the response. */
   async execute(cmd: string): Promise<Response> {
+    return this.executeInternal(cmd, true);
+  }
+
+  private async executeInternal(cmd: string, allowForward: boolean): Promise<Response> {
     this.socket.write(encodeCommand(cmd));
-    return this.readResponse();
+    this.updateSessionState(cmd);
+    const resp = await this.readResponse();
+
+    if (allowForward && resp.type === "error") {
+      const target = parseForwardTarget(resp.message);
+      if (target) {
+        const fwd = await Connection.connect(
+          target.host,
+          target.port,
+          this.useTls,
+          this.rejectUnauthorized,
+          this.ca,
+        );
+        if (this.sessionToken) {
+          await fwd.executeInternal(`TOKEN ${this.sessionToken}`, false);
+        }
+        if (this.currentDb) {
+          await fwd.executeInternal(`USE ${this.currentDb}`, false);
+        }
+        return fwd.executeInternal(cmd, false);
+      }
+    }
+
+    return resp;
   }
 
   /** Close the connection. */
@@ -100,4 +135,40 @@ export class Connection {
 
     return parseResponseLine(line + "\r\n");
   }
+
+  private updateSessionState(cmd: string): void {
+    const trimmed = cmd.trim();
+    if (trimmed.startsWith("TOKEN ")) {
+      const token = trimmed.slice("TOKEN ".length).trim();
+      if (token.length > 0) {
+        this.sessionToken = token;
+      }
+      return;
+    }
+    if (trimmed.startsWith("USE ")) {
+      const db = trimmed.slice("USE ".length).trim();
+      if (db.length > 0) {
+        this.currentDb = db;
+      }
+    }
+  }
+}
+
+function parseForwardTarget(message: string): { host: string; port: number } | null {
+  const atIdx = message.indexOf("@");
+  const semiIdx = message.indexOf(";");
+  if (atIdx < 0 || semiIdx < 0 || semiIdx <= atIdx + 1) {
+    return null;
+  }
+  const addr = message.slice(atIdx + 1, semiIdx).trim();
+  const sep = addr.lastIndexOf(":");
+  if (sep <= 0 || sep >= addr.length - 1) {
+    return null;
+  }
+  const host = addr.slice(0, sep);
+  const port = Number(addr.slice(sep + 1));
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return null;
+  }
+  return { host, port };
 }

@@ -1063,14 +1063,22 @@ Client                                            Server
 | Group | Commands |
 |-------|----------|
 | Auth | `LOGIN`, `TOKEN`, `REFRESH`, `WHOAMI` |
-| Session | `USE`, `PING`, `QUIT` |
+| Session | `USE`, `PING`, `QUIT`, `TOPOLOGY`, `SNAPSHOT_HLC` |
 | Database | `CREATE DATABASE`, `DROP DATABASE`, `LIST DATABASES` |
 | Collection | `CREATE COLLECTION`, `DROP COLLECTION`, `LIST COLLECTIONS` |
-| CRUD | `INSERT`, `GET`, `UPDATE`, `DELETE`, `SCAN` |
+| CRUD | `INSERT`, `GET`, `UPDATE`, `DELETE`, `PUT_WITH_VC`, `SCAN` |
 | Index | `CREATE INDEX`, `DROP INDEX`, `LIST INDEXES`, `QUERY`, `QUERYRANGE` |
 | Maintenance | `COMPACT`, `FLUSH`, `COUNT` |
 | User mgmt | `CREATE USER`, `DROP USER`, `LIST USERS [@tenant]`, `GRANT`, `REVOKE` |
 | Tenant mgmt | `CREATE TENANT`, `DROP TENANT`, `LIST TENANTS` |
+| Cluster mgmt | `ELECT-WRITER` |
+
+Consistency prefixes (Phase 40f) are parsed as a wrapper around the base
+command: `READ_CONCERN R=<n>` and/or `WRITE_CONCERN W=<n>`. In v5, concerns
+are accepted only for data commands (`INSERT`, `GET`, `UPDATE`, `DELETE`,
+`PUT_WITH_VC`, `SCAN`, `QUERY`, `QUERYRANGE`, `COUNT`) and only with
+`R=1, W=1`; otherwise the server returns
+`-ERR v5 only supports R=1, W=1`.
 
 Each `Command` carries RBAC metadata via `Command::required_action() -> Action` and `Command::target_resource() -> Resource`, used by the session enforcer.
 
@@ -1213,9 +1221,12 @@ refresh_token_ttl_secs = 604800   # 7 d
 ```rust
 pub async fn handle_connection<S>(
     stream: S,
+    peer: SocketAddr,
     auth_store: Arc<RwLock<AuthStore>>,
     shared_server: SharedServer,
-) -> io::Result<()>
+    limits: Arc<Limits>,
+    coordinator: Arc<Coordinator>,
+) -> Result<(), Box<dyn std::error::Error>>
 where
     S: AsyncRead + AsyncWrite + Unpin;
 ```
@@ -1224,9 +1235,21 @@ Each connection is spawned in its own tokio task. The handler:
 
 1. Reads a line (enforcing `MAX_LINE_LENGTH`).
 2. Parses via `grumpydb_protocol::parse_command`.
-3. Calls `session.authorize(&cmd)` (returns `-ERR access denied` on failure).
-4. Dispatches to `execute_command` which maps to `SharedServer` calls.
-5. Writes the `Response` back to the stream.
+3. Validates optional consistency prefixes (`READ_CONCERN` / `WRITE_CONCERN`) via
+   the coordinator (`-ERR consistency concerns are only supported for data commands`
+   or `-ERR v5 only supports R=1, W=1` on mismatch).
+4. Calls `session.authorize(&cmd)` (returns `-ERR access denied` on failure).
+5. Dispatches to `execute_command` which maps to `SharedServer` calls.
+6. For key-based data commands, enforces v5 owner placement (`N=1`) through
+   `Coordinator::enforce_local_owner`; when local node is not owner, returns
+   `-ERR forward to <node>@<addr>; not the owner`.
+  In Phase 42 tranche 2, both drivers parse this hint and perform a single
+  automatic one-hop retry to the forwarded target.
+7. `TOPOLOGY` returns a JSON snapshot (`cluster_id`, `local_node_id`, `n`,
+  `vnodes_per_node`, `peers`, `writers`) from `Coordinator::topology_json()`.
+8. `SNAPSHOT_HLC` returns the current selected-database snapshot HLC as an
+  integer response (via `db.begin_read().snapshot_hlc()`).
+9. Writes the `Response` back to the stream.
 
 **Panic isolation**: every `execute_command` invocation is wrapped in
 `AssertUnwindSafe(...).catch_unwind().await` (via the `futures` crate's
@@ -1271,6 +1294,17 @@ client.close().await?;
 
 The driver depends on `grumpydb-protocol` for parsing responses, so wire format changes are caught at compile time on both sides.
 
+Phase 42 (Smart Client Drivers) is closed for v5 scope. Delivered:
+`connect_cluster(seeds, tls)`, topology fetch/cache APIs
+(`refresh_topology`, `topology`, `cached_topology`), seed-fallback/topology-cache E2E tests,
+automatic one-hop forward fallback with session replay (`TOKEN`, `USE`), and
+`DatabaseHandle::get_with_siblings`, plus optional JWKS URL configuration
+with RS256 access-token verification on `login`.
+Current v5 limitation: `get_with_siblings` returns a singleton sibling with
+placeholder vector clock `"{}"`.
+Remaining beyond v5 scope for the Rust driver: ring-aware routing beyond one
+hop and sibling reconciliation semantics.
+
 ### 19.6 TypeScript driver (`@grumpydb/client`)
 
 ```typescript
@@ -1299,6 +1333,19 @@ await client.close();
 | `src/errors.ts` | `GrumpyError`, `ConnectionError`, `AuthError`, `ProtocolError`, `ServerError` |
 
 Zero runtime dependencies — only Node built-ins (`node:net`, `node:tls`, `node:crypto`). Test runner: `vitest` (dev only). Requires Node ≥ 18.
+
+Phase 42 (Smart Client Drivers) is closed for v5 scope. Delivered:
+`connectCluster({ seeds, ... })`, topology fetch/cache APIs
+(`refreshTopology`, `topology`), exported cluster/topology types
+(`ClusterConnectOptions`, `ClusterTopology`), automatic one-hop forward fallback
+with session replay (`TOKEN`, `USE`), and `DatabaseHandle.getWithSiblings`.
+The driver also supports `jwksUrl` with JWKS cache + RS256 verification
+on login, and has CI coverage via the TypeScript lane
+(`npm ci`, `npm run lint`, `npm test`, `npm run build`).
+Current v5 limitation: `getWithSiblings` returns a singleton sibling with
+placeholder vector clock `"{}"`.
+Remaining Phase 42 work for the TypeScript driver: ring-aware routing beyond
+one hop, sibling reconciliation semantics, and publish workflow integration.
 
 ### 19.7 grumpy-repl v2 (`grumpy-repl/`)
 
@@ -1656,9 +1703,19 @@ the entire archive copy. Writers block for the duration; readers
 continue normally. This is the simplest correct semantics on top of the
 current SWMR model.
 
-> v6 will introduce MVCC read snapshots (Phase 41), at which point
-> `snapshot()` will be able to take a point-in-time consistent view
-> without blocking writers.
+> Phase 41 tranche 1 (v5) introduced the snapshot read API
+> (`ReadTx` / `SharedReadTx`) with `snapshot_hlc` capture.
+> Phase 41 tranche 2 now applies HLC-based snapshot visibility in
+> `src/database/mod.rs` via per-key in-memory version history and routes
+> `SharedReadTx` reads through snapshot-aware methods.
+> Phase 41 tranche 3 adds snapshot reader watermark tracking,
+> in-memory version GC (preserve versions needed by active readers;
+> collapse to latest when no readers remain), and `SharedReadTx`
+> clone/drop integration with reader accounting.
+> Phase 41 tranche 4 exposes snapshot HLC through the wire protocol
+> (`SNAPSHOT_HLC`). Current limits: version history is still in-memory
+> (not persisted), and lock-free immutable read path remains deferred.
+> `snapshot()` still uses the `SharedDatabase` write lock in v5.
 
 ### 24.5 Restore safety
 

@@ -214,3 +214,140 @@ async fn test_e2e_unauthorized_command() {
         "unauthenticated INSERT should error, got: {resp:?}"
     );
 }
+
+#[tokio::test]
+async fn test_e2e_topology_returns_json_snapshot() {
+    let server = TestServer::spawn().await;
+    let mut client = admin_client(&server).await;
+
+    let resp = client.raw_execute("TOPOLOGY").await.expect("topology");
+    let json = match resp {
+        grumpydb_protocol::Response::Bulk(Some(s)) => s,
+        other => panic!("unexpected TOPOLOGY response: {other:?}"),
+    };
+    let v: serde_json::Value = serde_json::from_str(&json).expect("valid topology JSON");
+    assert!(v.get("cluster_id").is_some());
+    assert!(v.get("local_node_id").is_some());
+    assert_eq!(v.get("n"), Some(&serde_json::json!(1)));
+}
+
+#[tokio::test]
+async fn test_e2e_v5_rejects_non_default_concerns() {
+    let server = TestServer::spawn().await;
+    let mut client = admin_client(&server).await;
+    client.create_database("wc_db").await.expect("create db");
+
+    let use_resp = client.raw_execute("USE wc_db").await.expect("use");
+    assert!(
+        matches!(use_resp, grumpydb_protocol::Response::Ok(_)),
+        "USE failed: {use_resp:?}"
+    );
+    let create_coll = client
+        .raw_execute("CREATE COLLECTION users")
+        .await
+        .expect("create collection");
+    assert!(
+        matches!(create_coll, grumpydb_protocol::Response::Ok(_)),
+        "CREATE COLLECTION failed: {create_coll:?}"
+    );
+
+    let key = Uuid::new_v4();
+    let resp = client
+        .raw_execute(&format!(
+            "WRITE_CONCERN W=2 INSERT users {key} {{\"name\":\"alice\"}}"
+        ))
+        .await
+        .expect("write concern insert");
+
+    match resp {
+        grumpydb_protocol::Response::Error(msg) => {
+            assert!(
+                msg.contains("v5 only supports R=1, W=1"),
+                "unexpected error: {msg}"
+            );
+        }
+        other => panic!("expected error for W=2, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_e2e_snapshot_hlc_exposed_to_clients() {
+    let server = TestServer::spawn().await;
+    let mut client = admin_client(&server).await;
+    client.create_database("snap_db").await.expect("create db");
+
+    let use_resp = client.raw_execute("USE snap_db").await.expect("use");
+    assert!(
+        matches!(use_resp, grumpydb_protocol::Response::Ok(_)),
+        "USE failed: {use_resp:?}"
+    );
+
+    let first = match client
+        .raw_execute("SNAPSHOT_HLC")
+        .await
+        .expect("snapshot 1")
+    {
+        grumpydb_protocol::Response::Integer(n) => n,
+        other => panic!("unexpected SNAPSHOT_HLC response: {other:?}"),
+    };
+    assert!(first > 0, "SNAPSHOT_HLC must be positive, got {first}");
+
+    let second = match client
+        .raw_execute("SNAPSHOT_HLC")
+        .await
+        .expect("snapshot 2")
+    {
+        grumpydb_protocol::Response::Integer(n) => n,
+        other => panic!("unexpected SNAPSHOT_HLC response: {other:?}"),
+    };
+    assert!(second >= first, "SNAPSHOT_HLC must be monotonic: {first} -> {second}");
+}
+
+#[tokio::test]
+async fn test_e2e_rust_client_connect_cluster_seed_fallback() {
+    let server = TestServer::spawn().await;
+    let seed_ok = format!("127.0.0.1:{}", server.addr.port());
+
+    let mut client = GrumpyClient::connect_cluster(&["127.0.0.1:1", &seed_ok], false)
+        .await
+        .expect("connect cluster fallback");
+    client
+        .login(
+            server.admin_tenant,
+            server.admin_user,
+            &server.admin_password,
+        )
+        .await
+        .expect("login");
+
+    let info = client.whoami().await.expect("whoami");
+    assert!(info.contains("admin"), "whoami missing user: {info}");
+}
+
+#[tokio::test]
+async fn test_e2e_rust_client_topology_cache_after_login() {
+    let server = TestServer::spawn().await;
+    let seed = format!("127.0.0.1:{}", server.addr.port());
+
+    let mut client = GrumpyClient::connect_cluster(&[&seed], false)
+        .await
+        .expect("connect cluster");
+    client
+        .login(
+            server.admin_tenant,
+            server.admin_user,
+            &server.admin_password,
+        )
+        .await
+        .expect("login");
+
+    let cached = client
+        .cached_topology()
+        .expect("topology should be cached after login");
+    assert_eq!(cached.n, 1);
+    assert!(!cached.cluster_id.is_empty());
+
+    let topo = client.topology().await.expect("topology");
+    assert_eq!(topo.n, 1);
+    assert!(!topo.peers.is_empty());
+}

@@ -65,7 +65,7 @@ docker compose --profile repl run --rm repl \
     --password "$(grep ^GRUMPYDB_BOOTSTRAP_PASSWORD .env | cut -d= -f2-)"
 
 # TypeScript driver (drivers/typescript/)
-cd drivers/typescript && npm install && npm test && npm run build
+cd drivers/typescript && npm ci && npm run lint && npm test && npm run build
 ```
 
 ## Project structure
@@ -74,7 +74,7 @@ cd drivers/typescript && npm install && npm test && npm run build
 grumpydb/                       # workspace root
 ├── Cargo.toml                  # workspace members
 │
-├── .github/workflows/          # CI: fmt, clippy, test (stable + 1.85 MSRV), docs, audit
+├── .github/workflows/          # CI: fmt, clippy, test (stable + 1.85 MSRV), docs, audit, typescript-driver
 │
 ├── src/                        # grumpydb crate (storage engine library)
 │   ├── error.rs                # GrumpyError enum, Result<T> alias
@@ -262,3 +262,10 @@ Every push to `master` and every PR is validated by GitHub Actions
 | `grumpydb-client` | Async Rust client driver |
 | `grumpy-repl` | Interactive REPL shell binary (embedded + TCP) |
 | `grumpydb-testing` | Internal test harness (`TestServer`); `publish = false`, never released |
+
+## Contribution licensing
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in GrumpyDB by you shall be dual-licensed as
+`MIT OR Apache-2.0` (as defined in `LICENSE`, `LICENSE-MIT`, and
+`LICENSE-APACHE`), without additional terms or conditions.

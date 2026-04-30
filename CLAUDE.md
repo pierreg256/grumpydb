@@ -6,21 +6,28 @@ GrumpyDB is a disk-based object storage engine written in Rust. It provides pers
 
 ## Architecture
 
-```
-┌──────────────────────────────────────┐
-│         Public API (lib.rs)          │  ← CRUD interface for external apps
-├──────────────────────────────────────┤
-│  Database (database/) + Engine (engine.rs) │  ← Multi-collection + single-collection wrappers
-├──────────────────────────────────────┤
-│     Collection (collection/) + Indexes    │  ← Unit of storage: data + primary + secondary
-├────────────┬─────────────┬────────────┤
-│  Document  │  Concurrency │  Buffer   │
-│  Model     │  (SWMR)      │  Pool     │
-├────────────┼─────────────┼────────────┤
-│  B+Tree    │     WAL     │  Page     │
-│  Index     │             │  Manager  │
-│(primary.idx)│  (wal.log)  │ (data.db) │
-└────────────┴─────────────┴────────────┘
+```mermaid
+flowchart TB
+  api["Public API (lib.rs)<br/>CRUD interface for external apps"]
+  db["Database (database/) + Engine (engine.rs)<br/>Multi-collection + single-collection wrappers"]
+  coll["Collection (collection/) + Indexes<br/>Unit of storage: data + primary + secondary"]
+
+  subgraph core["Core Storage Components"]
+    doc["Document Model"]
+    conc["Concurrency (SWMR)"]
+    buf["Buffer Pool"]
+    btree["B+Tree Index<br/>(primary.idx)"]
+    wal["WAL<br/>(wal.log)"]
+    page["Page Manager<br/>(data.db)"]
+  end
+
+  api --> db --> coll
+  coll --> doc
+  coll --> conc
+  coll --> buf
+  doc --> btree
+  conc --> wal
+  buf --> page
 ```
 
 ### On-disk files
