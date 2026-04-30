@@ -20,6 +20,7 @@ for inter-node traffic: handshake, WAL streaming (Phase 40e), and gossip
 For a ready-to-run v5 demo topology, use:
 
 - `docker-compose.cluster.yml` (3-node demo stack)
+- `scripts/smoke_cluster.sh` (health/JWKS/log smoke test; `--keep-up` supported)
 - `docker/cluster/node1.toml`, `docker/cluster/node2.toml`, `docker/cluster/node3.toml`
 - pre-seeded identities under `docker/cluster/data/node*/_cluster/node.json`
 

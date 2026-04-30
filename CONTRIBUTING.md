@@ -64,6 +64,11 @@ docker compose --profile repl run --rm repl \
     --host server --tenant _system --user admin \
     --password "$(grep ^GRUMPYDB_BOOTSTRAP_PASSWORD .env | cut -d= -f2-)"
 
+# 3-node cluster smoke test (v5 demo compose).
+# Defaults to GRUMPYDB_BOOTSTRAP_PASSWORD=admin if unset.
+scripts/smoke_cluster.sh
+GRUMPYDB_BOOTSTRAP_PASSWORD=monsecret scripts/smoke_cluster.sh --keep-up
+
 # TypeScript driver (drivers/typescript/)
 cd drivers/typescript && npm ci && npm run lint && npm test && npm run build
 ```
@@ -156,7 +161,7 @@ grumpydb/                       # workspace root
 │   ├── prometheus.yml                              # scrape config for server:6381
 │   └── grafana/provisioning/datasources/prometheus.yml
 ├── .env.example                # GRUMPYDB_BOOTSTRAP_PASSWORD template
-├── .dockerignore               # Excludes target/, docs/, examples/, fixtures/...
+├── .dockerignore               # Excludes heavy/non-runtime paths (target/, docs/, tests/, examples/, ...); keeps benches/ for workspace Docker builds
 │
 └── docs/
     ├── ARCHITECTURE.md

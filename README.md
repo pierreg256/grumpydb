@@ -478,7 +478,16 @@ For v5 migration and clustering demo assets:
 
 - Migration guide: `docs/MIGRATING_4_to_5.md`
 - 3-node demo compose: `docker-compose.cluster.yml`
+- Cluster smoke test script: `scripts/smoke_cluster.sh`
 - Demo node configs: `docker/cluster/node1.toml`, `docker/cluster/node2.toml`, `docker/cluster/node3.toml`
+
+Quick smoke run (uses `GRUMPYDB_BOOTSTRAP_PASSWORD=admin` by default):
+
+```bash
+scripts/smoke_cluster.sh
+# override password and keep the cluster up for manual checks:
+GRUMPYDB_BOOTSTRAP_PASSWORD=monsecret scripts/smoke_cluster.sh --keep-up
+```
 
 ## Backup & Restore
 
