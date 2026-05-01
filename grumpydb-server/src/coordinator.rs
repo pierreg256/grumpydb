@@ -1,8 +1,10 @@
 //! Coordinator helpers for v5 routing and protocol validation (Phase 40f).
 
 use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use grumpydb_ring::{Ring, RingConfig, RoutingKey};
+use parking_lot::RwLock;
 use serde_json::json;
 
 use crate::cluster::NodeIdentity;
@@ -15,7 +17,7 @@ use crate::config::{ClusterSection, PeerEntry, WriterEntry};
 /// - computes first owner (`N=1`) from the ring and returns a forward hint
 ///   when the local node is not the owner
 /// - serves a JSON topology snapshot for smart clients
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Coordinator {
     local_node_id: String,
     cluster_id: String,
@@ -24,6 +26,15 @@ pub struct Coordinator {
     ring: Ring<String>,
     peer_addrs: BTreeMap<String, String>,
     writers: Vec<WriterEntry>,
+    peers: RwLock<BTreeMap<String, PeerRuntime>>,
+}
+
+#[derive(Debug, Clone)]
+struct PeerRuntime {
+    addr: String,
+    status: String,
+    last_seen_at_unix: Option<u64>,
+    vnode_assignments: Vec<u32>,
 }
 
 impl Coordinator {
@@ -46,9 +57,36 @@ impl Coordinator {
         let mut peer_addrs = BTreeMap::new();
         peer_addrs.insert(local_node_id.clone(), local_addr.to_string());
 
-        for PeerEntry { node_id, addr, .. } in &cluster.peers {
+        let mut peers = BTreeMap::new();
+        peers.insert(
+            local_node_id.clone(),
+            PeerRuntime {
+                addr: local_addr.to_string(),
+                status: "up".to_string(),
+                last_seen_at_unix: Some(now_unix()),
+                vnode_assignments: Vec::new(),
+            },
+        );
+
+        for PeerEntry {
+            node_id,
+            addr,
+            status,
+            last_seen_at_unix,
+            vnode_assignments,
+        } in &cluster.peers
+        {
             ring.add_node(node_id.clone());
             peer_addrs.insert(node_id.clone(), addr.clone());
+            peers.insert(
+                node_id.clone(),
+                PeerRuntime {
+                    addr: addr.clone(),
+                    status: status.clone().unwrap_or_else(|| "unknown".to_string()),
+                    last_seen_at_unix: *last_seen_at_unix,
+                    vnode_assignments: vnode_assignments.clone(),
+                },
+            );
         }
 
         Self {
@@ -60,7 +98,32 @@ impl Coordinator {
             ring,
             peer_addrs,
             writers: cluster.writers.clone(),
+            peers: RwLock::new(peers),
         }
+    }
+
+    /// Update peer liveness fields from the gossip runtime.
+    pub fn update_peer_liveness(
+        &self,
+        node_id: &str,
+        status: &str,
+        last_seen_at_unix: Option<u64>,
+    ) {
+        let mut peers = self.peers.write();
+        if let Some(peer) = peers.get_mut(node_id) {
+            peer.status = status.to_string();
+            if last_seen_at_unix.is_some() {
+                peer.last_seen_at_unix = last_seen_at_unix;
+            }
+        }
+    }
+
+    /// Return the last-seen timestamp for a peer, if known.
+    pub fn peer_last_seen(&self, node_id: &str) -> Option<u64> {
+        self.peers
+            .read()
+            .get(node_id)
+            .and_then(|p| p.last_seen_at_unix)
     }
 
     /// Validate read/write concerns against v5 constraints.
@@ -120,12 +183,16 @@ impl Coordinator {
     /// Return the static topology snapshot exposed by `TOPOLOGY`.
     pub fn topology_json(&self) -> serde_json::Value {
         let peers: Vec<serde_json::Value> = self
-            .peer_addrs
+            .peers
+            .read()
             .iter()
-            .map(|(node_id, addr)| {
+            .map(|(node_id, peer)| {
                 json!({
                     "node_id": node_id,
-                    "addr": addr,
+                    "addr": peer.addr,
+                    "status": peer.status,
+                    "last_seen_at_unix": peer.last_seen_at_unix,
+                    "vnode_assignments": peer.vnode_assignments,
                 })
             })
             .collect();
@@ -150,6 +217,13 @@ impl Coordinator {
             "writers": writers,
         })
     }
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -182,5 +256,30 @@ mod tests {
         assert!(topo.get("cluster_id").is_some());
         assert!(topo.get("local_node_id").is_some());
         assert_eq!(topo.get("n").and_then(|v| v.as_u64()), Some(1));
+        let peers = topo
+            .get("peers")
+            .and_then(|v| v.as_array())
+            .expect("peers array");
+        assert!(!peers.is_empty());
+        assert!(peers[0].get("status").is_some());
+        assert!(peers[0].get("last_seen_at_unix").is_some());
+    }
+
+    #[test]
+    fn test_update_peer_liveness_is_applied() {
+        let mut cluster = ClusterSection::default();
+        cluster.peers.push(PeerEntry {
+            node_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            addr: "node-2:6390".to_string(),
+            status: None,
+            last_seen_at_unix: None,
+            vnode_assignments: Vec::new(),
+        });
+        let c = Coordinator::from_config(&identity(), &cluster, "127.0.0.1:6380");
+        c.update_peer_liveness("11111111-1111-1111-1111-111111111111", "up", Some(42));
+        assert_eq!(
+            c.peer_last_seen("11111111-1111-1111-1111-111111111111"),
+            Some(42)
+        );
     }
 }

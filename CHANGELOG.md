@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### v6 stream — Stream E (Phase 44 tranche 1)
+
+- Phase 44 (gossip membership) is now **in progress**; tranche 1 is delivered
+  in `grumpydb-server`.
+- Added runtime module `grumpydb-server/src/cluster/gossip.rs` that performs
+  periodic peer probes over the existing inter-node handshake transport.
+- Added cluster config fields:
+  - `gossip_probe_interval_ms`
+  - `gossip_peer_dead_after_secs`
+- Listener startup now spawns the gossip probe task.
+- Coordinator now tracks dynamic peer liveness, and `TOPOLOGY` now exposes
+  per-peer `status`, `last_seen_at_unix`, and `vnode_assignments`.
+- Scope note: this is tranche 1 only; full Phase 44 gossip membership
+  convergence remains pending.
+
 ### v5 release prep — Phases 41/42/43 closure
 
 - Version alignment for v5 release:

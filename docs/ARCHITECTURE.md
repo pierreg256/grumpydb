@@ -1245,11 +1245,18 @@ Each connection is spawned in its own tokio task. The handler:
    `-ERR forward to <node>@<addr>; not the owner`.
   In Phase 42 tranche 2, both drivers parse this hint and perform a single
   automatic one-hop retry to the forwarded target.
-7. `TOPOLOGY` returns a JSON snapshot (`cluster_id`, `local_node_id`, `n`,
-  `vnodes_per_node`, `peers`, `writers`) from `Coordinator::topology_json()`.
+7. `TOPOLOGY` returns a JSON topology view (`cluster_id`, `local_node_id`,
+  `n`, `vnodes_per_node`, `peers`, `writers`) from
+  `Coordinator::topology_json()`. In v6 Phase 44 tranche 1, each peer entry
+  includes live `status` and `last_seen_at_unix` liveness fields plus
+  `vnode_assignments` metadata.
 8. `SNAPSHOT_HLC` returns the current selected-database snapshot HLC as an
   integer response (via `db.begin_read().snapshot_hlc()`).
 9. Writes the `Response` back to the stream.
+
+Listener startup (`tcp/listener.rs`) also spawns a background gossip probe
+task in v6 Phase 44 tranche 1. The task periodically handshakes configured
+peers and refreshes coordinator liveness used by `TOPOLOGY`.
 
 **Panic isolation**: every `execute_command` invocation is wrapped in
 `AssertUnwindSafe(...).catch_unwind().await` (via the `futures` crate's

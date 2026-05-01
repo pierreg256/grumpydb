@@ -124,6 +124,10 @@ pub struct ClusterSection {
     pub max_lag_seconds: u64,
     /// Per-collection writer assignment. v5 manual; v6 dynamic.
     pub writers: Vec<WriterEntry>,
+    /// v6 gossip probe interval in milliseconds.
+    pub gossip_probe_interval_ms: u64,
+    /// v6 gossip timeout before declaring a peer down.
+    pub gossip_peer_dead_after_secs: u64,
 }
 
 /// Static description of a single peer node.
@@ -169,6 +173,8 @@ impl Default for ClusterSection {
             gc_grace_seconds: 864_000,
             max_lag_seconds: 5,
             writers: Vec::new(),
+            gossip_probe_interval_ms: 1_000,
+            gossip_peer_dead_after_secs: 5,
         }
     }
 }
@@ -325,6 +331,8 @@ listen_peer = "0.0.0.0:6390"
 vnodes_per_node = 128
 gc_grace_seconds = 3600
 max_lag_seconds = 10
+gossip_probe_interval_ms = 500
+gossip_peer_dead_after_secs = 7
 peers = [
   { node_id = "11111111-1111-1111-1111-111111111111", addr = "node-2:6390" },
   { node_id = "22222222-2222-2222-2222-222222222222", addr = "node-3:6390", status = "up", last_seen_at_unix = 1700000000, vnode_assignments = [0, 1, 2] },
@@ -350,6 +358,8 @@ writers = [
         assert_eq!(cfg.cluster.vnodes_per_node, 128);
         assert_eq!(cfg.cluster.gc_grace_seconds, 3600);
         assert_eq!(cfg.cluster.max_lag_seconds, 10);
+        assert_eq!(cfg.cluster.gossip_probe_interval_ms, 500);
+        assert_eq!(cfg.cluster.gossip_peer_dead_after_secs, 7);
         assert_eq!(cfg.cluster.peers.len(), 2);
         assert_eq!(cfg.cluster.peers[0].addr, "node-2:6390");
         assert_eq!(cfg.cluster.peers[1].status.as_deref(), Some("up"));
@@ -370,6 +380,8 @@ writers = [
         assert_eq!(cfg.cluster.vnodes_per_node, 256);
         assert_eq!(cfg.cluster.gc_grace_seconds, 864_000);
         assert_eq!(cfg.cluster.max_lag_seconds, 5);
+        assert_eq!(cfg.cluster.gossip_probe_interval_ms, 1_000);
+        assert_eq!(cfg.cluster.gossip_peer_dead_after_secs, 5);
     }
 
     #[test]

@@ -73,6 +73,14 @@ pub async fn listen(
         crate::cluster::handshake::serve(config.clone(), identity.clone()).await?;
     }
 
+    // v6 Phase 44 (tranche 1): background gossip probes that refresh
+    // per-peer liveness and last-seen fields surfaced in TOPOLOGY.
+    crate::cluster::gossip::spawn(
+        config.cluster.clone(),
+        identity.clone(),
+        coordinator.clone(),
+    );
+
     // Signal HTTP `/readyz` that we are now accepting connections.
     http_state.ready.store(true, Ordering::Release);
 

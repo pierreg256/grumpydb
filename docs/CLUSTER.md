@@ -4,12 +4,17 @@ This document describes the clustering primitives introduced in v5 (Phase
 40a) and the path from there to v6 (gossip + multi-writer) and v7
 (anti-entropy + multi-region).
 
+Status note (v6 Stream E, Phase 44): tranche 1 is delivered. GrumpyDB now
+runs background peer probes and surfaces live peer liveness in `TOPOLOGY`
+while keeping the static peer list as the source of truth.
+
 ## Mental model
 
 A GrumpyDB cluster is a set of nodes that share a common `cluster_id`. Each
 node has a stable `node_id` that survives restarts. Nodes find each other
-through static configuration in v5 (the `[cluster]` TOML section); v6 will
-swap this for SWIM-style gossip without changing the on-disk format.
+through static configuration in v5 (the `[cluster]` TOML section). In v6
+Phase 44 tranche 1, nodes keep this static list and add periodic gossip-style
+probes to track liveness without changing the on-disk format.
 
 The data plane (TCP+TLS, port 6380) is unchanged — clients connect and
 issue protocol commands as before. The new **cluster plane** (TCP+TLS,
@@ -104,12 +109,17 @@ max_lag_seconds = 5
 writers = [
   { collection = "*", node_id = "..." },
 ]
+
+# v6 Phase 44 tranche 1: background probe cadence and dead-peer threshold.
+gossip_probe_interval_ms = 1000
+gossip_peer_dead_after_secs = 5
 ```
 
 The reserved fields on each `PeerEntry` (`status`, `last_seen_at_unix`,
-`vnode_assignments`) are populated dynamically by gossip in v6. v5 ignores
-them on input — they are present in the schema so a TOML file written
-under v6 still parses cleanly under v5.
+`vnode_assignments`) are part of the v6 schema. In Phase 44 tranche 1,
+gossip updates `status` and `last_seen_at_unix` in memory; the static config
+remains authoritative for peer membership, and `vnode_assignments` is
+currently surfaced by `TOPOLOGY` as configured metadata.
 
 ## Handshake protocol (v5)
 
@@ -197,8 +207,9 @@ escape valves. v5/v6/v7 all read the same `node.json` and the same
 `[cluster]` config schema; v6 simply adds new behaviour:
 
 - **v6 (gossip)**: peers populate `status` / `last_seen_at_unix` /
-  `vnode_assignments` dynamically. v5 nodes ignore these. v6 nodes
-  treating a v5 peer as `status = "static_only"`.
+  `vnode_assignments` fields in the topology schema. In Phase 44 tranche 1,
+  status transitions (`up`, `suspect`, `down`) and `last_seen_at_unix` are
+  driven by periodic probes; membership still comes from static peers config.
 - **v7 (multi-region)**: a `region` field is reserved on `PeerEntry`
   (added in this doc when Phase 51 lands) and the ring becomes a
   per-region affair.

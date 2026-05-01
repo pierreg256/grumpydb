@@ -30,6 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod gossip;
 pub mod handshake;
 
 /// Highest `identity_version` understood by this server.
