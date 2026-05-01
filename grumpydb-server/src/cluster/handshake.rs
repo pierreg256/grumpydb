@@ -27,6 +27,7 @@
 use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -36,6 +37,34 @@ use uuid::Uuid;
 
 use crate::cluster::NodeIdentity;
 use crate::config::ServerConfig;
+use crate::coordinator::Coordinator;
+
+const GOSSIP_CAPABILITY: &str = "gossip-membership-v1";
+
+/// Gossip-view peer state propagated over handshake payloads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PeerGossipState {
+    pub node_id: String,
+    pub addr: String,
+    pub status: String,
+    #[serde(default)]
+    pub last_seen_at_unix: Option<u64>,
+    #[serde(default)]
+    pub vnode_assignments: Vec<u32>,
+}
+
+/// Optional gossip payload carried by a handshake initiator.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct GossipPayload {
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub last_seen_at_unix: Option<u64>,
+    #[serde(default)]
+    pub vnode_assignments: Vec<u32>,
+    #[serde(default)]
+    pub membership: Vec<PeerGossipState>,
+}
 
 /// Maximum size of a single handshake frame (including the JSON body
 /// but excluding the 4-byte length prefix). 64 KiB is wildly larger
@@ -57,6 +86,18 @@ pub struct ClusterHello {
     /// them to negotiate gossip vs. direct WAL streaming.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Optional initiator liveness status for gossip convergence.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Optional initiator last-seen timestamp in unix seconds.
+    #[serde(default)]
+    pub last_seen_at_unix: Option<u64>,
+    /// Optional vnode ownership observed by initiator.
+    #[serde(default)]
+    pub vnode_assignments: Vec<u32>,
+    /// Gossip membership snapshot known by initiator.
+    #[serde(default)]
+    pub membership: Vec<PeerGossipState>,
 }
 
 /// Acceptor's reply.
@@ -163,11 +204,34 @@ pub async fn run_acceptor<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let (outcome, _) = run_acceptor_with_hello(
+        stream,
+        local_cluster_id,
+        local_node_id,
+        server_version,
+        known_peers,
+    )
+    .await?;
+    Ok(outcome)
+}
+
+/// Same as [`run_acceptor`], but also returns the raw initiator hello.
+pub async fn run_acceptor_with_hello<S>(
+    stream: &mut S,
+    local_cluster_id: Uuid,
+    local_node_id: Uuid,
+    server_version: &str,
+    known_peers: &HashSet<Uuid>,
+) -> Result<(HandshakeOutcome, ClusterHello), HandshakeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let hello: ClusterHello = read_frame(stream).await?;
 
+    let allows_dynamic_membership = hello.capabilities.iter().any(|c| c == GOSSIP_CAPABILITY);
     let (accepted, error) = if hello.cluster_id != local_cluster_id {
         (false, Some("cluster_id_mismatch".to_string()))
-    } else if !known_peers.contains(&hello.node_id) {
+    } else if !known_peers.contains(&hello.node_id) && !allows_dynamic_membership {
         (false, Some("unknown_peer".to_string()))
     } else {
         (true, None)
@@ -182,35 +246,47 @@ where
     };
     write_frame(stream, &response).await?;
 
-    Ok(if accepted {
-        HandshakeOutcome::Accepted {
-            peer_node_id: hello.node_id,
-        }
-    } else {
-        HandshakeOutcome::Rejected {
-            error: error.unwrap_or_else(|| "unknown".to_string()),
-        }
-    })
+    Ok((
+        if accepted {
+            HandshakeOutcome::Accepted {
+                peer_node_id: hello.node_id,
+            }
+        } else {
+            HandshakeOutcome::Rejected {
+                error: error.unwrap_or_else(|| "unknown".to_string()),
+            }
+        },
+        hello,
+    ))
 }
 
-/// Drive the initiator side of a handshake.
-///
-/// Sends [`ClusterHello`] and reads back the acceptor's
-/// [`ClusterHelloResponse`].
-pub async fn run_initiator<S>(
+/// Drive the initiator side with optional gossip payload.
+pub async fn run_initiator_with_gossip<S>(
     stream: &mut S,
     local_cluster_id: Uuid,
     local_node_id: Uuid,
     server_version: &str,
+    payload: GossipPayload,
 ) -> Result<(ClusterHelloResponse, HandshakeOutcome), HandshakeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let mut capabilities = Vec::new();
+    if !payload.membership.is_empty()
+        || payload.status.is_some()
+        || !payload.vnode_assignments.is_empty()
+    {
+        capabilities.push(GOSSIP_CAPABILITY.to_string());
+    }
     let hello = ClusterHello {
         cluster_id: local_cluster_id,
         node_id: local_node_id,
         server_version: server_version.to_string(),
-        capabilities: Vec::new(),
+        capabilities,
+        status: payload.status,
+        last_seen_at_unix: payload.last_seen_at_unix,
+        vnode_assignments: payload.vnode_assignments,
+        membership: payload.membership,
     };
     write_frame(stream, &hello).await?;
 
@@ -228,6 +304,29 @@ where
         }
     };
     Ok((response, outcome))
+}
+
+/// Drive the initiator side of a handshake.
+///
+/// Sends [`ClusterHello`] and reads back the acceptor's
+/// [`ClusterHelloResponse`].
+pub async fn run_initiator<S>(
+    stream: &mut S,
+    local_cluster_id: Uuid,
+    local_node_id: Uuid,
+    server_version: &str,
+) -> Result<(ClusterHelloResponse, HandshakeOutcome), HandshakeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    run_initiator_with_gossip(
+        stream,
+        local_cluster_id,
+        local_node_id,
+        server_version,
+        GossipPayload::default(),
+    )
+    .await
 }
 
 /// Probe one peer using the cluster handshake and return `Ok(())` if the
@@ -252,6 +351,34 @@ pub async fn probe_peer_acceptance(
     }
 }
 
+/// Probe one peer and include local gossip state for membership convergence.
+pub async fn probe_peer_with_gossip(
+    addr: &str,
+    local_cluster_id: Uuid,
+    local_node_id: Uuid,
+    server_version: &str,
+    payload: GossipPayload,
+) -> Result<(), String> {
+    let mut stream = TcpStream::connect(addr)
+        .await
+        .map_err(|e| format!("connect failed: {e}"))?;
+
+    let (_, outcome) = run_initiator_with_gossip(
+        &mut stream,
+        local_cluster_id,
+        local_node_id,
+        server_version,
+        payload,
+    )
+    .await
+    .map_err(|e| format!("handshake error: {e}"))?;
+
+    match outcome {
+        HandshakeOutcome::Accepted { .. } => Ok(()),
+        HandshakeOutcome::Rejected { error } => Err(format!("handshake rejected: {error}")),
+    }
+}
+
 /// Phase 40a peer-port stub.
 ///
 /// Binds `config.cluster.listen_peer` and accepts inter-node TCP
@@ -267,6 +394,7 @@ pub async fn probe_peer_acceptance(
 pub async fn serve(
     config: ServerConfig,
     identity: Arc<NodeIdentity>,
+    coordinator: Arc<Coordinator>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bind = config.cluster.listen_peer.clone();
     if bind.is_empty() {
@@ -318,9 +446,10 @@ pub async fn serve(
                 Ok((mut stream, peer)) => {
                     let known = known_peers.clone();
                     let identity = identity.clone();
+                    let coordinator = coordinator.clone();
                     let server_version = server_version.clone();
                     tokio::spawn(async move {
-                        match run_acceptor(
+                        match run_acceptor_with_hello(
                             &mut stream,
                             identity.cluster_id,
                             identity.node_id,
@@ -329,14 +458,20 @@ pub async fn serve(
                         )
                         .await
                         {
-                            Ok(HandshakeOutcome::Accepted { peer_node_id }) => {
+                            Ok((HandshakeOutcome::Accepted { peer_node_id }, hello)) => {
+                                let peer_id = peer_node_id.to_string();
+                                coordinator.merge_gossip_from_peer(
+                                    &peer_id,
+                                    &hello,
+                                    Some(now_unix()),
+                                );
                                 tracing::info!(
                                     peer = %peer,
                                     peer_node_id = %peer_node_id,
                                     "cluster peer handshake accepted"
                                 );
                             }
-                            Ok(HandshakeOutcome::Rejected { error }) => {
+                            Ok((HandshakeOutcome::Rejected { error }, _)) => {
                                 tracing::warn!(
                                     peer = %peer,
                                     error,
@@ -360,6 +495,13 @@ pub async fn serve(
     });
 
     Ok(())
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -484,6 +626,10 @@ mod tests {
             node_id: node_a,
             server_version: version().into(),
             capabilities: vec![huge],
+            status: None,
+            last_seen_at_unix: None,
+            vnode_assignments: Vec::new(),
+            membership: Vec::new(),
         };
         let err = write_frame(&mut a, &hello).await.unwrap_err();
         assert!(

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### v6 stream — Stream E (Phase 44 complete)
+
+- Phase 44 (gossip membership) is now **complete** in `grumpydb-server`.
+- Gossip handshake payload now carries runtime membership metadata:
+  - `status`
+  - `last_seen_at_unix`
+  - `vnode_assignments`
+  - `membership` snapshots
+- Gossip probe runtime now advertises local membership and converges probe
+  targets from runtime-known peers instead of static-only peer probing.
+- Cluster peer listener now merges incoming gossip payloads from accepted
+  handshakes into coordinator runtime topology state.
+- `TOPOLOGY` peer runtime now converges liveness and vnode-assignment metadata
+  through gossip membership updates.
+
 ### v6 stream — Stream E (Phase 45 complete)
 
 - Phase 45 (multi-writer ack pipeline) is now **complete** in

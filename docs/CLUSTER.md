@@ -5,9 +5,9 @@ This document describes the clustering primitives introduced in v5 (Phase
 (anti-entropy + multi-region).
 
 Status note (v6 Stream E):
-- Phase 44 tranche 1 is delivered. GrumpyDB now runs background peer probes
-  and surfaces live peer liveness in `TOPOLOGY` while keeping the static peer
-  list as the source of truth.
+- Phase 44 is complete. GrumpyDB now runs background peer probes,
+  gossips runtime membership over handshake payloads, and converges peer
+  liveness/vnode metadata in `TOPOLOGY` beyond the initial static seed list.
 - Phase 45 is complete. Coordinator routing defaults to
   `N = min(3, cluster_size)`, write admission is allowed on any local write
   replica in the key's preference list, and bounded `WRITE_CONCERN W` in
@@ -20,8 +20,8 @@ Status note (v6 Stream E):
 A GrumpyDB cluster is a set of nodes that share a common `cluster_id`. Each
 node has a stable `node_id` that survives restarts. Nodes find each other
 through static configuration in v5 (the `[cluster]` TOML section). In v6
-Phase 44 tranche 1, nodes keep this static list and add periodic gossip-style
-probes to track liveness without changing the on-disk format.
+Phase 44, nodes use that static list as bootstrap seeds and converge to a
+runtime membership view via periodic gossip-style probes.
 
 The data plane (TCP+TLS, port 6380) is unchanged — clients connect and
 issue protocol commands as before. The new **cluster plane** (TCP+TLS,
@@ -111,22 +111,23 @@ gc_grace_seconds = 864000
 # lag-gate wiring to /readyz is still in progress.
 max_lag_seconds = 5
 
-# Per-collection writer assignment. v5: manual. v6: dynamic via gossip.
+# Per-collection writer assignment (still config-driven in v6).
+# Gossip convergence updates runtime peer liveness/membership metadata,
+# but does not rewrite this static writer map.
 # `*` = the database default writer.
 writers = [
   { collection = "*", node_id = "..." },
 ]
 
-# v6 Phase 44 tranche 1: background probe cadence and dead-peer threshold.
+# v6 Phase 44: background probe cadence and dead-peer threshold.
 gossip_probe_interval_ms = 1000
 gossip_peer_dead_after_secs = 5
 ```
 
 The reserved fields on each `PeerEntry` (`status`, `last_seen_at_unix`,
-`vnode_assignments`) are part of the v6 schema. In Phase 44 tranche 1,
-gossip updates `status` and `last_seen_at_unix` in memory; the static config
-remains authoritative for peer membership, and `vnode_assignments` is
-currently surfaced by `TOPOLOGY` as configured metadata.
+`vnode_assignments`) are part of the v6 schema. In Phase 44, gossip updates
+these fields in memory and converges membership runtime state from handshake
+payload exchanges.
 
 ## Handshake protocol (v5)
 
@@ -139,7 +140,13 @@ initiator → acceptor:
     cluster_id:     UUID,
     node_id:        UUID,
     server_version: string,
-    capabilities:   [string],   // forward-compat for v6 gossip
+    capabilities:   [string],
+    status:         string?,
+    last_seen_at_unix: u64?,
+    vnode_assignments: [u32],
+    membership: [
+      { node_id, addr, status, last_seen_at_unix?, vnode_assignments }
+    ],
   }
 
 acceptor → initiator:
@@ -157,8 +164,10 @@ Handshake rules:
 
 1. **`cluster_id` must match**, otherwise `accepted = false`,
    `error = "cluster_id_mismatch"`, connection closes.
-2. **`node_id` must appear in the acceptor's static `peers` list**,
-   otherwise `accepted = false`, `error = "unknown_peer"`.
+2. **`node_id` must appear in the acceptor's static `peers` list**, unless
+  the initiator advertises gossip capability (`gossip-membership-v1`) for
+  dynamic membership convergence. Otherwise `accepted = false`,
+  `error = "unknown_peer"`.
 3. Maximum frame size: 64 KiB. Larger frames are rejected with
    `protocol_error`.
 4. After a successful handshake in v5, the acceptor immediately closes
@@ -214,9 +223,9 @@ escape valves. v5/v6/v7 all read the same `node.json` and the same
 `[cluster]` config schema; v6 simply adds new behaviour:
 
 - **v6 (gossip)**: peers populate `status` / `last_seen_at_unix` /
-  `vnode_assignments` fields in the topology schema. In Phase 44 tranche 1,
-  status transitions (`up`, `suspect`, `down`) and `last_seen_at_unix` are
-  driven by periodic probes; membership still comes from static peers config.
+  `vnode_assignments` fields in the topology schema. In Phase 44, status
+  transitions (`up`, `suspect`, `down`) are driven by periodic probes and
+  membership converges by exchanging runtime gossip payloads over handshake.
 - **v6 (multi-writer, Phase 45 complete)**: write-path admission accepts local
   writes when the local node is part of the ring preference list
   (`N=min(3, cluster_size)`), static validation accepts `W ∈ [1, N]`

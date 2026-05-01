@@ -70,7 +70,8 @@ pub async fn listen(
     // Phase 40e will graft the WAL streaming protocol onto the
     // accepted connections; v5 just performs the handshake and closes.
     if !config.cluster.listen_peer.is_empty() {
-        crate::cluster::handshake::serve(config.clone(), identity.clone()).await?;
+        crate::cluster::handshake::serve(config.clone(), identity.clone(), coordinator.clone())
+            .await?;
     }
 
     // v6 Phase 44 (tranche 1): background gossip probes that refresh

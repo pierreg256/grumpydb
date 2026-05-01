@@ -1,15 +1,14 @@
 //! v6 Phase 44: gossip-style membership probes.
 //!
-//! This first tranche keeps the implementation intentionally lightweight:
-//! each node periodically probes configured peers over the existing
-//! inter-node handshake port and updates in-memory peer liveness exposed by
-//! `TOPOLOGY`.
+//! Each node periodically probes peers over the inter-node handshake path,
+//! advertises its own membership view, and converges runtime topology in
+//! memory.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cluster::NodeIdentity;
-use crate::cluster::handshake::probe_peer_acceptance;
+use crate::cluster::handshake::{GossipPayload, probe_peer_with_gossip};
 use crate::config::ClusterSection;
 use crate::coordinator::Coordinator;
 
@@ -17,10 +16,6 @@ use crate::coordinator::Coordinator;
 ///
 /// No-op when no peers are configured.
 pub fn spawn(cluster: ClusterSection, identity: Arc<NodeIdentity>, coordinator: Arc<Coordinator>) {
-    if cluster.peers.is_empty() {
-        return;
-    }
-
     let probe_every = Duration::from_millis(cluster.gossip_probe_interval_ms.max(100));
     let dead_after = cluster.gossip_peer_dead_after_secs.max(1);
     let server_version = format!("grumpydb-server/{}", env!("CARGO_PKG_VERSION"));
@@ -32,13 +27,15 @@ pub fn spawn(cluster: ClusterSection, identity: Arc<NodeIdentity>, coordinator: 
         loop {
             ticker.tick().await;
 
-            for peer in &cluster.peers {
+            let payload = coordinator.gossip_payload();
+            for (node_id, addr) in coordinator.gossip_probe_targets() {
                 probe_one_peer(
-                    peer.node_id.as_str(),
-                    peer.addr.as_str(),
+                    node_id.as_str(),
+                    addr.as_str(),
                     dead_after,
                     &identity,
                     &server_version,
+                    payload.clone(),
                     coordinator.as_ref(),
                 )
                 .await;
@@ -53,11 +50,20 @@ async fn probe_one_peer(
     dead_after_secs: u64,
     identity: &NodeIdentity,
     server_version: &str,
+    payload: GossipPayload,
     coordinator: &Coordinator,
 ) {
     let now = now_unix();
 
-    match probe_peer_acceptance(addr, identity.cluster_id, identity.node_id, server_version).await {
+    match probe_peer_with_gossip(
+        addr,
+        identity.cluster_id,
+        identity.node_id,
+        server_version,
+        payload,
+    )
+    .await
+    {
         Ok(()) => {
             coordinator.update_peer_liveness(node_id, "up", Some(now));
         }
