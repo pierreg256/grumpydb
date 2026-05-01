@@ -12,6 +12,8 @@ cargo build --workspace             # Build all crates
 cargo test --workspace              # All tests (~515 across all workspace crates)
 cargo test --lib                    # Unit tests only (current crate)
 cargo test --test '*'               # Integration tests only
+# If a slow CI runner needs more startup budget for server e2e tests:
+GRUMPYDB_TEST_SERVER_STARTUP_TIMEOUT_SECS=120 cargo test --test server_e2e
 cargo clippy --workspace --all-targets -- -D warnings  # Lint (strict, zero warnings)
 cargo fmt --all -- --check          # Check formatting
 cargo doc --workspace --no-deps     # Generate docs
@@ -120,7 +122,10 @@ grumpydb/                       # workspace root
 │   └── src/{lib,server}.rs     # TestServer: spawns the real server binary,
 │                               #   random port + tempdir + auto-kill on Drop;
 │                               #   exposes crash() (SIGKILL) and restart()
-│                               #   for crash-recovery tests.
+│                               #   for crash-recovery tests; startup retries
+│                               #   (3 attempts), configurable startup timeout
+│                               #   via GRUMPYDB_TEST_SERVER_STARTUP_TIMEOUT_SECS
+│                               #   (default 60s), and early-exit stderr capture.
 │
 ├── drivers/typescript/         # @grumpydb/client npm package (Node ≥ 18)
 │   └── src/{index,client,database,connection,protocol,auth,types,errors}.ts

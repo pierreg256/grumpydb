@@ -220,9 +220,7 @@ impl Command {
             Command::Insert { .. }
             | Command::Update { .. }
             | Command::Delete { .. }
-            | Command::PutWithVc { .. } => {
-                Action::Write
-            }
+            | Command::PutWithVc { .. } => Action::Write,
 
             // Admin
             Command::CreateCollection(_)

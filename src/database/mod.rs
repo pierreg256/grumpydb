@@ -606,7 +606,12 @@ impl Database {
         }
     }
 
-    fn lookup_snapshot_version(&self, collection: &str, key: &Uuid, snapshot: Hlc) -> Option<Option<Value>> {
+    fn lookup_snapshot_version(
+        &self,
+        collection: &str,
+        key: &Uuid,
+        snapshot: Hlc,
+    ) -> Option<Option<Value>> {
         let key_versions = self.versions.get(collection)?.get(key)?;
         let mut selected = None;
         let mut found = false;
@@ -701,7 +706,12 @@ impl Database {
             .unwrap_or(0)
     }
 
-    pub(crate) fn snapshot_get(&mut self, collection: &str, key: &Uuid, snapshot: Hlc) -> Result<Option<Value>> {
+    pub(crate) fn snapshot_get(
+        &mut self,
+        collection: &str,
+        key: &Uuid,
+        snapshot: Hlc,
+    ) -> Result<Option<Value>> {
         if let Some(value) = self.lookup_snapshot_version(collection, key, snapshot) {
             return Ok(value);
         }
@@ -1080,7 +1090,10 @@ mod tests {
 
         db.update("c", &key, Value::Integer(2)).unwrap();
 
-        assert_eq!(db.snapshot_get("c", &key, snapshot).unwrap(), Some(Value::Integer(1)));
+        assert_eq!(
+            db.snapshot_get("c", &key, snapshot).unwrap(),
+            Some(Value::Integer(1))
+        );
         db.unregister_reader_snapshot(snapshot);
         assert_eq!(db.get("c", &key).unwrap(), Some(Value::Integer(2)));
     }
@@ -1100,7 +1113,10 @@ mod tests {
         db.register_reader_snapshot(snapshot);
         db.delete("c", &key).unwrap();
 
-        assert_eq!(db.snapshot_get("c", &key, snapshot).unwrap(), Some(Value::Integer(10)));
+        assert_eq!(
+            db.snapshot_get("c", &key, snapshot).unwrap(),
+            Some(Value::Integer(10))
+        );
         db.unregister_reader_snapshot(snapshot);
         assert_eq!(db.get("c", &key).unwrap(), None);
     }
@@ -1135,7 +1151,10 @@ mod tests {
         db.update("c", &key, Value::Integer(2)).unwrap();
         db.update("c", &key, Value::Integer(3)).unwrap();
 
-        assert_eq!(db.snapshot_get("c", &key, snapshot).unwrap(), Some(Value::Integer(1)));
+        assert_eq!(
+            db.snapshot_get("c", &key, snapshot).unwrap(),
+            Some(Value::Integer(1))
+        );
         assert!(db.debug_version_len("c", &key) >= 3);
 
         db.unregister_reader_snapshot(snapshot);

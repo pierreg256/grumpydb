@@ -1466,7 +1466,10 @@ The server-spawning helper lives in the internal crate
 `TestServer` struct that spawns the actual server binary on a random port
 with a tempdir, kills it on `Drop`, and provides `crash()` (SIGKILL) and
 `restart()` (respawn on the same data dir + port) for crash-recovery
-tests.
+tests. Startup readiness uses up to 3 retry attempts and a configurable
+timeout via `GRUMPYDB_TEST_SERVER_STARTUP_TIMEOUT_SECS` (default: 60s).
+If the server exits before readiness, the harness includes captured stderr
+in the failure diagnostics.
 
 ### 21.3 Benchmarks (`benches/`)
 Criterion-based, with HTML reports under `target/criterion/report/`.

@@ -16,7 +16,6 @@
 //! }
 //! ```
 
-
 mod connection;
 mod error;
 mod jwks;

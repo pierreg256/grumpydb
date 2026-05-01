@@ -28,7 +28,11 @@ pub struct Coordinator {
 
 impl Coordinator {
     /// Build coordinator state from static config and durable node identity.
-    pub fn from_config(identity: &NodeIdentity, cluster: &ClusterSection, local_addr: &str) -> Self {
+    pub fn from_config(
+        identity: &NodeIdentity,
+        cluster: &ClusterSection,
+        local_addr: &str,
+    ) -> Self {
         let mut ring = Ring::new(RingConfig {
             vnodes_per_node: cluster.vnodes_per_node,
         });
@@ -108,7 +112,9 @@ impl Coordinator {
             .get(&owner_node)
             .map(|s| s.as_str())
             .unwrap_or("unknown");
-        Err(format!("forward to {owner_node}@{owner_addr}; not the owner"))
+        Err(format!(
+            "forward to {owner_node}@{owner_addr}; not the owner"
+        ))
     }
 
     /// Return the static topology snapshot exposed by `TOPOLOGY`.

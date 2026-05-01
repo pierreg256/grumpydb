@@ -141,20 +141,21 @@ fn require_arg<'a>(rest: &'a str, command: &str, arg_name: &str) -> Result<&'a s
 }
 
 fn parse_concern_token(token: &str, expected: char, keyword: &str) -> Result<u16, ProtocolError> {
-    let (k, v) = token
-        .split_once('=')
-        .ok_or_else(|| ProtocolError::MissingArgument(format!("{keyword} requires {expected}=<n>")))?;
+    let (k, v) = token.split_once('=').ok_or_else(|| {
+        ProtocolError::MissingArgument(format!("{keyword} requires {expected}=<n>"))
+    })?;
     if !k.eq_ignore_ascii_case(&expected.to_string()) {
         return Err(ProtocolError::MissingArgument(format!(
             "{keyword} requires {expected}=<n>"
         )));
     }
-    v.parse::<u16>().map_err(|_| {
-        ProtocolError::MissingArgument(format!("{keyword} requires {expected}=<n>"))
-    })
+    v.parse::<u16>()
+        .map_err(|_| ProtocolError::MissingArgument(format!("{keyword} requires {expected}=<n>")))
 }
 
-fn parse_consistency_prefix(mut input: &str) -> Result<(&str, Option<u16>, Option<u16>), ProtocolError> {
+fn parse_consistency_prefix(
+    mut input: &str,
+) -> Result<(&str, Option<u16>, Option<u16>), ProtocolError> {
     let mut read_concern = None;
     let mut write_concern = None;
 
@@ -844,8 +845,7 @@ mod tests {
     #[test]
     fn test_parse_put_with_vc() {
         assert_eq!(
-            parse_command("PUT_WITH_VC users abc123 {\"name\":\"bob\"} {\"n1\":4}\r\n")
-                .unwrap(),
+            parse_command("PUT_WITH_VC users abc123 {\"name\":\"bob\"} {\"n1\":4}\r\n").unwrap(),
             Command::PutWithVc {
                 collection: "users".into(),
                 key: "abc123".into(),

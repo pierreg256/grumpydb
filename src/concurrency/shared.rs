@@ -101,9 +101,13 @@ impl SharedReadTx {
         start: &Value,
         end: &Value,
     ) -> Result<Vec<(Uuid, Value)>> {
-        self.inner
-            .write()
-            .snapshot_query_range(collection, index_name, start, end, self.snapshot_hlc)
+        self.inner.write().snapshot_query_range(
+            collection,
+            index_name,
+            start,
+            end,
+            self.snapshot_hlc,
+        )
     }
 }
 
@@ -465,7 +469,8 @@ mod tests {
     fn test_shared_read_tx_clone_tracks_watermark() {
         let (_dir, db) = setup_shared_db();
         db.create_collection("c").unwrap();
-        db.insert("c", Uuid::from_u128(1), Value::Integer(1)).unwrap();
+        db.insert("c", Uuid::from_u128(1), Value::Integer(1))
+            .unwrap();
 
         let tx1 = db.begin_read();
         let snapshot = tx1.snapshot_hlc();

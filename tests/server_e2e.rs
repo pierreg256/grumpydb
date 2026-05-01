@@ -300,7 +300,10 @@ async fn test_e2e_snapshot_hlc_exposed_to_clients() {
         grumpydb_protocol::Response::Integer(n) => n,
         other => panic!("unexpected SNAPSHOT_HLC response: {other:?}"),
     };
-    assert!(second >= first, "SNAPSHOT_HLC must be monotonic: {first} -> {second}");
+    assert!(
+        second >= first,
+        "SNAPSHOT_HLC must be monotonic: {first} -> {second}"
+    );
 }
 
 #[tokio::test]

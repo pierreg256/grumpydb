@@ -311,7 +311,10 @@ fn supports_consistency(command: &Command) -> bool {
     )
 }
 
-fn validate_consistency_command(command: &Command, coordinator: &Coordinator) -> Result<(), String> {
+fn validate_consistency_command(
+    command: &Command,
+    coordinator: &Coordinator,
+) -> Result<(), String> {
     let (r, w) = consistency_values(command);
     if r.is_none() && w.is_none() {
         return Ok(());

@@ -4,6 +4,7 @@ use std::net::{SocketAddr, TcpListener as StdListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+use std::{env, io::Read};
 
 use rand::Rng;
 use rand::distributions::Alphanumeric;
@@ -32,6 +33,9 @@ pub struct TestServer {
     process: Child,
     _tmp: TempDir,
 }
+
+const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 60;
+const STARTUP_RETRY_ATTEMPTS: usize = 3;
 
 impl TestServer {
     /// Spawn a fresh server on a random port and wait until it accepts connections.
@@ -67,12 +71,9 @@ impl TestServer {
     pub async fn spawn_with_extra_args(extra: &[&str]) -> Self {
         let tmp = TempDir::new().expect("create tempdir");
         let data_dir = tmp.path().to_path_buf();
-        let port = pick_free_port();
-        let http_port = pick_free_port();
-        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let http_addr: SocketAddr = format!("127.0.0.1:{http_port}").parse().unwrap();
         let admin_password = random_password(32);
         let bin = locate_server_binary();
+        let startup_timeout = startup_timeout();
 
         // Default to HS256 for the test harness — RSA-2048 keygen in
         // debug builds is too slow for the volume of TestServer
@@ -85,47 +86,68 @@ impl TestServer {
                 .expect("write default test config");
         }
 
-        let mut cmd = Command::new(&bin);
-        cmd.arg("--data")
-            .arg(&data_dir)
-            .arg("--no-tls")
-            .arg("--bind")
-            .arg(addr.to_string())
-            .arg("--http-bind")
-            .arg(http_addr.to_string())
-            .arg("--bootstrap-password")
-            .arg(&admin_password)
-            .arg("--log-format")
-            .arg("text")
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        if !extra.contains(&"--config") {
-            cmd.arg("--config").arg(&default_config_path);
+        let mut attempt_errors = Vec::new();
+        for attempt in 1..=STARTUP_RETRY_ATTEMPTS {
+            let port = pick_free_port();
+            let http_port = pick_free_port();
+            let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+            let http_addr: SocketAddr = format!("127.0.0.1:{http_port}").parse().unwrap();
+
+            let mut cmd = Command::new(&bin);
+            cmd.arg("--data")
+                .arg(&data_dir)
+                .arg("--no-tls")
+                .arg("--bind")
+                .arg(addr.to_string())
+                .arg("--http-bind")
+                .arg(http_addr.to_string())
+                .arg("--bootstrap-password")
+                .arg(&admin_password)
+                .arg("--log-format")
+                .arg("text")
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
+            if !extra.contains(&"--config") {
+                cmd.arg("--config").arg(&default_config_path);
+            }
+            for a in extra {
+                cmd.arg(a);
+            }
+
+            let mut process = cmd.spawn().unwrap_or_else(|e| {
+                panic!(
+                    "failed to spawn grumpydb-server (binary={}): {e}",
+                    bin.display()
+                )
+            });
+
+            match wait_until_ready(&mut process, addr, startup_timeout).await {
+                Ok(()) => {
+                    return Self {
+                        addr,
+                        http_addr,
+                        data_dir,
+                        admin_tenant: "_system",
+                        admin_user: "admin",
+                        admin_password,
+                        process,
+                        _tmp: tmp,
+                    };
+                }
+                Err(err) => {
+                    let _ = process.kill();
+                    let _ = process.wait();
+                    attempt_errors.push(format!(
+                        "attempt {attempt}/{STARTUP_RETRY_ATTEMPTS} failed (tcp={addr}, http={http_addr}): {err}"
+                    ));
+                }
+            }
         }
-        for a in extra {
-            cmd.arg(a);
-        }
 
-        let process = cmd.spawn().unwrap_or_else(|e| {
-            panic!(
-                "failed to spawn grumpydb-server (binary={}): {e}",
-                bin.display()
-            )
-        });
-
-        let server = Self {
-            addr,
-            http_addr,
-            data_dir,
-            admin_tenant: "_system",
-            admin_user: "admin",
-            admin_password,
-            process,
-            _tmp: tmp,
-        };
-
-        wait_until_ready(addr, Duration::from_secs(60)).await;
-        server
+        panic!(
+            "failed to start grumpydb-server after {STARTUP_RETRY_ATTEMPTS} attempts:\n{}",
+            attempt_errors.join("\n")
+        );
     }
 
     /// Send `SIGKILL` to the server and reap the child.
@@ -174,7 +196,9 @@ impl TestServer {
         // Replace the dead handle so `Drop` reaps the live one.
         self.process = process;
 
-        wait_until_ready(self.addr, Duration::from_secs(60)).await;
+        wait_until_ready(&mut self.process, self.addr, startup_timeout())
+            .await
+            .unwrap_or_else(|e| panic!("failed to restart grumpydb-server: {e}"));
     }
 }
 
@@ -200,22 +224,60 @@ fn pick_free_port() -> u16 {
     port
 }
 
-async fn wait_until_ready(addr: SocketAddr, timeout: Duration) {
+async fn wait_until_ready(
+    process: &mut Child,
+    addr: SocketAddr,
+    timeout: Duration,
+) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     let mut last_err: Option<std::io::Error> = None;
     while Instant::now() < deadline {
+        if let Some(status) = process.try_wait().map_err(|e| {
+            format!("failed to poll grumpydb-server process state while waiting for {addr}: {e}")
+        })? {
+            let stderr = read_stderr(process);
+            return Err(format!(
+                "grumpydb-server exited before readiness on {addr} with status {status}; stderr:\n{stderr}"
+            ));
+        }
+
         match TcpStream::connect(addr).await {
-            Ok(_) => return,
+            Ok(_) => return Ok(()),
             Err(e) => {
                 last_err = Some(e);
                 sleep(Duration::from_millis(50)).await;
             }
         }
     }
-    panic!(
+    Err(format!(
         "grumpydb-server at {addr} did not become ready within {:?}: {:?}",
         timeout, last_err
-    );
+    ))
+}
+
+fn startup_timeout() -> Duration {
+    let secs = env::var("GRUMPYDB_TEST_SERVER_STARTUP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_STARTUP_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+fn read_stderr(process: &mut Child) -> String {
+    let Some(mut stderr) = process.stderr.take() else {
+        return "<stderr unavailable>".to_string();
+    };
+
+    let mut s = String::new();
+    if stderr.read_to_string(&mut s).is_err() {
+        return "<failed to read stderr>".to_string();
+    }
+
+    if s.is_empty() {
+        "<stderr empty>".to_string()
+    } else {
+        s
+    }
 }
 
 /// Locate the `grumpydb-server` binary under `target/{debug,release}` by
