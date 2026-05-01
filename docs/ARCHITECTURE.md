@@ -1237,12 +1237,19 @@ Each connection is spawned in its own tokio task. The handler:
 2. Parses via `grumpydb_protocol::parse_command`.
 3. Validates optional consistency prefixes (`READ_CONCERN` / `WRITE_CONCERN`) via
    the coordinator (`-ERR consistency concerns are only supported for data commands`
-   or `-ERR v5 only supports R=1, W=1` on mismatch).
+  or phase-specific rejections on mismatch: `R>1` remains deferred to Phase 47,
+  and `W>1` currently returns `v6 phase 45 in progress: W>1 write acknowledgements are not enabled yet`).
 4. Calls `session.authorize(&cmd)` (returns `-ERR access denied` on failure).
 5. Dispatches to `execute_command` which maps to `SharedServer` calls.
-6. For key-based data commands, enforces v5 owner placement (`N=1`) through
-   `Coordinator::enforce_local_owner`; when local node is not owner, returns
-   `-ERR forward to <node>@<addr>; not the owner`.
+6. For key-based data commands, applies split routing checks:
+   - Read paths (`GET`, `GET_WITH_VC`) enforce primary-owner placement through
+     `Coordinator::enforce_local_owner`; when local node is not owner, returns
+     `-ERR forward to <node>@<addr>; not the owner`.
+   - Write paths (`INSERT`, `UPDATE`, `DELETE`, `PUT_WITH_VC`) enforce local
+     write-replica admission through `Coordinator::enforce_local_write_replica`.
+     In v6 Phase 45 tranche 1, writes are accepted on any local replica in the
+     preference list (`N = min(3, cluster_size)`); otherwise the handler returns
+     `-ERR forward to <node>@<addr>; local node is outside write replica set`.
   In Phase 42 tranche 2, both drivers parse this hint and perform a single
   automatic one-hop retry to the forwarded target.
 7. `TOPOLOGY` returns a JSON topology view (`cluster_id`, `local_node_id`,

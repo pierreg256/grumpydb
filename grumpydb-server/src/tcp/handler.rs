@@ -500,7 +500,8 @@ async fn execute_command(
             value,
         } => with_db(session, shared_server, |db| {
             if let Some(db_name) = session.current_db()
-                && let Err(e) = coordinator.enforce_local_owner(db_name, collection, key.as_bytes())
+                && let Err(e) =
+                    coordinator.enforce_local_write_replica(db_name, collection, key.as_bytes())
             {
                 return Err(e);
             }
@@ -527,7 +528,8 @@ async fn execute_command(
             value,
         } => with_db(session, shared_server, |db| {
             if let Some(db_name) = session.current_db()
-                && let Err(e) = coordinator.enforce_local_owner(db_name, collection, key.as_bytes())
+                && let Err(e) =
+                    coordinator.enforce_local_write_replica(db_name, collection, key.as_bytes())
             {
                 return Err(e);
             }
@@ -538,7 +540,8 @@ async fn execute_command(
         }),
         Command::Delete { collection, key } => with_db(session, shared_server, |db| {
             if let Some(db_name) = session.current_db()
-                && let Err(e) = coordinator.enforce_local_owner(db_name, collection, key.as_bytes())
+                && let Err(e) =
+                    coordinator.enforce_local_write_replica(db_name, collection, key.as_bytes())
             {
                 return Err(e);
             }
@@ -553,7 +556,8 @@ async fn execute_command(
             vector_clock,
         } => with_db(session, shared_server, |db| {
             if let Some(db_name) = session.current_db()
-                && let Err(e) = coordinator.enforce_local_owner(db_name, collection, key.as_bytes())
+                && let Err(e) =
+                    coordinator.enforce_local_write_replica(db_name, collection, key.as_bytes())
             {
                 return Err(e);
             }

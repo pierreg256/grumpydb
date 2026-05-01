@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### v6 stream — Stream E (Phase 45 tranche 1)
+
+- Phase 45 (multi-writer ack pipeline) is now **in progress**; tranche 1 is
+  delivered in `grumpydb-server`.
+- Coordinator replication factor now defaults to `N = min(3, cluster_size)`.
+- Write commands (`INSERT`, `UPDATE`, `DELETE`, `PUT_WITH_VC`) are now admitted
+  when the local node belongs to the ring preference list for the key.
+- Read owner enforcement remains primary-owner based.
+- Consistency concerns still reject `W>1` with the explicit interim error:
+  `v6 phase 45 in progress: W>1 write acknowledgements are not enabled yet`.
+- `R>1` remains deferred to Phase 47.
+- Updated e2e expectation to match the interim `W>1` rejection message.
+
 ### v6 stream — Stream E (Phase 44 tranche 1)
 
 - Phase 44 (gossip membership) is now **in progress**; tranche 1 is delivered

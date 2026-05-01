@@ -232,7 +232,7 @@ async fn test_e2e_topology_returns_json_snapshot() {
 }
 
 #[tokio::test]
-async fn test_e2e_v5_rejects_non_default_concerns() {
+async fn test_e2e_v6_phase45_still_rejects_w_gt_1_until_ack_pipeline() {
     let server = TestServer::spawn().await;
     let mut client = admin_client(&server).await;
     client.create_database("wc_db").await.expect("create db");
@@ -262,7 +262,7 @@ async fn test_e2e_v5_rejects_non_default_concerns() {
     match resp {
         grumpydb_protocol::Response::Error(msg) => {
             assert!(
-                msg.contains("v5 only supports R=1, W=1"),
+                msg.contains("W>1 write acknowledgements are not enabled yet"),
                 "unexpected error: {msg}"
             );
         }

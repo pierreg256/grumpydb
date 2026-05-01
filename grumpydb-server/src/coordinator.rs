@@ -1,4 +1,4 @@
-//! Coordinator helpers for v5 routing and protocol validation (Phase 40f).
+//! Coordinator helpers for routing and protocol validation.
 
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,12 +11,6 @@ use crate::cluster::NodeIdentity;
 use crate::config::{ClusterSection, PeerEntry, WriterEntry};
 
 /// Lightweight server-side coordinator.
-///
-/// v5 behavior:
-/// - validates protocol-level concerns and enforces `R=1, W=1`
-/// - computes first owner (`N=1`) from the ring and returns a forward hint
-///   when the local node is not the owner
-/// - serves a JSON topology snapshot for smart clients
 #[derive(Debug)]
 pub struct Coordinator {
     local_node_id: String,
@@ -89,11 +83,14 @@ impl Coordinator {
             );
         }
 
+        let total_nodes = 1 + cluster.peers.len();
+        // v6 default replication factor: N = min(3, cluster_size).
+        let n = total_nodes.clamp(1, 3);
+
         Self {
             local_node_id,
             cluster_id,
-            // v5 honors only N=1 end-to-end while freezing protocol shape.
-            n: 1,
+            n,
             vnodes_per_node: cluster.vnodes_per_node,
             ring,
             peer_addrs,
@@ -126,7 +123,11 @@ impl Coordinator {
             .and_then(|p| p.last_seen_at_unix)
     }
 
-    /// Validate read/write concerns against v5 constraints.
+    /// Validate read/write concerns.
+    ///
+    /// v6 Phase 45 keeps read concerns pinned to `R=1` (Phase 47 will
+    /// enable `R>1`) and still enforces `W=1` until write-ack fanout is
+    /// fully wired.
     pub fn validate_concerns(
         &self,
         read_concern: Option<u16>,
@@ -135,8 +136,17 @@ impl Coordinator {
         let r = read_concern.unwrap_or(1) as usize;
         let w = write_concern.unwrap_or(1) as usize;
 
-        if r != 1 || w != 1 {
-            return Err("v5 only supports R=1, W=1".to_string());
+        if r != 1 {
+            return Err(
+                "v6 currently supports R=1 only (read repair lands in phase 47)".to_string(),
+            );
+        }
+
+        if w != 1 {
+            return Err(
+                "v6 phase 45 in progress: W>1 write acknowledgements are not enabled yet"
+                    .to_string(),
+            );
         }
 
         if !(1..=self.n).contains(&r) || !(1..=self.n).contains(&w) {
@@ -149,7 +159,8 @@ impl Coordinator {
         Ok(())
     }
 
-    /// Enforce v5 owner placement (`N=1`) and return a forward hint if needed.
+    /// Enforce primary-owner placement for read paths and return a forward
+    /// hint if needed.
     pub fn enforce_local_owner(
         &self,
         database: &str,
@@ -177,6 +188,40 @@ impl Coordinator {
             .unwrap_or("unknown");
         Err(format!(
             "forward to {owner_node}@{owner_addr}; not the owner"
+        ))
+    }
+
+    /// Enforce v6 multi-writer replica placement for write paths.
+    ///
+    /// During phase 45, writes are accepted on any node that belongs to the
+    /// preference list of size `N` for the key.
+    pub fn enforce_local_write_replica(
+        &self,
+        database: &str,
+        collection: &str,
+        key_bytes: &[u8],
+    ) -> Result<(), String> {
+        let key = RoutingKey {
+            database,
+            collection,
+            key_bytes,
+        };
+        let owners = self.ring.preference_list(&key, self.n);
+        if owners.iter().any(|n| n == &self.local_node_id) {
+            return Ok(());
+        }
+
+        let owner_node = owners
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.local_node_id.clone());
+        let owner_addr = self
+            .peer_addrs
+            .get(&owner_node)
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
+        Err(format!(
+            "forward to {owner_node}@{owner_addr}; local node is outside write replica set"
         ))
     }
 
@@ -280,6 +325,41 @@ mod tests {
         assert_eq!(
             c.peer_last_seen("11111111-1111-1111-1111-111111111111"),
             Some(42)
+        );
+    }
+
+    #[test]
+    fn test_replication_factor_defaults_to_cluster_size_capped_at_three() {
+        let mut cluster = ClusterSection::default();
+        for i in 0..4 {
+            cluster.peers.push(PeerEntry {
+                node_id: format!("00000000-0000-0000-0000-00000000000{i}"),
+                addr: format!("node-{i}:6390"),
+                status: None,
+                last_seen_at_unix: None,
+                vnode_assignments: vec![],
+            });
+        }
+
+        let c = Coordinator::from_config(&identity(), &cluster, "127.0.0.1:6380");
+        let topo = c.topology_json();
+        assert_eq!(topo.get("n").and_then(|v| v.as_u64()), Some(3));
+    }
+
+    #[test]
+    fn test_enforce_local_write_replica_accepts_local_node_when_in_preference_list() {
+        let mut cluster = ClusterSection::default();
+        cluster.peers.push(PeerEntry {
+            node_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            addr: "node-2:6390".to_string(),
+            status: None,
+            last_seen_at_unix: None,
+            vnode_assignments: vec![],
+        });
+        let c = Coordinator::from_config(&identity(), &cluster, "127.0.0.1:6380");
+        assert!(
+            c.enforce_local_write_replica("db", "users", b"some-key")
+                .is_ok()
         );
     }
 }
