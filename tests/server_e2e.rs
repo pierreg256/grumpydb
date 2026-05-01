@@ -262,7 +262,8 @@ async fn test_e2e_v6_phase45_still_rejects_w_gt_1_until_ack_pipeline() {
     match resp {
         grumpydb_protocol::Response::Error(msg) => {
             assert!(
-                msg.contains("W>1 write acknowledgements are not enabled yet"),
+                msg.contains("invalid consistency concerns")
+                    || msg.contains("not enough live replicas"),
                 "unexpected error: {msg}"
             );
         }

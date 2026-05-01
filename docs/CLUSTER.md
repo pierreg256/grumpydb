@@ -8,10 +8,12 @@ Status note (v6 Stream E):
 - Phase 44 tranche 1 is delivered. GrumpyDB now runs background peer probes
   and surfaces live peer liveness in `TOPOLOGY` while keeping the static peer
   list as the source of truth.
-- Phase 45 tranche 1 is delivered. Coordinator routing now defaults to
+- Phase 45 tranches 1-2 are delivered. Coordinator routing now defaults to
   `N = min(3, cluster_size)` and write admission is allowed on any local write
-  replica in the key's preference list. `W>1` acknowledgements are still
-  explicitly rejected until the full ack pipeline lands.
+  replica in the key's preference list. Validation now accepts bounded
+  `WRITE_CONCERN W` in `[1, N]` (with `R` still pinned to `1`) and keyed writes
+  perform runtime validation against currently live replicas in the key
+  preference list.
 
 ## Mental model
 
@@ -217,8 +219,11 @@ escape valves. v5/v6/v7 all read the same `node.json` and the same
   driven by periodic probes; membership still comes from static peers config.
 - **v6 (multi-writer, tranche 1)**: write-path admission accepts local writes
   when the local node is part of the ring preference list (`N=min(3, cluster_size)`),
-  while read-path owner checks remain primary-owner based. Consistency still
-  enforces `W=1` and `R=1` pending Phases 45/47 completion.
+  while read-path owner checks remain primary-owner based.
+- **v6 (multi-writer, tranche 2)**: static validation accepts `W ∈ [1, N]`
+  (`R` remains `1`), keyed writes validate `W` against currently live replicas
+  in the key preference list, and liveness treats `down` as unavailable while
+  `unknown`/`suspect` remain potentially available.
 - **v7 (multi-region)**: a `region` field is reserved on `PeerEntry`
   (added in this doc when Phase 51 lands) and the ring becomes a
   per-region affair.

@@ -126,8 +126,8 @@ impl Coordinator {
     /// Validate read/write concerns.
     ///
     /// v6 Phase 45 keeps read concerns pinned to `R=1` (Phase 47 will
-    /// enable `R>1`) and still enforces `W=1` until write-ack fanout is
-    /// fully wired.
+    /// enable `R>1`). Write concerns are bounded here and enforced at
+    /// key-level by [`Self::validate_write_concern_for_key`].
     pub fn validate_concerns(
         &self,
         read_concern: Option<u16>,
@@ -142,17 +142,45 @@ impl Coordinator {
             );
         }
 
-        if w != 1 {
-            return Err(
-                "v6 phase 45 in progress: W>1 write acknowledgements are not enabled yet"
-                    .to_string(),
-            );
-        }
-
         if !(1..=self.n).contains(&r) || !(1..=self.n).contains(&w) {
             return Err(format!(
                 "invalid consistency concerns: require R and W in [1, {}]",
                 self.n
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Validate write concern against the key's currently-live replica set.
+    pub fn validate_write_concern_for_key(
+        &self,
+        database: &str,
+        collection: &str,
+        key_bytes: &[u8],
+        write_concern: Option<u16>,
+    ) -> Result<(), String> {
+        let w = write_concern.unwrap_or(1) as usize;
+        if !(1..=self.n).contains(&w) {
+            return Err(format!(
+                "invalid consistency concerns: require R and W in [1, {}]",
+                self.n
+            ));
+        }
+
+        let key = RoutingKey {
+            database,
+            collection,
+            key_bytes,
+        };
+        let owners = self.ring.preference_list(&key, self.n);
+        let live = owners
+            .iter()
+            .filter(|node_id| self.is_peer_live(node_id))
+            .count();
+        if w > live {
+            return Err(format!(
+                "not enough live replicas for W={w}: have {live} live replicas in preference list"
             ));
         }
 
@@ -271,6 +299,17 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+impl Coordinator {
+    fn is_peer_live(&self, node_id: &str) -> bool {
+        let peers = self.peers.read();
+        let Some(peer) = peers.get(node_id) else {
+            return false;
+        };
+        // Phase 45 tranche 2: optimistic on unknown/suspect, hard-fail on down.
+        !peer.status.eq_ignore_ascii_case("down")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +330,7 @@ mod tests {
         let c = Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
         assert!(c.validate_concerns(Some(1), Some(1)).is_ok());
         assert!(c.validate_concerns(Some(2), Some(1)).is_err());
+        // W=2 remains invalid in single-node mode (N=1).
         assert!(c.validate_concerns(Some(1), Some(2)).is_err());
     }
 
@@ -359,6 +399,42 @@ mod tests {
         let c = Coordinator::from_config(&identity(), &cluster, "127.0.0.1:6380");
         assert!(
             c.enforce_local_write_replica("db", "users", b"some-key")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_write_concern_for_key_rejects_when_live_replicas_insufficient() {
+        let mut cluster = ClusterSection::default();
+        cluster.peers.push(PeerEntry {
+            node_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            addr: "node-2:6390".to_string(),
+            status: Some("down".to_string()),
+            last_seen_at_unix: None,
+            vnode_assignments: vec![],
+        });
+
+        let c = Coordinator::from_config(&identity(), &cluster, "127.0.0.1:6380");
+        let err = c
+            .validate_write_concern_for_key("db", "users", b"k1", Some(2))
+            .expect_err("W=2 should fail with only one live replica");
+        assert!(err.contains("not enough live replicas"), "got: {err}");
+    }
+
+    #[test]
+    fn test_validate_write_concern_for_key_accepts_when_live_replicas_sufficient() {
+        let mut cluster = ClusterSection::default();
+        cluster.peers.push(PeerEntry {
+            node_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            addr: "node-2:6390".to_string(),
+            status: Some("up".to_string()),
+            last_seen_at_unix: None,
+            vnode_assignments: vec![],
+        });
+
+        let c = Coordinator::from_config(&identity(), &cluster, "127.0.0.1:6380");
+        assert!(
+            c.validate_write_concern_for_key("db", "users", b"k1", Some(2))
                 .is_ok()
         );
     }

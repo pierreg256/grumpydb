@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### v6 stream — Stream E (Phase 45 tranche 2)
+
+- Phase 45 (multi-writer ack pipeline) remains **in progress**; tranche 2 is
+  delivered in `grumpydb-server`.
+- Coordinator consistency validation now accepts bounded write concerns
+  `W in [1, N]` at validation stage (`R` remains pinned to `1`).
+- Added key-level runtime write-concern validation for keyed write commands:
+  requested `W` must be `<=` currently live replicas in the key preference list.
+- Runtime liveness for this validation now uses peer status:
+  `down` is unavailable; `unknown` and `suspect` are treated as potentially
+  available.
+- Handler now applies keyed write-concern runtime validation after auth and
+  before command execution.
+- Read/non-write commands carrying `WRITE_CONCERN` now return a clear
+  validation error.
+- Existing e2e expectation for `W>1` was updated to tolerate
+  topology-dependent rejection messages.
+
 ### v6 stream — Stream E (Phase 45 tranche 1)
 
 - Phase 45 (multi-writer ack pipeline) is now **in progress**; tranche 1 is

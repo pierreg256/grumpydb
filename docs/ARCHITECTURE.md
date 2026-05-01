@@ -1236,12 +1236,18 @@ Each connection is spawned in its own tokio task. The handler:
 1. Reads a line (enforcing `MAX_LINE_LENGTH`).
 2. Parses via `grumpydb_protocol::parse_command`.
 3. Validates optional consistency prefixes (`READ_CONCERN` / `WRITE_CONCERN`) via
-   the coordinator (`-ERR consistency concerns are only supported for data commands`
-  or phase-specific rejections on mismatch: `R>1` remains deferred to Phase 47,
-  and `W>1` currently returns `v6 phase 45 in progress: W>1 write acknowledgements are not enabled yet`).
+  the coordinator. In v6 Phase 45 tranche 2, validation accepts bounded
+  `WRITE_CONCERN W` in `[1, N]` while `READ_CONCERN R` remains pinned to `1`.
+  Read/non-write commands carrying `WRITE_CONCERN` return a clear validation
+  error (`-ERR consistency concerns are only supported for data commands`).
 4. Calls `session.authorize(&cmd)` (returns `-ERR access denied` on failure).
-5. Dispatches to `execute_command` which maps to `SharedServer` calls.
-6. For key-based data commands, applies split routing checks:
+5. For key-based write commands, applies runtime write-concern validation after
+  auth and before execution. In v6 Phase 45 tranche 2, requested `W` must be
+  `<=` currently live replicas in the key preference list. Liveness uses peer
+  status (`down` is unavailable; `unknown`/`suspect` are treated as
+  potentially available).
+6. Dispatches to `execute_command` which maps to `SharedServer` calls.
+7. For key-based data commands, applies split routing checks:
    - Read paths (`GET`, `GET_WITH_VC`) enforce primary-owner placement through
      `Coordinator::enforce_local_owner`; when local node is not owner, returns
      `-ERR forward to <node>@<addr>; not the owner`.
@@ -1252,14 +1258,14 @@ Each connection is spawned in its own tokio task. The handler:
      `-ERR forward to <node>@<addr>; local node is outside write replica set`.
   In Phase 42 tranche 2, both drivers parse this hint and perform a single
   automatic one-hop retry to the forwarded target.
-7. `TOPOLOGY` returns a JSON topology view (`cluster_id`, `local_node_id`,
+8. `TOPOLOGY` returns a JSON topology view (`cluster_id`, `local_node_id`,
   `n`, `vnodes_per_node`, `peers`, `writers`) from
   `Coordinator::topology_json()`. In v6 Phase 44 tranche 1, each peer entry
   includes live `status` and `last_seen_at_unix` liveness fields plus
   `vnode_assignments` metadata.
-8. `SNAPSHOT_HLC` returns the current selected-database snapshot HLC as an
+9. `SNAPSHOT_HLC` returns the current selected-database snapshot HLC as an
   integer response (via `db.begin_read().snapshot_hlc()`).
-9. Writes the `Response` back to the stream.
+10. Writes the `Response` back to the stream.
 
 Listener startup (`tcp/listener.rs`) also spawns a background gossip probe
 task in v6 Phase 44 tranche 1. The task periodically handshakes configured

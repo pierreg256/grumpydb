@@ -157,6 +157,12 @@ where
             continue;
         }
 
+        if let Err(e) = validate_write_concern_runtime(&command, &session, coordinator.as_ref()) {
+            tracing::warn!(error = %e, "write concern validation failed");
+            write_resp(&mut writer, &Response::Error(e)).await?;
+            continue;
+        }
+
         // Execute (with panic isolation: a corrupt page or bug in the engine
         // must not tear down the entire server. Surface as Corruption error.)
         let started = std::time::Instant::now();
@@ -311,6 +317,16 @@ fn supports_consistency(command: &Command) -> bool {
     )
 }
 
+fn is_write_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Insert { .. }
+            | Command::Update { .. }
+            | Command::Delete { .. }
+            | Command::PutWithVc { .. }
+    )
+}
+
 fn validate_consistency_command(
     command: &Command,
     coordinator: &Coordinator,
@@ -325,7 +341,51 @@ fn validate_consistency_command(
         return Err("consistency concerns are only supported for data commands".into());
     }
 
+    let base = base_command(command);
+    if !is_write_command(base) && w.is_some() {
+        return Err("write concern is only supported for write commands".into());
+    }
+
     coordinator.validate_concerns(r, w)
+}
+
+fn write_target(command: &Command) -> Option<(&str, &str)> {
+    match base_command(command) {
+        Command::Insert {
+            collection, key, ..
+        }
+        | Command::Update {
+            collection, key, ..
+        }
+        | Command::Delete { collection, key }
+        | Command::PutWithVc {
+            collection, key, ..
+        } => Some((collection.as_str(), key.as_str())),
+        _ => None,
+    }
+}
+
+fn validate_write_concern_runtime(
+    command: &Command,
+    session: &SessionContext,
+    coordinator: &Coordinator,
+) -> Result<(), String> {
+    let (_, write_concern) = consistency_values(command);
+    if write_concern.is_none() {
+        return Ok(());
+    }
+
+    let Some((collection, key)) = write_target(command) else {
+        return Ok(());
+    };
+
+    let Some(db_name) = session.current_db() else {
+        // Let normal command execution emit the canonical "no database selected"
+        // error if needed.
+        return Ok(());
+    };
+
+    coordinator.validate_write_concern_for_key(db_name, collection, key.as_bytes(), write_concern)
 }
 
 async fn write_resp<W: tokio::io::AsyncWrite + Unpin>(
