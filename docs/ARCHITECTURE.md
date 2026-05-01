@@ -1236,13 +1236,13 @@ Each connection is spawned in its own tokio task. The handler:
 1. Reads a line (enforcing `MAX_LINE_LENGTH`).
 2. Parses via `grumpydb_protocol::parse_command`.
 3. Validates optional consistency prefixes (`READ_CONCERN` / `WRITE_CONCERN`) via
-  the coordinator. In v6 Phase 45 tranche 2, validation accepts bounded
+  the coordinator. In v6 Phase 45, validation accepts bounded
   `WRITE_CONCERN W` in `[1, N]` while `READ_CONCERN R` remains pinned to `1`.
   Read/non-write commands carrying `WRITE_CONCERN` return a clear validation
   error (`-ERR consistency concerns are only supported for data commands`).
 4. Calls `session.authorize(&cmd)` (returns `-ERR access denied` on failure).
 5. For key-based write commands, applies runtime write-concern validation after
-  auth and before execution. In v6 Phase 45 tranche 2, requested `W` must be
+  auth and before execution. In v6 Phase 45, requested `W` must be
   `<=` currently live replicas in the key preference list. Liveness uses peer
   status (`down` is unavailable; `unknown`/`suspect` are treated as
   potentially available).
@@ -1253,9 +1253,13 @@ Each connection is spawned in its own tokio task. The handler:
      `-ERR forward to <node>@<addr>; not the owner`.
    - Write paths (`INSERT`, `UPDATE`, `DELETE`, `PUT_WITH_VC`) enforce local
      write-replica admission through `Coordinator::enforce_local_write_replica`.
-     In v6 Phase 45 tranche 1, writes are accepted on any local replica in the
+     In v6 Phase 45, writes are accepted on any local replica in the
      preference list (`N = min(3, cluster_size)`); otherwise the handler returns
      `-ERR forward to <node>@<addr>; local node is outside write replica set`.
+   - For key-based writes with `W > 1`, execution now performs ack fanout/wait
+     to replica peers on the handshake transport. If quorum is not reached
+     before `write_ack_timeout_ms`, the write returns a quorum failure and does
+     not report success.
   In Phase 42 tranche 2, both drivers parse this hint and perform a single
   automatic one-hop retry to the forwarded target.
 8. `TOPOLOGY` returns a JSON topology view (`cluster_id`, `local_node_id`,

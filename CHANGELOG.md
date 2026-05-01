@@ -7,10 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### v6 stream — Stream E (Phase 45 tranche 2)
+### v6 stream — Stream E (Phase 45 complete)
 
-- Phase 45 (multi-writer ack pipeline) remains **in progress**; tranche 2 is
-  delivered in `grumpydb-server`.
+- Phase 45 (multi-writer ack pipeline) is now **complete** in
+  `grumpydb-server`.
 - Coordinator consistency validation now accepts bounded write concerns
   `W in [1, N]` at validation stage (`R` remains pinned to `1`).
 - Added key-level runtime write-concern validation for keyed write commands:
@@ -20,21 +20,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   available.
 - Handler now applies keyed write-concern runtime validation after auth and
   before command execution.
+- Added write ack fanout/wait to replica peers over handshake probe transport
+  for keyed writes.
+- Added timeout and partial-ack failure semantics, controlled by
+  `write_ack_timeout_ms`.
+- Handler now blocks write success when quorum wait fails.
+- Added coordinator tests for quorum success and timeout failure paths.
 - Read/non-write commands carrying `WRITE_CONCERN` now return a clear
   validation error.
-- Existing e2e expectation for `W>1` was updated to tolerate
-  topology-dependent rejection messages.
+- Read-repair and hinted-handoff interactions remain scoped to Phases 47/48.
 
 ### v6 stream — Stream E (Phase 45 tranche 1)
 
-- Phase 45 (multi-writer ack pipeline) is now **in progress**; tranche 1 is
+- Phase 45 (multi-writer ack pipeline) entered implementation; tranche 1 is
   delivered in `grumpydb-server`.
 - Coordinator replication factor now defaults to `N = min(3, cluster_size)`.
 - Write commands (`INSERT`, `UPDATE`, `DELETE`, `PUT_WITH_VC`) are now admitted
   when the local node belongs to the ring preference list for the key.
 - Read owner enforcement remains primary-owner based.
-- Consistency concerns still reject `W>1` with the explicit interim error:
-  `v6 phase 45 in progress: W>1 write acknowledgements are not enabled yet`.
+- At tranche 1 time, consistency concerns still rejected `W>1` with the
+  interim error `v6 phase 45 in progress: W>1 write acknowledgements are not
+  enabled yet`.
 - `R>1` remains deferred to Phase 47.
 - Updated e2e expectation to match the interim `W>1` rejection message.
 

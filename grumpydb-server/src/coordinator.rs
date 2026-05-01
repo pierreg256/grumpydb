@@ -3,19 +3,27 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use futures::future::join_all;
 use grumpydb_ring::{Ring, RingConfig, RoutingKey};
 use parking_lot::RwLock;
 use serde_json::json;
+use tokio::time::Duration;
+use tokio::time::timeout;
+use uuid::Uuid;
 
 use crate::cluster::NodeIdentity;
+use crate::cluster::handshake::probe_peer_acceptance;
 use crate::config::{ClusterSection, PeerEntry, WriterEntry};
 
 /// Lightweight server-side coordinator.
 #[derive(Debug)]
 pub struct Coordinator {
     local_node_id: String,
+    local_node_uuid: Uuid,
     cluster_id: String,
+    cluster_uuid: Uuid,
     n: usize,
+    write_ack_timeout_ms: u64,
     vnodes_per_node: u32,
     ring: Ring<String>,
     peer_addrs: BTreeMap<String, String>,
@@ -89,8 +97,11 @@ impl Coordinator {
 
         Self {
             local_node_id,
+            local_node_uuid: identity.node_id,
             cluster_id,
+            cluster_uuid: identity.cluster_id,
             n,
+            write_ack_timeout_ms: cluster.write_ack_timeout_ms,
             vnodes_per_node: cluster.vnodes_per_node,
             ring,
             peer_addrs,
@@ -185,6 +196,91 @@ impl Coordinator {
         }
 
         Ok(())
+    }
+
+    /// Fan out write acknowledgements to replica peers and wait until quorum
+    /// `W` is satisfied or timeout/failures leave insufficient acknowledgements.
+    pub async fn wait_for_write_ack_quorum(
+        &self,
+        database: &str,
+        collection: &str,
+        key_bytes: &[u8],
+        write_concern: Option<u16>,
+    ) -> Result<(), String> {
+        let w = write_concern.unwrap_or(1) as usize;
+        if w <= 1 {
+            return Ok(());
+        }
+
+        let key = RoutingKey {
+            database,
+            collection,
+            key_bytes,
+        };
+        let owners = self.ring.preference_list(&key, self.n);
+
+        let mut acked = 1usize; // local node ack
+        let mut fanout_addrs = Vec::new();
+        for node_id in owners {
+            if node_id == self.local_node_id {
+                continue;
+            }
+            if let Some(addr) = self.peer_addrs.get(&node_id) {
+                fanout_addrs.push(addr.clone());
+            }
+        }
+
+        let required_remote = w.saturating_sub(1);
+        if fanout_addrs.len() < required_remote {
+            return Err(format!(
+                "write quorum cannot be satisfied: need {required_remote} remote acks, only {} replica peers available",
+                fanout_addrs.len()
+            ));
+        }
+
+        let timeout_dur = Duration::from_millis(self.write_ack_timeout_ms.max(50));
+        let server_version = format!("grumpydb-server/{}", env!("CARGO_PKG_VERSION"));
+        let probes = fanout_addrs.into_iter().map(|addr| {
+            let server_version = server_version.clone();
+            async move {
+                let r = timeout(
+                    timeout_dur,
+                    probe_peer_acceptance(
+                        &addr,
+                        self.cluster_uuid,
+                        self.local_node_uuid,
+                        &server_version,
+                    ),
+                )
+                .await;
+
+                match r {
+                    Ok(Ok(())) => Ok::<(), String>(()),
+                    Ok(Err(e)) => Err(format!("{addr}: {e}")),
+                    Err(_) => Err(format!(
+                        "{addr}: timeout after {}ms",
+                        timeout_dur.as_millis()
+                    )),
+                }
+            }
+        });
+
+        let results = join_all(probes).await;
+        let mut failures = Vec::new();
+        for res in results {
+            match res {
+                Ok(()) => acked += 1,
+                Err(e) => failures.push(e),
+            }
+        }
+        if acked >= w {
+            return Ok(());
+        }
+
+        Err(format!(
+            "write quorum not reached: acked {acked}/{w}; failures: {}",
+            failures.join(" | ")
+        ))
     }
 
     /// Enforce primary-owner placement for read paths and return a forward
@@ -285,6 +381,7 @@ impl Coordinator {
             "cluster_id": self.cluster_id,
             "local_node_id": self.local_node_id,
             "n": self.n,
+            "write_ack_timeout_ms": self.write_ack_timeout_ms,
             "vnodes_per_node": self.vnodes_per_node,
             "peers": peers,
             "writers": writers,
@@ -313,7 +410,11 @@ impl Coordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cluster::handshake::{HandshakeOutcome, run_acceptor};
     use crate::config::ClusterSection;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
     use uuid::Uuid;
 
     fn identity() -> NodeIdentity {
@@ -401,6 +502,82 @@ mod tests {
             c.enforce_local_write_replica("db", "users", b"some-key")
                 .is_ok()
         );
+    }
+
+    async fn start_peer_acceptor(cluster_id: Uuid, peer_node_id: Uuid, known_peer: Uuid) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut known = HashSet::new();
+            known.insert(known_peer);
+            let res = run_acceptor(
+                &mut stream,
+                cluster_id,
+                peer_node_id,
+                "grumpydb-test/phase45",
+                &known,
+            )
+            .await
+            .expect("acceptor handshake");
+            assert!(matches!(res, HandshakeOutcome::Accepted { .. }));
+        });
+
+        addr.to_string()
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_write_ack_quorum_succeeds_with_peer_ack() {
+        let identity = identity();
+        let peer_id = Uuid::new_v4();
+        let addr = start_peer_acceptor(identity.cluster_id, peer_id, identity.node_id).await;
+
+        let mut cluster = ClusterSection {
+            write_ack_timeout_ms: 500,
+            ..ClusterSection::default()
+        };
+        cluster.peers.push(PeerEntry {
+            node_id: peer_id.to_string(),
+            addr,
+            status: Some("up".into()),
+            last_seen_at_unix: None,
+            vnode_assignments: vec![],
+        });
+
+        let c = Arc::new(Coordinator::from_config(
+            &identity,
+            &cluster,
+            "127.0.0.1:6380",
+        ));
+        c.wait_for_write_ack_quorum("db", "users", b"k1", Some(2))
+            .await
+            .expect("W=2 quorum should pass with one peer ack");
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_write_ack_quorum_times_out_with_partial_acks() {
+        let identity = identity();
+        let peer_id = Uuid::new_v4();
+
+        let mut cluster = ClusterSection {
+            write_ack_timeout_ms: 100,
+            ..ClusterSection::default()
+        };
+        cluster.peers.push(PeerEntry {
+            node_id: peer_id.to_string(),
+            addr: "127.0.0.1:1".to_string(),
+            status: Some("up".into()),
+            last_seen_at_unix: None,
+            vnode_assignments: vec![],
+        });
+
+        let c = Coordinator::from_config(&identity, &cluster, "127.0.0.1:6380");
+        let err = c
+            .wait_for_write_ack_quorum("db", "users", b"k1", Some(2))
+            .await
+            .expect_err("W=2 should fail when remote ack is unavailable");
+        assert!(err.contains("write quorum not reached"), "got: {err}");
     }
 
     #[test]

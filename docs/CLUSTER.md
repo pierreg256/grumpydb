@@ -8,12 +8,12 @@ Status note (v6 Stream E):
 - Phase 44 tranche 1 is delivered. GrumpyDB now runs background peer probes
   and surfaces live peer liveness in `TOPOLOGY` while keeping the static peer
   list as the source of truth.
-- Phase 45 tranches 1-2 are delivered. Coordinator routing now defaults to
-  `N = min(3, cluster_size)` and write admission is allowed on any local write
-  replica in the key's preference list. Validation now accepts bounded
-  `WRITE_CONCERN W` in `[1, N]` (with `R` still pinned to `1`) and keyed writes
-  perform runtime validation against currently live replicas in the key
-  preference list.
+- Phase 45 is complete. Coordinator routing defaults to
+  `N = min(3, cluster_size)`, write admission is allowed on any local write
+  replica in the key's preference list, and bounded `WRITE_CONCERN W` in
+  `[1, N]` is validated (with `R` still pinned to `1`). Keyed writes now fan
+  out ack waits to replica peers over the handshake transport and fail when
+  quorum cannot be met before `write_ack_timeout_ms`.
 
 ## Mental model
 
@@ -217,13 +217,12 @@ escape valves. v5/v6/v7 all read the same `node.json` and the same
   `vnode_assignments` fields in the topology schema. In Phase 44 tranche 1,
   status transitions (`up`, `suspect`, `down`) and `last_seen_at_unix` are
   driven by periodic probes; membership still comes from static peers config.
-- **v6 (multi-writer, tranche 1)**: write-path admission accepts local writes
-  when the local node is part of the ring preference list (`N=min(3, cluster_size)`),
-  while read-path owner checks remain primary-owner based.
-- **v6 (multi-writer, tranche 2)**: static validation accepts `W ∈ [1, N]`
-  (`R` remains `1`), keyed writes validate `W` against currently live replicas
-  in the key preference list, and liveness treats `down` as unavailable while
-  `unknown`/`suspect` remain potentially available.
+- **v6 (multi-writer, Phase 45 complete)**: write-path admission accepts local
+  writes when the local node is part of the ring preference list
+  (`N=min(3, cluster_size)`), static validation accepts `W ∈ [1, N]`
+  (`R` remains `1`), keyed writes validate `W` against currently live replicas,
+  and keyed write execution performs ack fanout/wait. If quorum is not reached
+  before `write_ack_timeout_ms`, the write fails with quorum-wait failure.
 - **v7 (multi-region)**: a `region` field is reserved on `PeerEntry`
   (added in this doc when Phase 51 lands) and the ring becomes a
   per-region affair.

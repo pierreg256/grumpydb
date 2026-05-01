@@ -31,6 +31,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::net::TcpStream;
 use uuid::Uuid;
 
 use crate::cluster::NodeIdentity;
@@ -227,6 +228,28 @@ where
         }
     };
     Ok((response, outcome))
+}
+
+/// Probe one peer using the cluster handshake and return `Ok(())` if the
+/// peer accepts this node as a valid cluster member.
+pub async fn probe_peer_acceptance(
+    addr: &str,
+    local_cluster_id: Uuid,
+    local_node_id: Uuid,
+    server_version: &str,
+) -> Result<(), String> {
+    let mut stream = TcpStream::connect(addr)
+        .await
+        .map_err(|e| format!("connect failed: {e}"))?;
+
+    let (_, outcome) = run_initiator(&mut stream, local_cluster_id, local_node_id, server_version)
+        .await
+        .map_err(|e| format!("handshake error: {e}"))?;
+
+    match outcome {
+        HandshakeOutcome::Accepted { .. } => Ok(()),
+        HandshakeOutcome::Rejected { error } => Err(format!("handshake rejected: {error}")),
+    }
 }
 
 /// Phase 40a peer-port stub.

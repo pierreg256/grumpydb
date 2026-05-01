@@ -163,6 +163,12 @@ where
             continue;
         }
 
+        if let Err(e) = wait_for_write_ack_quorum(&command, &session, coordinator.as_ref()).await {
+            tracing::warn!(error = %e, "write ack quorum failed");
+            write_resp(&mut writer, &Response::Error(e)).await?;
+            continue;
+        }
+
         // Execute (with panic isolation: a corrupt page or bug in the engine
         // must not tear down the entire server. Surface as Corruption error.)
         let started = std::time::Instant::now();
@@ -386,6 +392,28 @@ fn validate_write_concern_runtime(
     };
 
     coordinator.validate_write_concern_for_key(db_name, collection, key.as_bytes(), write_concern)
+}
+
+async fn wait_for_write_ack_quorum(
+    command: &Command,
+    session: &SessionContext,
+    coordinator: &Coordinator,
+) -> Result<(), String> {
+    let (_, write_concern) = consistency_values(command);
+    if write_concern.unwrap_or(1) <= 1 {
+        return Ok(());
+    }
+
+    let Some((collection, key)) = write_target(command) else {
+        return Ok(());
+    };
+    let Some(db_name) = session.current_db() else {
+        return Ok(());
+    };
+
+    coordinator
+        .wait_for_write_ack_quorum(db_name, collection, key.as_bytes(), write_concern)
+        .await
 }
 
 async fn write_resp<W: tokio::io::AsyncWrite + Unpin>(

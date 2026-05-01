@@ -8,10 +8,8 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tokio::net::TcpStream;
-
 use crate::cluster::NodeIdentity;
-use crate::cluster::handshake::{HandshakeOutcome, run_initiator};
+use crate::cluster::handshake::probe_peer_acceptance;
 use crate::config::ClusterSection;
 use crate::coordinator::Coordinator;
 
@@ -59,49 +57,12 @@ async fn probe_one_peer(
 ) {
     let now = now_unix();
 
-    let stream = TcpStream::connect(addr).await;
-    let mut stream = match stream {
-        Ok(s) => s,
-        Err(e) => {
-            on_probe_failure(
-                node_id,
-                dead_after_secs,
-                now,
-                coordinator,
-                &format!("connect failed: {e}"),
-            );
-            return;
-        }
-    };
-
-    match run_initiator(
-        &mut stream,
-        identity.cluster_id,
-        identity.node_id,
-        server_version,
-    )
-    .await
-    {
-        Ok((_, HandshakeOutcome::Accepted { .. })) => {
+    match probe_peer_acceptance(addr, identity.cluster_id, identity.node_id, server_version).await {
+        Ok(()) => {
             coordinator.update_peer_liveness(node_id, "up", Some(now));
         }
-        Ok((_, HandshakeOutcome::Rejected { error })) => {
-            on_probe_failure(
-                node_id,
-                dead_after_secs,
-                now,
-                coordinator,
-                &format!("handshake rejected: {error}"),
-            );
-        }
         Err(e) => {
-            on_probe_failure(
-                node_id,
-                dead_after_secs,
-                now,
-                coordinator,
-                &format!("handshake error: {e}"),
-            );
+            on_probe_failure(node_id, dead_after_secs, now, coordinator, &e);
         }
     }
 }
