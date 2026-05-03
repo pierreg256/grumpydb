@@ -9,9 +9,16 @@ fuzz_target!(|data: &[u8]| {
     // never panic (only Ok or Err allowed).
     let mut offset = 0;
     while offset < data.len() {
-        match WalRecord::from_bytes(&data[offset..]) {
-            Ok((_record, consumed)) if consumed > 0 => offset += consumed,
-            _ => break,
+        let chunk = &data[offset..];
+        let consumed = WalRecord::from_bytes_v2(chunk)
+            .or_else(|_| WalRecord::from_bytes_v1(chunk))
+            .ok()
+            .map(|(_record, consumed)| consumed)
+            .unwrap_or(0);
+
+        if consumed == 0 {
+            break;
         }
+        offset += consumed;
     }
 });
