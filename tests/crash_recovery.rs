@@ -439,3 +439,69 @@ async fn test_repeated_crash_recovery() {
 // state is always a prefix of the acked operation log. This is left as
 // future work; integrating proptest with async/tokio non-trivially
 // exceeds the budget for Phase 29.
+
+#[tokio::test]
+async fn test_crash_recovery_rebalance_control_plane_still_operable() {
+    let mut server = TestServer::spawn().await;
+
+    {
+        let mut client = admin_client(&server).await;
+        client
+            .create_database("rebalance_recovery_db")
+            .await
+            .expect("create db");
+        let mut db = client.database("rebalance_recovery_db").await.expect("use");
+        db.create_collection("docs").await.expect("create coll");
+    }
+
+    let mut client = admin_client(&server).await;
+    let plan_before = client
+        .raw_execute("REBALANCE PLAN ADD-NODE 11111111-1111-1111-1111-111111111111")
+        .await
+        .expect("plan before crash");
+    let body = match plan_before {
+        grumpydb_protocol::Response::Bulk(Some(s)) => s,
+        other => panic!("unexpected plan response before crash: {other:?}"),
+    };
+    let json_before: serde_json::Value = serde_json::from_str(&body).expect("plan json before");
+    assert_eq!(json_before.get("action"), Some(&json!("add-node")));
+
+    server.crash().await;
+    server.restart().await;
+
+    let mut client = admin_client(&server).await;
+    let mut db = client
+        .database("rebalance_recovery_db")
+        .await
+        .expect("use after restart");
+    db.insert("docs", key(42), &json!({ "i": 42 }))
+        .await
+        .expect("insert after restart");
+
+    let plan_after = client
+        .raw_execute("REBALANCE PLAN REMOVE-NODE 11111111-1111-1111-1111-111111111111")
+        .await
+        .expect("plan after restart");
+    let body = match plan_after {
+        grumpydb_protocol::Response::Bulk(Some(s)) => s,
+        other => panic!("unexpected plan response after crash: {other:?}"),
+    };
+    let json_after: serde_json::Value = serde_json::from_str(&body).expect("plan json after");
+    assert_eq!(json_after.get("action"), Some(&json!("remove-node")));
+
+    let exec_after = client
+        .raw_execute(
+            "REBALANCE EXECUTE REMOVE-NODE 11111111-1111-1111-1111-111111111111 docs",
+        )
+        .await
+        .expect("execute after restart");
+    let body = match exec_after {
+        grumpydb_protocol::Response::Bulk(Some(s)) => s,
+        other => panic!("unexpected execute response after crash: {other:?}"),
+    };
+    let json_exec: serde_json::Value = serde_json::from_str(&body).expect("execute json");
+    assert_eq!(
+        json_exec.get("action"),
+        Some(&json!("remove-node-transfer"))
+    );
+}

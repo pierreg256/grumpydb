@@ -200,4 +200,32 @@ mod tests {
         assert_eq!(second[0].key, "k2");
         assert_eq!(store.backlog_len().expect("len after all"), 0);
     }
+
+    #[test]
+    fn test_read_repair_store_persists_backlog_across_reopen() {
+        let tmp = TempDir::new().expect("tmp");
+        {
+            let store = ReadRepairStore::open(tmp.path()).expect("open");
+            store.append(&sample_intent("k1")).expect("append 1");
+            store.append(&sample_intent("k2")).expect("append 2");
+            assert_eq!(store.backlog_len().expect("len before reopen"), 2);
+        }
+
+        let store = ReadRepairStore::open(tmp.path()).expect("reopen");
+        assert_eq!(store.backlog_len().expect("len after reopen"), 2);
+        let drained = store.drain(10).expect("drain");
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].key, "k1");
+        assert_eq!(drained[1].key, "k2");
+    }
+
+    #[test]
+    fn test_read_repair_store_drain_zero_preserves_backlog() {
+        let tmp = TempDir::new().expect("tmp");
+        let store = ReadRepairStore::open(tmp.path()).expect("open");
+        store.append(&sample_intent("k1")).expect("append");
+        let drained = store.drain(0).expect("drain zero");
+        assert!(drained.is_empty());
+        assert_eq!(store.backlog_len().expect("len"), 1);
+    }
 }

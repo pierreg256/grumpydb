@@ -348,4 +348,34 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn test_hint_store_persists_backlog_across_reopen() {
+        let tmp = TempDir::new().expect("tmp");
+        {
+            let store = HintStore::open(tmp.path()).expect("open");
+            store.append("node-a", &sample_hint("k1")).expect("append 1");
+            store.append("node-a", &sample_hint("k2")).expect("append 2");
+            assert_eq!(store.backlog_len("node-a").expect("len before reopen"), 2);
+        }
+
+        let store = HintStore::open(tmp.path()).expect("reopen");
+        assert_eq!(store.backlog_len("node-a").expect("len after reopen"), 2);
+        let drained = store.drain_for_node("node-a", 10).expect("drain");
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].key, "k1");
+        assert_eq!(drained[1].key, "k2");
+    }
+
+    #[test]
+    fn test_hint_store_drain_zero_preserves_backlog() {
+        let tmp = TempDir::new().expect("tmp");
+        let store = HintStore::open(tmp.path()).expect("open");
+        store.append("node-a", &sample_hint("k1")).expect("append");
+        let drained = store
+            .drain_for_node("node-a", 0)
+            .expect("drain with zero limit");
+        assert!(drained.is_empty());
+        assert_eq!(store.backlog_len("node-a").expect("len"), 1);
+    }
 }

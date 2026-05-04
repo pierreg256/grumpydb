@@ -1519,6 +1519,9 @@ Cross-cutting prerequisites:
 6. Inter-node authenticated peer RPC over the handshake channel is now used for
    read fan-out (`GET`), repair/rebalance writeback (`UPSERT`), and deletes
    (`DELETE`).
+7. Added durability unit coverage for the read-repair backlog store:
+   `test_read_repair_store_persists_backlog_across_reopen` and
+   `test_read_repair_store_drain_zero_preserves_backlog`.
 
 ### Not yet delivered (still in Phase 47)
 1. Expand convergence beyond keyed `GET` path and harden behavior under
@@ -1540,7 +1543,10 @@ Cross-cutting prerequisites:
    - `append(target_node_id, hint)`
    - `backlog_len(target_node_id)`
    - `drain_for_node(target_node_id, limit)`
-4. Unit coverage landed for append/length tracking and bounded drain behavior.
+4. Unit coverage landed for append/length tracking and bounded drain behavior,
+   including durability-on-reopen and zero-drain backlog preservation
+   (`test_hint_store_persists_backlog_across_reopen`,
+   `test_hint_store_drain_zero_preserves_backlog`).
 5. Listener startup now opens `HintStore` from `data_dir` and wires it into
    per-connection handler pipelines.
 6. On keyed write quorum failure (`W>1`), handler now enqueues durable hints
@@ -1595,6 +1601,11 @@ Cross-cutting prerequisites:
      validation.
    - e2e tests for JSON plan responses, `USE <db>` requirement on execute,
      and JSON execute responses after `USE`.
+10. Crash/restart churn hardening coverage landed in
+   `tests/crash_recovery.rs`:
+   `test_crash_recovery_rebalance_control_plane_still_operable` validates
+   that `REBALANCE PLAN`/`REBALANCE EXECUTE` control-plane commands remain
+   operable after restart (without claiming full multi-node convergence).
 
 ### Remaining scope for Phase 49
 1. Broaden transfer orchestration beyond current per-command local execution.
