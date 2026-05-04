@@ -1,6 +1,6 @@
 //! Per-connection handler: read commands, authorize, execute, respond.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -14,6 +14,7 @@ use grumpydb::GrumpyError;
 use grumpydb::concurrency::shared::SharedServer;
 use grumpydb::document::crdt::merge_values as merge_crdt_values;
 use grumpydb::document::value::{CrdtKind, Value};
+use grumpydb::index::encoding::{encode_sortable_value, extract_field};
 use grumpydb_protocol::{Command, MAX_LINE_LENGTH, PROTOCOL_VERSION, Response, parse_command};
 
 use crate::auth::role::{ResourceScope, RoleAssignment, RoleName};
@@ -30,6 +31,8 @@ pub struct RepairPipelines {
     pub hint_store: Arc<HintStore>,
     pub read_repair_store: Arc<ReadRepairStore>,
 }
+
+const VERIFIED_QUERY_MAX_CANDIDATES: usize = 4096;
 
 /// Handle a single client connection (plaintext or TLS).
 pub async fn handle_connection<S>(
@@ -291,6 +294,23 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+fn query_route_key(command: &Command) -> Option<String> {
+    match base_command(command) {
+        Command::Query {
+            collection,
+            index_name,
+            value,
+        } => Some(format!("q:{collection}:{index_name}:{value}")),
+        Command::QueryRange {
+            collection,
+            index_name,
+            start,
+            end,
+        } => Some(format!("qr:{collection}:{index_name}:{start}:{end}")),
+        _ => None,
+    }
+}
+
 fn write_hint_operation(command: &Command) -> Option<HintOperation> {
     match base_command(command) {
         Command::Insert { value, .. } | Command::Update { value, .. } => {
@@ -326,6 +346,14 @@ async fn maybe_converge_read_quorum(
     if read_concern.unwrap_or(1) <= 1 {
         return response;
     }
+
+    if matches!(
+        base_command(command),
+        Command::Query { .. } | Command::QueryRange { .. }
+    ) {
+        return verify_index_query_quorum(command, session, coordinator, shared_server).await;
+    }
+
     let Some((collection, key)) = read_target(command) else {
         return response;
     };
@@ -416,6 +444,279 @@ async fn maybe_converge_read_quorum(
     }
 
     Response::Bulk(Some(canonical))
+}
+
+async fn verify_index_query_quorum(
+    command: &Command,
+    session: &SessionContext,
+    coordinator: &Coordinator,
+    shared_server: &SharedServer,
+) -> Response {
+    let (read_concern, _) = match effective_consistency_values(command, session, shared_server) {
+        Ok(v) => v,
+        Err(e) => return Response::Error(e),
+    };
+
+    let Some(db_name) = session.current_db() else {
+        return Response::Error("no database selected (use USE <db>)".into());
+    };
+    let tenant = match session.tenant() {
+        Ok(t) => t.to_string(),
+        Err(e) => return Response::Error(e.to_string()),
+    };
+
+    let db = match shared_server.database(&tenant, db_name) {
+        Ok(db) => db,
+        Err(e) => return Response::Error(e.to_string()),
+    };
+
+    match base_command(command) {
+        Command::Query {
+            collection,
+            index_name,
+            value,
+        } => {
+            let expected = match parse_json_value(value) {
+                Ok(v) => v,
+                Err(e) => return Response::Error(e),
+            };
+            let field_path = match db.index_field_path(collection, index_name) {
+                Ok(p) => p,
+                Err(e) => return Response::Error(e.to_string()),
+            };
+
+            let mut candidates: HashSet<Uuid> = HashSet::new();
+            match db.query(collection, index_name, &expected) {
+                Ok(rows) => {
+                    for (id, _) in rows {
+                        let _ = candidates.insert(id);
+                    }
+                }
+                Err(e) => return Response::Error(e.to_string()),
+            }
+
+            let route_key = format!("q:{collection}:{index_name}:{value}");
+            let remote = coordinator
+                .fanout_query_peer_candidates_exact(
+                    &tenant,
+                    db_name,
+                    collection,
+                    route_key.as_bytes(),
+                    index_name,
+                    value,
+                )
+                .await;
+            for (_node_id, res) in remote {
+                if let Ok(keys) = res {
+                    for key in keys {
+                        if let Ok(id) = Uuid::parse_str(&key) {
+                            let _ = candidates.insert(id);
+                        }
+                    }
+                }
+            }
+
+            if candidates.len() > VERIFIED_QUERY_MAX_CANDIDATES {
+                return Response::Error(format!(
+                    "verified query candidate limit exceeded: {} > {}",
+                    candidates.len(),
+                    VERIFIED_QUERY_MAX_CANDIDATES
+                ));
+            }
+
+            let mut ids: Vec<Uuid> = candidates.into_iter().collect();
+            ids.sort();
+
+            let mut items = Vec::new();
+            for id in ids {
+                let key = id.to_string();
+                if let Err(e) = coordinator
+                    .wait_for_read_ack_quorum(db_name, collection, key.as_bytes(), read_concern)
+                    .await
+                {
+                    return Response::Error(e);
+                }
+
+                match resolve_quorum_document_for_key(
+                    coordinator,
+                    &db,
+                    &tenant,
+                    db_name,
+                    collection,
+                    &key,
+                )
+                .await
+                {
+                    Ok(Some(doc)) => {
+                        let matches =
+                            extract_field(&doc, &field_path).is_some_and(|v| v == &expected);
+                        if matches {
+                            items.push(Response::Bulk(Some(format!(
+                                "{} {}",
+                                id,
+                                value_to_json(&doc)
+                            ))));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Response::Error(e),
+                }
+            }
+
+            Response::Array(items)
+        }
+        Command::QueryRange {
+            collection,
+            index_name,
+            start,
+            end,
+        } => {
+            let start_value = match parse_json_value(start) {
+                Ok(v) => v,
+                Err(e) => return Response::Error(e),
+            };
+            let end_value = match parse_json_value(end) {
+                Ok(v) => v,
+                Err(e) => return Response::Error(e),
+            };
+            let start_encoded = match encode_sortable_value(&start_value) {
+                Ok(v) => v,
+                Err(e) => return Response::Error(e.to_string()),
+            };
+            let end_encoded = match encode_sortable_value(&end_value) {
+                Ok(v) => v,
+                Err(e) => return Response::Error(e.to_string()),
+            };
+            let field_path = match db.index_field_path(collection, index_name) {
+                Ok(p) => p,
+                Err(e) => return Response::Error(e.to_string()),
+            };
+
+            let mut candidates: HashSet<Uuid> = HashSet::new();
+            match db.query_range(collection, index_name, &start_value, &end_value) {
+                Ok(rows) => {
+                    for (id, _) in rows {
+                        let _ = candidates.insert(id);
+                    }
+                }
+                Err(e) => return Response::Error(e.to_string()),
+            }
+
+            let route_key = format!("qr:{collection}:{index_name}:{start}:{end}");
+            let remote = coordinator
+                .fanout_query_peer_candidates_range(
+                    &tenant,
+                    db_name,
+                    collection,
+                    route_key.as_bytes(),
+                    index_name,
+                    start,
+                    end,
+                )
+                .await;
+            for (_node_id, res) in remote {
+                if let Ok(keys) = res {
+                    for key in keys {
+                        if let Ok(id) = Uuid::parse_str(&key) {
+                            let _ = candidates.insert(id);
+                        }
+                    }
+                }
+            }
+
+            if candidates.len() > VERIFIED_QUERY_MAX_CANDIDATES {
+                return Response::Error(format!(
+                    "verified query candidate limit exceeded: {} > {}",
+                    candidates.len(),
+                    VERIFIED_QUERY_MAX_CANDIDATES
+                ));
+            }
+
+            let mut ids: Vec<Uuid> = candidates.into_iter().collect();
+            ids.sort();
+
+            let mut items = Vec::new();
+            for id in ids {
+                let key = id.to_string();
+                if let Err(e) = coordinator
+                    .wait_for_read_ack_quorum(db_name, collection, key.as_bytes(), read_concern)
+                    .await
+                {
+                    return Response::Error(e);
+                }
+
+                match resolve_quorum_document_for_key(
+                    coordinator,
+                    &db,
+                    &tenant,
+                    db_name,
+                    collection,
+                    &key,
+                )
+                .await
+                {
+                    Ok(Some(doc)) => {
+                        let in_range = extract_field(&doc, &field_path)
+                            .and_then(|v| encode_sortable_value(v).ok())
+                            .is_some_and(|encoded| {
+                                encoded >= start_encoded && encoded < end_encoded
+                            });
+                        if in_range {
+                            items.push(Response::Bulk(Some(format!(
+                                "{} {}",
+                                id,
+                                value_to_json(&doc)
+                            ))));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => return Response::Error(e),
+                }
+            }
+
+            Response::Array(items)
+        }
+        _ => response_error_internal(),
+    }
+}
+
+async fn resolve_quorum_document_for_key(
+    coordinator: &Coordinator,
+    db: &grumpydb::concurrency::shared::SharedDatabase,
+    tenant: &str,
+    database: &str,
+    collection: &str,
+    key: &str,
+) -> Result<Option<Value>, String> {
+    let uuid = parse_uuid(key)?;
+    let local_value_json = db
+        .get(collection, &uuid)
+        .map_err(|e| e.to_string())?
+        .map(|v| value_to_json(&v));
+
+    let remote_reads = coordinator
+        .fanout_read_peer_values(tenant, database, collection, key)
+        .await;
+
+    let mut values = Vec::new();
+    if let Some(v) = local_value_json {
+        values.push(v);
+    }
+    for (_node_id, res) in remote_reads {
+        if let Ok(Some(v)) = res {
+            values.push(v);
+        }
+    }
+    if values.is_empty() {
+        return Ok(None);
+    }
+
+    let canonical = choose_canonical_json(values);
+    parse_json_value(&canonical).map(Some)
+}
+
+fn response_error_internal() -> Response {
+    Response::Error("internal error: unsupported verified query command".into())
 }
 
 fn choose_canonical_json(values: Vec<String>) -> String {
@@ -617,7 +918,27 @@ fn validate_read_concern_runtime(
     }
 
     let Some((collection, key)) = read_target(command) else {
-        return Ok(());
+        let Some(route_key) = query_route_key(command) else {
+            return Ok(());
+        };
+
+        let Some(db_name) = session.current_db() else {
+            return Ok(());
+        };
+
+        let query_collection = match base_command(command) {
+            Command::Query { collection, .. } | Command::QueryRange { collection, .. } => {
+                collection.as_str()
+            }
+            _ => return Ok(()),
+        };
+
+        return coordinator.validate_read_concern_for_key(
+            db_name,
+            query_collection,
+            route_key.as_bytes(),
+            read_concern,
+        );
     };
 
     let Some(db_name) = session.current_db() else {
@@ -641,7 +962,28 @@ async fn wait_for_read_ack_quorum(
     }
 
     let Some((collection, key)) = read_target(command) else {
-        return Ok(());
+        let Some(route_key) = query_route_key(command) else {
+            return Ok(());
+        };
+        let Some(db_name) = session.current_db() else {
+            return Ok(());
+        };
+
+        let query_collection = match base_command(command) {
+            Command::Query { collection, .. } | Command::QueryRange { collection, .. } => {
+                collection.as_str()
+            }
+            _ => return Ok(()),
+        };
+
+        return coordinator
+            .wait_for_read_ack_quorum(
+                db_name,
+                query_collection,
+                route_key.as_bytes(),
+                read_concern,
+            )
+            .await;
     };
     let Some(db_name) = session.current_db() else {
         return Ok(());
