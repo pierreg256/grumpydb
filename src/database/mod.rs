@@ -470,6 +470,19 @@ impl Database {
         coll.drop_index(index_name)
     }
 
+    /// Returns the field path for a secondary index.
+    pub fn index_field_path(&mut self, collection: &str, index_name: &str) -> Result<String> {
+        let coll = self
+            .collections
+            .get_mut(collection)
+            .ok_or_else(|| GrumpyError::CollectionNotFound(collection.into()))?;
+        coll.list_indexes()
+            .iter()
+            .find(|def| def.name == index_name)
+            .map(|def| def.field_path.clone())
+            .ok_or_else(|| GrumpyError::IndexNotFound(index_name.into()))
+    }
+
     /// Queries a secondary index by exact value.
     pub fn query(
         &mut self,

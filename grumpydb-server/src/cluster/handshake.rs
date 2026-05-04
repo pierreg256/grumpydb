@@ -145,6 +145,21 @@ pub enum PeerDataOp {
         collection: String,
         key: String,
     },
+    QueryIndexExact {
+        tenant: String,
+        database: String,
+        collection: String,
+        index_name: String,
+        value_json: String,
+    },
+    QueryIndexRange {
+        tenant: String,
+        database: String,
+        collection: String,
+        index_name: String,
+        start_json: String,
+        end_json: String,
+    },
 }
 
 /// Peer operation response.
@@ -152,6 +167,7 @@ pub enum PeerDataOp {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PeerDataOpResponse {
     Value { value_json: Option<String> },
+    Keys { keys: Vec<String> },
     Ack,
     Error { message: String },
 }
@@ -476,6 +492,7 @@ pub async fn fetch_peer_value(
         .map_err(|e| format!("read op response failed: {e}"))?;
     match resp {
         PeerDataOpResponse::Value { value_json } => Ok(value_json),
+        PeerDataOpResponse::Keys { .. } => Err("unexpected keys response for get".to_string()),
         PeerDataOpResponse::Ack => Err("unexpected ack for get".to_string()),
         PeerDataOpResponse::Error { message } => Err(message),
     }
@@ -524,6 +541,7 @@ pub async fn upsert_peer_value(
     match resp {
         PeerDataOpResponse::Ack => Ok(()),
         PeerDataOpResponse::Value { .. } => Err("unexpected value response for upsert".into()),
+        PeerDataOpResponse::Keys { .. } => Err("unexpected keys response for upsert".into()),
         PeerDataOpResponse::Error { message } => Err(message),
     }
 }
@@ -566,6 +584,111 @@ pub async fn delete_peer_value(ctx: &PeerRpcContext, key_path: &PeerKeyPath) -> 
     match resp {
         PeerDataOpResponse::Ack => Ok(()),
         PeerDataOpResponse::Value { .. } => Err("unexpected value response for delete".into()),
+        PeerDataOpResponse::Keys { .. } => Err("unexpected keys response for delete".into()),
+        PeerDataOpResponse::Error { message } => Err(message),
+    }
+}
+
+/// Query an index on a peer and return matching UUID strings.
+pub async fn query_peer_index_exact(
+    ctx: &PeerRpcContext,
+    tenant: &str,
+    database: &str,
+    collection: &str,
+    index_name: &str,
+    value_json: &str,
+) -> Result<Vec<String>, String> {
+    let mut stream = TcpStream::connect(&ctx.addr)
+        .await
+        .map_err(|e| format!("connect failed: {e}"))?;
+
+    let (_, outcome) = run_initiator(
+        &mut stream,
+        ctx.local_cluster_id,
+        ctx.local_node_id,
+        &ctx.server_version,
+    )
+    .await
+    .map_err(|e| format!("handshake error: {e}"))?;
+
+    match outcome {
+        HandshakeOutcome::Accepted { .. } => {}
+        HandshakeOutcome::Rejected { error } => {
+            return Err(format!("handshake rejected: {error}"));
+        }
+    }
+
+    let req = PeerDataOp::QueryIndexExact {
+        tenant: tenant.to_string(),
+        database: database.to_string(),
+        collection: collection.to_string(),
+        index_name: index_name.to_string(),
+        value_json: value_json.to_string(),
+    };
+    write_frame(&mut stream, &req)
+        .await
+        .map_err(|e| format!("write op failed: {e}"))?;
+
+    let resp: PeerDataOpResponse = read_frame(&mut stream)
+        .await
+        .map_err(|e| format!("read op response failed: {e}"))?;
+    match resp {
+        PeerDataOpResponse::Keys { keys } => Ok(keys),
+        PeerDataOpResponse::Value { .. } => Err("unexpected value response for query".into()),
+        PeerDataOpResponse::Ack => Err("unexpected ack for query".into()),
+        PeerDataOpResponse::Error { message } => Err(message),
+    }
+}
+
+/// Range-query an index on a peer and return matching UUID strings.
+pub async fn query_peer_index_range(
+    ctx: &PeerRpcContext,
+    tenant: &str,
+    database: &str,
+    collection: &str,
+    index_name: &str,
+    start_json: &str,
+    end_json: &str,
+) -> Result<Vec<String>, String> {
+    let mut stream = TcpStream::connect(&ctx.addr)
+        .await
+        .map_err(|e| format!("connect failed: {e}"))?;
+
+    let (_, outcome) = run_initiator(
+        &mut stream,
+        ctx.local_cluster_id,
+        ctx.local_node_id,
+        &ctx.server_version,
+    )
+    .await
+    .map_err(|e| format!("handshake error: {e}"))?;
+
+    match outcome {
+        HandshakeOutcome::Accepted { .. } => {}
+        HandshakeOutcome::Rejected { error } => {
+            return Err(format!("handshake rejected: {error}"));
+        }
+    }
+
+    let req = PeerDataOp::QueryIndexRange {
+        tenant: tenant.to_string(),
+        database: database.to_string(),
+        collection: collection.to_string(),
+        index_name: index_name.to_string(),
+        start_json: start_json.to_string(),
+        end_json: end_json.to_string(),
+    };
+    write_frame(&mut stream, &req)
+        .await
+        .map_err(|e| format!("write op failed: {e}"))?;
+
+    let resp: PeerDataOpResponse = read_frame(&mut stream)
+        .await
+        .map_err(|e| format!("read op response failed: {e}"))?;
+    match resp {
+        PeerDataOpResponse::Keys { keys } => Ok(keys),
+        PeerDataOpResponse::Value { .. } => Err("unexpected value response for query_range".into()),
+        PeerDataOpResponse::Ack => Err("unexpected ack for query_range".into()),
         PeerDataOpResponse::Error { message } => Err(message),
     }
 }
@@ -812,6 +935,79 @@ fn handle_peer_data_op(op: PeerDataOp, shared_server: &SharedServer) -> PeerData
             match db.delete(&collection, &uuid) {
                 Ok(()) => PeerDataOpResponse::Ack,
                 Err(GrumpyError::KeyNotFound(_)) => PeerDataOpResponse::Ack,
+                Err(e) => PeerDataOpResponse::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        PeerDataOp::QueryIndexExact {
+            tenant,
+            database,
+            collection,
+            index_name,
+            value_json,
+        } => {
+            let db = match shared_server.database(&tenant, &database) {
+                Ok(db) => db,
+                Err(e) => {
+                    return PeerDataOpResponse::Error {
+                        message: e.to_string(),
+                    };
+                }
+            };
+            let value = match serde_json::from_str::<serde_json::Value>(&value_json) {
+                Ok(json) => json_to_value(&json),
+                Err(e) => {
+                    return PeerDataOpResponse::Error {
+                        message: format!("invalid value JSON: {e}"),
+                    };
+                }
+            };
+            match db.query(&collection, &index_name, &value) {
+                Ok(rows) => PeerDataOpResponse::Keys {
+                    keys: rows.into_iter().map(|(id, _)| id.to_string()).collect(),
+                },
+                Err(e) => PeerDataOpResponse::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        PeerDataOp::QueryIndexRange {
+            tenant,
+            database,
+            collection,
+            index_name,
+            start_json,
+            end_json,
+        } => {
+            let db = match shared_server.database(&tenant, &database) {
+                Ok(db) => db,
+                Err(e) => {
+                    return PeerDataOpResponse::Error {
+                        message: e.to_string(),
+                    };
+                }
+            };
+            let start = match serde_json::from_str::<serde_json::Value>(&start_json) {
+                Ok(json) => json_to_value(&json),
+                Err(e) => {
+                    return PeerDataOpResponse::Error {
+                        message: format!("invalid start JSON: {e}"),
+                    };
+                }
+            };
+            let end = match serde_json::from_str::<serde_json::Value>(&end_json) {
+                Ok(json) => json_to_value(&json),
+                Err(e) => {
+                    return PeerDataOpResponse::Error {
+                        message: format!("invalid end JSON: {e}"),
+                    };
+                }
+            };
+            match db.query_range(&collection, &index_name, &start, &end) {
+                Ok(rows) => PeerDataOpResponse::Keys {
+                    keys: rows.into_iter().map(|(id, _)| id.to_string()).collect(),
+                },
                 Err(e) => PeerDataOpResponse::Error {
                     message: e.to_string(),
                 },
@@ -1099,5 +1295,49 @@ mod tests {
             .get("docs", &key)
             .expect("get value from auto-created collection");
         assert!(got.is_some());
+    }
+
+    #[test]
+    fn test_peer_query_index_exact_returns_candidate_keys() {
+        let dir = TempDir::new().expect("tempdir");
+        let shared = SharedServer::open(dir.path()).expect("open shared server");
+        assert!(shared.database("tenant1", "db1").is_err());
+
+        let key = Uuid::new_v4();
+        let upsert = handle_peer_data_op(
+            PeerDataOp::Upsert {
+                tenant: "tenant1".to_string(),
+                database: "db1".to_string(),
+                collection: "docs".to_string(),
+                key: key.to_string(),
+                value_json: "{\"name\":\"alice\"}".to_string(),
+            },
+            &shared,
+        );
+        assert!(matches!(upsert, PeerDataOpResponse::Ack));
+
+        let db = shared
+            .database("tenant1", "db1")
+            .expect("db exists after upsert");
+        db.create_index("docs", "name_idx", "name")
+            .expect("create index");
+
+        let resp = handle_peer_data_op(
+            PeerDataOp::QueryIndexExact {
+                tenant: "tenant1".to_string(),
+                database: "db1".to_string(),
+                collection: "docs".to_string(),
+                index_name: "name_idx".to_string(),
+                value_json: "\"alice\"".to_string(),
+            },
+            &shared,
+        );
+
+        match resp {
+            PeerDataOpResponse::Keys { keys } => {
+                assert_eq!(keys, vec![key.to_string()]);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 }

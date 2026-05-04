@@ -17,7 +17,8 @@ use uuid::Uuid;
 use crate::cluster::NodeIdentity;
 use crate::cluster::handshake::{
     ClusterHello, GossipPayload, PeerGossipState, PeerKeyPath, PeerRpcContext, delete_peer_value,
-    fetch_peer_value, probe_peer_acceptance, upsert_peer_value,
+    fetch_peer_value, probe_peer_acceptance, query_peer_index_exact, query_peer_index_range,
+    upsert_peer_value,
 };
 use crate::cluster::hints::{HintOperation, HintRecord};
 use crate::config::{ClusterSection, PeerEntry, WriterEntry};
@@ -741,6 +742,89 @@ impl Coordinator {
                     key: key.to_string(),
                 };
                 let v = fetch_peer_value(&ctx, &key_path).await;
+                (node_id, v)
+            }
+        });
+
+        join_all(futures).await
+    }
+
+    /// Query one index value from all live remote replicas in the preference list.
+    pub async fn fanout_query_peer_candidates_exact(
+        &self,
+        tenant: &str,
+        database: &str,
+        collection: &str,
+        key_bytes: &[u8],
+        index_name: &str,
+        value_json: &str,
+    ) -> Vec<(String, Result<Vec<String>, String>)> {
+        let peers: Vec<(String, String)> = self
+            .replica_peer_nodes_for_key(database, collection, key_bytes)
+            .into_iter()
+            .filter_map(|node_id| {
+                self.peer_addrs
+                    .get(&node_id)
+                    .map(|addr| (node_id, addr.clone()))
+            })
+            .collect();
+
+        let server_version = format!("grumpydb-server/{}", env!("CARGO_PKG_VERSION"));
+        let futures = peers.into_iter().map(|(node_id, addr)| {
+            let server_version = server_version.clone();
+            async move {
+                let ctx = PeerRpcContext {
+                    addr,
+                    local_cluster_id: self.cluster_uuid,
+                    local_node_id: self.local_node_uuid,
+                    server_version,
+                };
+                let v = query_peer_index_exact(
+                    &ctx, tenant, database, collection, index_name, value_json,
+                )
+                .await;
+                (node_id, v)
+            }
+        });
+
+        join_all(futures).await
+    }
+
+    /// Range-query one index from all live remote replicas in the preference list.
+    pub async fn fanout_query_peer_candidates_range(
+        &self,
+        tenant: &str,
+        database: &str,
+        collection: &str,
+        key_bytes: &[u8],
+        index_name: &str,
+        start_json: &str,
+        end_json: &str,
+    ) -> Vec<(String, Result<Vec<String>, String>)> {
+        let peers: Vec<(String, String)> = self
+            .replica_peer_nodes_for_key(database, collection, key_bytes)
+            .into_iter()
+            .filter_map(|node_id| {
+                self.peer_addrs
+                    .get(&node_id)
+                    .map(|addr| (node_id, addr.clone()))
+            })
+            .collect();
+
+        let server_version = format!("grumpydb-server/{}", env!("CARGO_PKG_VERSION"));
+        let futures = peers.into_iter().map(|(node_id, addr)| {
+            let server_version = server_version.clone();
+            async move {
+                let ctx = PeerRpcContext {
+                    addr,
+                    local_cluster_id: self.cluster_uuid,
+                    local_node_id: self.local_node_uuid,
+                    server_version,
+                };
+                let v = query_peer_index_range(
+                    &ctx, tenant, database, collection, index_name, start_json, end_json,
+                )
+                .await;
                 (node_id, v)
             }
         });

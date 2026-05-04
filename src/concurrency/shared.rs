@@ -210,6 +210,11 @@ impl SharedDatabase {
         Ok(coll.list_indexes().iter().map(|d| d.name.clone()).collect())
     }
 
+    /// Returns the field path for one index on a collection.
+    pub fn index_field_path(&self, collection: &str, index_name: &str) -> Result<String> {
+        self.inner.write().index_field_path(collection, index_name)
+    }
+
     /// Queries a secondary index by exact value.
     pub fn query(
         &self,
