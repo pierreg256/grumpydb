@@ -4,6 +4,7 @@
 //! null, bool, integer, float, string, bytes, arrays, and objects.
 
 pub mod codec;
+pub mod crdt;
 pub mod value;
 
 use uuid::Uuid;

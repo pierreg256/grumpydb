@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### v6 stream — Stream E (Phase 46 kickoff)
+
+- Phase 46 (conflict resolution runtime) entered implementation with a
+  foundation tranche across `grumpydb`, `grumpydb-server`, and `grumpy-repl`.
+- `Value` now includes `Value::Crdt { kind, payload }` and `CrdtKind`
+  (`GCounter`, `PNCounter`, `LwwSet`, `OrSet`, `Mvr`).
+- Document codec now supports CRDT encoding via `TAG_CRDT` with a defensive
+  payload length cap.
+- Added `src/document/crdt.rs` merge helpers:
+  - `GCounter` merge (max)
+  - `PNCounter` merge (component-wise max on positive/negative counters)
+  - `LwwSet` merge (JSON payload merged by max timestamp per entry for adds/rems)
+  - `OrSet` merge (JSON payload merged by union of add/remove tag sets)
+  - `Mvr` merge (JSON payload merged by union of value set)
+- Added CRDT merge tests for `LwwSet` / `OrSet` / `Mvr` and invalid payload
+  rejection tests in `src/document/crdt.rs`.
+- `PUT_WITH_VC` now merges when both stored and incoming values are CRDT.
+- Added end-to-end coverage for Phase 46 `PUT_WITH_VC` behavior in
+  `tests/server_e2e.rs`:
+  - `test_e2e_put_with_vc_merges_crdt_gcounter`
+  - `test_e2e_put_with_vc_round_trips_crdt_pncounter_envelope`
+  - `test_e2e_put_with_vc_after_delete_restores_document`
+- TCP JSON bridge now round-trips CRDT envelopes:
+  `{"$crdt":{"kind":"...","payload_b64":"..."}}`.
+- REPL JSON pretty-printer now renders CRDT values as
+  `$crdt(kind=<Kind>, bytes=<len>)`.
+- Scope note: Phase 46 remains in progress; full LWW/tombstone/sibling
+  reconciliation behavior is still pending.
+
 ### v6 stream — Stream E (Phase 44 complete)
 
 - Phase 44 (gossip membership) is now **complete** in `grumpydb-server`.

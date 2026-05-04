@@ -47,7 +47,7 @@ flowchart TB
 | `btree`        | B+Tree index (fixed UUID keys + variable-length keys), search/insert/delete/split/merge, cursor |
 | `wal`          | WAL records, writer, checkpoint, recovery                |
 | `buffer`       | Buffer pool LRU, dirty tracking, pin/unpin               |
-| `document`     | Value type (JSON-like + Ref), binary codec                |
+| `document`     | Value type (JSON-like + Ref + Tombstone + CRDT), binary codec, CRDT merge helpers |
 | `collection`   | Unit of storage: data pages + primary index + secondary indexes, raw CRUD |
 | `index`        | Secondary indexes: sortable encoding, SecondaryIndex, IndexDefinition |
 | `database`     | Multi-collection management with shared WAL, CRUD routing, reference resolution |

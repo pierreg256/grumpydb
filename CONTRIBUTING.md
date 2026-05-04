@@ -151,7 +151,7 @@ grumpydb/                       # workspace root
 ├── tests/                      # Integration tests
 │   ├── crud_test.rs            # Engine CRUD
 │   ├── stress_test.rs          # Concurrency stress
-│   ├── server_e2e.rs           # TCP end-to-end (8 tests, uses TestServer)
+│   ├── server_e2e.rs           # TCP end-to-end (16 tests, uses TestServer)
 │   ├── server_concurrency.rs   # 50 concurrent clients × 100 ops
 │   ├── server_auth.rs          # Expired/tampered tokens, role enforcement, login rate limit
 │   ├── server_http.rs          # /healthz /readyz /metrics e2e (Phase 36)

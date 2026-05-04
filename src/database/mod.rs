@@ -28,6 +28,7 @@ use crate::index::encoding::{encode_sortable_value, extract_field};
 use crate::naming::validate_name;
 use crate::wal::applied_set::AppliedSet;
 use crate::wal::hlc::{Hlc, HlcClock, HlcError};
+use crate::wal::vclock::VectorClock;
 use crate::wal::writer::WalWriter;
 
 /// Default buffer pool capacity per collection.
@@ -286,6 +287,17 @@ impl Database {
 
     /// Retrieves a document from a collection.
     pub fn get(&mut self, collection: &str, key: &Uuid) -> Result<Option<Value>> {
+        let Some(value) = self.get_including_tombstone(collection, key)? else {
+            return Ok(None);
+        };
+        if value.is_tombstone() {
+            return Ok(None);
+        }
+        Ok(Some(value))
+    }
+
+    /// Retrieves a document without applying tombstone visibility rules.
+    fn get_including_tombstone(&mut self, collection: &str, key: &Uuid) -> Result<Option<Value>> {
         let coll = self
             .collections
             .get_mut(collection)
@@ -302,7 +314,7 @@ impl Database {
     pub fn update(&mut self, collection: &str, key: &Uuid, value: Value) -> Result<()> {
         // Get old value for unindexing
         let old_value = self
-            .get(collection, key)?
+            .get_including_tombstone(collection, key)?
             .ok_or(GrumpyError::KeyNotFound(*key))?;
         self.ensure_baseline_version(collection, *key, old_value.clone());
 
@@ -348,14 +360,38 @@ impl Database {
             .ok_or(GrumpyError::KeyNotFound(*key))?;
         self.ensure_baseline_version(collection, *key, value.clone());
 
+        let deleted_at_hlc = self
+            .clock
+            .now()
+            .map_err(|e| GrumpyError::Hlc(e.to_string()))?;
+        let mut vector_clock = Vec::new();
+        VectorClock::singleton(self.node_id, deleted_at_hlc.0).encode_to(&mut vector_clock);
+        let tombstone = Value::Tombstone {
+            deleted_at_hlc: deleted_at_hlc.0,
+            vector_clock,
+        };
+
         let tx_id = self.wal.begin_tx();
         let coll = self
             .collections
             .get_mut(collection)
             .ok_or_else(|| GrumpyError::CollectionNotFound(collection.into()))?;
 
-        let records = coll.delete_doc(key, &value)?;
-        for rec in &records {
+        let del_records = coll.delete_doc(key, &value)?;
+        for rec in &del_records {
+            self.wal
+                .log_page_write(tx_id, rec.page_id, &rec.before, &rec.after)?;
+        }
+
+        let doc = Document::new(*key, tombstone.clone());
+        let encoded = doc.encode();
+        let coll = self
+            .collections
+            .get_mut(collection)
+            .ok_or_else(|| GrumpyError::CollectionNotFound(collection.into()))?;
+
+        let (_, ins_records) = coll.insert_doc(*key, &tombstone, &encoded)?;
+        for rec in &ins_records {
             self.wal
                 .log_page_write(tx_id, rec.page_id, &rec.before, &rec.after)?;
         }
@@ -381,6 +417,9 @@ impl Database {
         let mut results = Vec::with_capacity(raw_results.len());
         for (key, raw) in raw_results {
             let doc = Document::decode(&raw)?;
+            if doc.value.is_tombstone() {
+                continue;
+            }
             results.push((key, doc.value));
         }
         Ok(results)
@@ -423,7 +462,11 @@ impl Database {
             .collections
             .get_mut(collection)
             .ok_or_else(|| GrumpyError::CollectionNotFound(collection.into()))?;
-        coll.query_index(index_name, value)
+        let rows = coll.query_index(index_name, value)?;
+        Ok(rows
+            .into_iter()
+            .filter(|(_, v)| !v.is_tombstone())
+            .collect())
     }
 
     /// Queries a secondary index by range [start, end).
@@ -438,7 +481,11 @@ impl Database {
             .collections
             .get_mut(collection)
             .ok_or_else(|| GrumpyError::CollectionNotFound(collection.into()))?;
-        coll.query_index_range(index_name, start, end)
+        let rows = coll.query_index_range(index_name, start, end)?;
+        Ok(rows
+            .into_iter()
+            .filter(|(_, v)| !v.is_tombstone())
+            .collect())
     }
 
     // ── References ─────────────────────────────────────────────────────
@@ -1119,6 +1166,26 @@ mod tests {
         );
         db.unregister_reader_snapshot(snapshot);
         assert_eq!(db.get("c", &key).unwrap(), None);
+    }
+
+    #[test]
+    fn test_delete_writes_hidden_tombstone_until_compact() {
+        let (_dir, mut db) = setup();
+        db.create_collection("c").unwrap();
+
+        let key = Uuid::from_u128(1001);
+        db.insert("c", key, Value::Integer(7)).unwrap();
+        db.delete("c", &key).unwrap();
+
+        // Tombstones are hidden from reads/scans.
+        assert_eq!(db.get("c", &key).unwrap(), None);
+        assert!(db.scan("c", ..).unwrap().is_empty());
+
+        // Tombstone still occupies the key until compaction.
+        assert_eq!(db.document_count("c").unwrap(), 1);
+
+        db.compact("c").unwrap();
+        assert_eq!(db.document_count("c").unwrap(), 0);
     }
 
     #[test]

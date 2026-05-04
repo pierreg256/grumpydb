@@ -4,6 +4,69 @@ use std::collections::BTreeMap;
 
 use uuid::Uuid;
 
+/// Supported CRDT payload kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrdtKind {
+    /// Grow-only counter.
+    GCounter,
+    /// Positive/negative counter.
+    PNCounter,
+    /// Last-write-wins set.
+    LwwSet,
+    /// Observed-remove set.
+    OrSet,
+    /// Multi-value register.
+    Mvr,
+}
+
+impl CrdtKind {
+    /// Stable on-wire discriminator.
+    pub fn to_tag(self) -> u8 {
+        match self {
+            Self::GCounter => 0,
+            Self::PNCounter => 1,
+            Self::LwwSet => 2,
+            Self::OrSet => 3,
+            Self::Mvr => 4,
+        }
+    }
+
+    /// Parse the stable on-wire discriminator.
+    pub fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Self::GCounter),
+            1 => Some(Self::PNCounter),
+            2 => Some(Self::LwwSet),
+            3 => Some(Self::OrSet),
+            4 => Some(Self::Mvr),
+            _ => None,
+        }
+    }
+
+    /// Human-readable canonical name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GCounter => "GCounter",
+            Self::PNCounter => "PNCounter",
+            Self::LwwSet => "LwwSet",
+            Self::OrSet => "OrSet",
+            Self::Mvr => "Mvr",
+        }
+    }
+
+    /// Parse canonical names used by API payloads.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "GCounter" => Some(Self::GCounter),
+            "PNCounter" => Some(Self::PNCounter),
+            "LwwSet" => Some(Self::LwwSet),
+            "OrSet" => Some(Self::OrSet),
+            "Mvr" => Some(Self::Mvr),
+            _ => None,
+        }
+    }
+}
+
 /// A schema-less value, similar to JSON but with additional types (Bytes, Ref).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -39,6 +102,8 @@ pub enum Value {
         /// Serialised vector clock (produced by `VectorClock::encode_to`).
         vector_clock: Vec<u8>,
     },
+    /// Opaque CRDT payload. v6+ activates runtime merge semantics.
+    Crdt { kind: CrdtKind, payload: Vec<u8> },
 }
 
 impl Value {
@@ -123,6 +188,19 @@ impl Value {
                 deleted_at_hlc,
                 vector_clock,
             } => Some((*deleted_at_hlc, vector_clock)),
+            _ => None,
+        }
+    }
+
+    /// Returns `true` if this value is a [`Value::Crdt`].
+    pub fn is_crdt(&self) -> bool {
+        matches!(self, Value::Crdt { .. })
+    }
+
+    /// If this value is a CRDT, returns `(kind, payload)`.
+    pub fn as_crdt(&self) -> Option<(CrdtKind, &[u8])> {
+        match self {
+            Value::Crdt { kind, payload } => Some((*kind, payload)),
             _ => None,
         }
     }
@@ -236,5 +314,39 @@ mod tests {
         };
         let cloned = v.clone();
         assert_eq!(v, cloned);
+    }
+
+    #[test]
+    fn test_value_crdt_helpers() {
+        let v = Value::Crdt {
+            kind: CrdtKind::GCounter,
+            payload: vec![1, 2, 3],
+        };
+        assert!(v.is_crdt());
+        assert!(!Value::Null.is_crdt());
+        let (kind, payload) = v.as_crdt().unwrap();
+        assert_eq!(kind, CrdtKind::GCounter);
+        assert_eq!(payload, &[1, 2, 3]);
+        assert!(Value::Null.as_crdt().is_none());
+    }
+
+    #[test]
+    fn test_crdt_kind_tag_and_name_round_trip() {
+        let all = [
+            CrdtKind::GCounter,
+            CrdtKind::PNCounter,
+            CrdtKind::LwwSet,
+            CrdtKind::OrSet,
+            CrdtKind::Mvr,
+        ];
+
+        for kind in all {
+            let tag = kind.to_tag();
+            assert_eq!(CrdtKind::from_tag(tag), Some(kind));
+            assert_eq!(CrdtKind::from_name(kind.as_str()), Some(kind));
+        }
+
+        assert!(CrdtKind::from_tag(42).is_none());
+        assert!(CrdtKind::from_name("unknown").is_none());
     }
 }

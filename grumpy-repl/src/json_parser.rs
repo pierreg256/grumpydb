@@ -30,6 +30,9 @@ pub fn to_json_string(value: &Value, indent: usize) -> String {
         Value::Tombstone { deleted_at_hlc, .. } => {
             format!("$tombstone(hlc={deleted_at_hlc})")
         }
+        Value::Crdt { kind, payload } => {
+            format!("$crdt(kind={}, bytes={})", kind.as_str(), payload.len())
+        }
         Value::Array(arr) => {
             if arr.is_empty() {
                 return "[]".to_string();

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use uuid::Uuid;
 
-use crate::document::value::Value;
+use crate::document::value::{CrdtKind, Value};
 use crate::error::{GrumpyError, Result};
 
 // ── Type tags ───────────────────────────────────────────────────────────
@@ -23,6 +23,8 @@ const TAG_OBJECT: u8 = 0x07;
 const TAG_REF: u8 = 0x08;
 /// Tombstone marker (Phase 40d). Format-locking — DO NOT REUSE in v6+.
 const TAG_TOMBSTONE: u8 = 0x09;
+/// CRDT payload marker (Phase 46).
+const TAG_CRDT: u8 = 0x0a;
 
 /// Maximum collection name length in a Ref (from naming rules).
 const MAX_REF_NAME_LEN: u32 = 64;
@@ -31,6 +33,8 @@ const MAX_REF_NAME_LEN: u32 = 64;
 /// Defensive cap (matches `MAX_VCLOCK_ENTRIES * 24 + 2` ≈ 100 KiB) so
 /// malformed input cannot cause unbounded allocations.
 const MAX_TOMBSTONE_VCLOCK_LEN: u32 = 128 * 1024;
+/// Maximum encoded CRDT payload length.
+const MAX_CRDT_PAYLOAD_LEN: u32 = 16 * 1024 * 1024;
 
 // ── Safety limits ───────────────────────────────────────────────────────
 
@@ -102,6 +106,12 @@ pub fn encode(value: &Value, buf: &mut Vec<u8>) {
             buf.extend_from_slice(&(vector_clock.len() as u32).to_le_bytes());
             buf.extend_from_slice(vector_clock);
         }
+        Value::Crdt { kind, payload } => {
+            buf.push(TAG_CRDT);
+            buf.push(kind.to_tag());
+            buf.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            buf.extend_from_slice(payload);
+        }
     }
 }
 
@@ -132,6 +142,7 @@ pub fn encoded_size(value: &Value) -> usize {
         }
         Value::Ref(collection, _) => 1 + 4 + collection.len() + 16,
         Value::Tombstone { vector_clock, .. } => 1 + 8 + 4 + vector_clock.len(),
+        Value::Crdt { payload, .. } => 1 + 1 + 4 + payload.len(),
     }
 }
 
@@ -266,6 +277,19 @@ fn decode_recursive(cursor: &mut &[u8], depth: usize) -> Result<Value> {
                 deleted_at_hlc,
                 vector_clock,
             })
+        }
+        TAG_CRDT => {
+            let kind_tag = read_u8(cursor)?;
+            let kind = CrdtKind::from_tag(kind_tag)
+                .ok_or_else(|| GrumpyError::Codec(format!("unknown CRDT kind tag: {kind_tag}")))?;
+            let payload_len = read_u32_le(cursor)?;
+            if payload_len > MAX_CRDT_PAYLOAD_LEN {
+                return Err(GrumpyError::Codec(format!(
+                    "CRDT payload length {payload_len} exceeds maximum ({MAX_CRDT_PAYLOAD_LEN})"
+                )));
+            }
+            let payload = read_bytes(cursor, payload_len as usize)?;
+            Ok(Value::Crdt { kind, payload })
         }
         _ => Err(GrumpyError::Codec(format!("unknown type tag: 0x{tag:02x}"))),
     }
@@ -621,5 +645,23 @@ mod tests {
         data.extend_from_slice(&(MAX_TOMBSTONE_VCLOCK_LEN + 1).to_le_bytes());
         let err = decode(&data).unwrap_err();
         assert!(err.to_string().contains("vector clock length"));
+    }
+
+    #[test]
+    fn test_crdt_codec_round_trip() {
+        let v = Value::Crdt {
+            kind: CrdtKind::PNCounter,
+            payload: vec![0xaa, 0xbb, 0xcc],
+        };
+        round_trip(&v);
+        let enc = encode_to_vec(&v);
+        assert_eq!(enc[0], TAG_CRDT);
+    }
+
+    #[test]
+    fn test_crdt_codec_rejects_unknown_kind_tag() {
+        let bytes = [TAG_CRDT, 0xff, 0, 0, 0, 0];
+        let err = decode(&bytes).unwrap_err();
+        assert!(err.to_string().contains("unknown CRDT kind tag"));
     }
 }

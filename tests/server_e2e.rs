@@ -272,6 +272,53 @@ async fn test_e2e_v6_phase45_still_rejects_w_gt_1_until_ack_pipeline() {
 }
 
 #[tokio::test]
+async fn test_e2e_rejects_r_gt_1_when_single_node_has_insufficient_replicas() {
+    let server = TestServer::spawn().await;
+    let mut client = admin_client(&server).await;
+    client.create_database("rc_db").await.expect("create db");
+
+    let use_resp = client.raw_execute("USE rc_db").await.expect("use");
+    assert!(
+        matches!(use_resp, grumpydb_protocol::Response::Ok(_)),
+        "USE failed: {use_resp:?}"
+    );
+    let create_coll = client
+        .raw_execute("CREATE COLLECTION users")
+        .await
+        .expect("create collection");
+    assert!(
+        matches!(create_coll, grumpydb_protocol::Response::Ok(_)),
+        "CREATE COLLECTION failed: {create_coll:?}"
+    );
+
+    let key = Uuid::new_v4();
+    let insert = client
+        .raw_execute(&format!("INSERT users {key} {{\"name\":\"alice\"}}"))
+        .await
+        .expect("insert");
+    assert!(
+        matches!(insert, grumpydb_protocol::Response::Ok(_)),
+        "INSERT failed: {insert:?}"
+    );
+
+    let resp = client
+        .raw_execute(&format!("READ_CONCERN R=2 GET users {key}"))
+        .await
+        .expect("read concern get");
+    match resp {
+        grumpydb_protocol::Response::Error(msg) => {
+            assert!(
+                msg.contains("invalid consistency concerns")
+                    || msg.contains("not enough live replicas")
+                    || msg.contains("read quorum"),
+                "unexpected error: {msg}"
+            );
+        }
+        other => panic!("expected error for R=2 in single-node mode, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_e2e_snapshot_hlc_exposed_to_clients() {
     let server = TestServer::spawn().await;
     let mut client = admin_client(&server).await;
@@ -354,4 +401,154 @@ async fn test_e2e_rust_client_topology_cache_after_login() {
     let topo = client.topology().await.expect("topology");
     assert_eq!(topo.n, 1);
     assert!(!topo.peers.is_empty());
+}
+
+#[tokio::test]
+async fn test_e2e_put_with_vc_merges_crdt_gcounter() {
+    let server = TestServer::spawn().await;
+    let mut client = admin_client(&server).await;
+    client.create_database("vc_db").await.expect("create db");
+    {
+        let mut db = client.database("vc_db").await.expect("use");
+        db.create_collection("docs").await.expect("create coll");
+    }
+
+    let key = Uuid::new_v4();
+    let v1 = json!({
+        "$crdt": {
+            "kind": "GCounter",
+            "payload_b64": "BQAAAAAAAAA="
+        }
+    });
+    let v2 = json!({
+        "$crdt": {
+            "kind": "GCounter",
+            "payload_b64": "CQAAAAAAAAA="
+        }
+    });
+    let vc1 = json!({"n1": 1});
+    let vc2 = json!({"n2": 1});
+
+    let resp1 = client
+        .raw_execute(&format!("PUT_WITH_VC docs {key} {} {}", v1, vc1))
+        .await
+        .expect("put_with_vc 1");
+    assert!(
+        matches!(resp1, grumpydb_protocol::Response::Ok(_)),
+        "first PUT_WITH_VC failed: {resp1:?}"
+    );
+
+    let resp2 = client
+        .raw_execute(&format!("PUT_WITH_VC docs {key} {} {}", v2, vc2))
+        .await
+        .expect("put_with_vc 2");
+    assert!(
+        matches!(resp2, grumpydb_protocol::Response::Ok(_)),
+        "second PUT_WITH_VC failed: {resp2:?}"
+    );
+
+    let mut db = client.database("vc_db").await.expect("use");
+    let got = db
+        .get("docs", &key)
+        .await
+        .expect("get merged")
+        .expect("doc");
+    assert_eq!(got["$crdt"]["kind"], json!("GCounter"));
+    assert_eq!(got["$crdt"]["payload_b64"], json!("CQAAAAAAAAA="));
+}
+
+#[tokio::test]
+async fn test_e2e_put_with_vc_round_trips_crdt_pncounter_envelope() {
+    let server = TestServer::spawn().await;
+    let mut client = admin_client(&server).await;
+    client.create_database("vc_pn_db").await.expect("create db");
+    {
+        let mut db = client.database("vc_pn_db").await.expect("use");
+        db.create_collection("docs").await.expect("create coll");
+    }
+
+    let key = Uuid::new_v4();
+    let left = json!({
+        "$crdt": {
+            "kind": "PNCounter",
+            "payload_b64": "AgAAAAAAAAAHAAAAAAAAAA=="
+        }
+    });
+    let right = json!({
+        "$crdt": {
+            "kind": "PNCounter",
+            "payload_b64": "CQAAAAAAAAADAAAAAAAAAA=="
+        }
+    });
+    let vc1 = json!({"n1": 1});
+    let vc2 = json!({"n2": 1});
+
+    let first = client
+        .raw_execute(&format!("PUT_WITH_VC docs {key} {} {}", left, vc1))
+        .await
+        .expect("first put_with_vc");
+    assert!(
+        matches!(first, grumpydb_protocol::Response::Ok(_)),
+        "first PUT_WITH_VC failed: {first:?}"
+    );
+
+    let second = client
+        .raw_execute(&format!("PUT_WITH_VC docs {key} {} {}", right, vc2))
+        .await
+        .expect("second put_with_vc");
+    assert!(
+        matches!(second, grumpydb_protocol::Response::Ok(_)),
+        "second PUT_WITH_VC failed: {second:?}"
+    );
+
+    let mut db = client.database("vc_pn_db").await.expect("use");
+    let got = db
+        .get("docs", &key)
+        .await
+        .expect("get merged")
+        .expect("doc");
+    assert_eq!(got["$crdt"]["kind"], json!("PNCounter"));
+    assert_eq!(
+        got["$crdt"]["payload_b64"],
+        json!("CQAAAAAAAAADAAAAAAAAAA==")
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_put_with_vc_after_delete_restores_document() {
+    let server = TestServer::spawn().await;
+    let mut client = admin_client(&server).await;
+    client
+        .create_database("vc_tombstone_db")
+        .await
+        .expect("create db");
+    let key = Uuid::new_v4();
+    {
+        let mut db = client.database("vc_tombstone_db").await.expect("use");
+        db.create_collection("docs").await.expect("create coll");
+        db.insert("docs", key, &json!({"name":"before"}))
+            .await
+            .expect("insert");
+        db.delete("docs", &key).await.expect("delete");
+        assert_eq!(db.get("docs", &key).await.expect("get after delete"), None);
+    }
+
+    let reconciled = json!({"name":"after","source":"put_with_vc"});
+    let vc = json!({"n1": 2});
+    let resp = client
+        .raw_execute(&format!("PUT_WITH_VC docs {key} {} {}", reconciled, vc))
+        .await
+        .expect("put_with_vc after delete");
+    assert!(
+        matches!(resp, grumpydb_protocol::Response::Ok(_)),
+        "PUT_WITH_VC after delete failed: {resp:?}"
+    );
+
+    let mut db = client.database("vc_tombstone_db").await.expect("use");
+    let got = db
+        .get("docs", &key)
+        .await
+        .expect("get restored")
+        .expect("doc");
+    assert_eq!(got, json!({"name":"after","source":"put_with_vc"}));
 }

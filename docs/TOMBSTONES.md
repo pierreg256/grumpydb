@@ -5,14 +5,14 @@ of the v5 plan, and the operational model around it. Tombstones make
 `delete` safe under multi-node replication: a deleted key cannot
 "resurrect" when an out-of-date replica reconnects.
 
-> **Status (v5):** the tombstone format (slot bit, codec tag, value
-> variant) is **format-locked**. The semantic wiring — `delete` writes a
-> tombstone instead of physically removing the slot — is **scheduled
-> for v6 Phase 46**, alongside conflict-resolution (LWW + CRDT) where
-> tombstones must compete with concurrent writes via vector clocks.
-> v5 single-writer regime cannot generate the resurrection scenario,
-> so the existing `delete` path (which physically removes the slot)
-> remains correct for v5 deployments.
+> **Status:** **v5 scope complete** for tombstone format-locking (slot
+> bit, codec tag, value variant). Runtime semantic wiring — `delete`
+> writes a tombstone instead of physically removing the slot — is on the
+> **v6 Phase 46** track, alongside conflict-resolution (LWW + CRDT)
+> where tombstones must compete with concurrent writes via vector clocks.
+> v5 single-writer regime cannot generate the resurrection scenario, so
+> the existing `delete` path (which physically removes the slot) remains
+> correct for v5 deployments.
 
 ## Why tombstones
 
@@ -60,10 +60,10 @@ SlottedPage::is_slot_tombstone(slot_index) -> bool
 
 ### Codec tag (`src/document/codec.rs`)
 
-`TAG_TOMBSTONE = 0x0A`. Encoding:
+`TAG_TOMBSTONE = 0x09`. Encoding:
 
 ```
-[1] 0x0A
+[1] 0x09
 [8] deleted_at_hlc:  u64 LE   (packed Hlc)
 [N] vector_clock:    length-prefixed VectorClock encoding (see docs/WAL.md)
 ```

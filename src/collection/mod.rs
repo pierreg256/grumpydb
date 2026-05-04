@@ -281,6 +281,10 @@ impl Collection {
         let mut docs: Vec<(Uuid, Vec<u8>)> = Vec::with_capacity(entries.len());
         for entry in &entries {
             let raw = self.read_tuple(entry.page_id, entry.slot_id)?;
+            let decoded = Document::decode(&raw)?;
+            if decoded.value.is_tombstone() {
+                continue;
+            }
             docs.push((entry.key, raw));
         }
         let docs_count = docs.len();
