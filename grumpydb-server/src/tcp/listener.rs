@@ -96,7 +96,7 @@ pub async fn listen(
             coordinator.clone(),
             shared_server.clone(),
         )
-            .await?;
+        .await?;
     }
 
     // v6 Phase 44 (tranche 1): background gossip probes that refresh

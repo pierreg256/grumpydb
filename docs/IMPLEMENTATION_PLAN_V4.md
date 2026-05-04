@@ -338,7 +338,7 @@ Prove the WAL promise: kill the process at any point, restart, verify integrity.
    - `test_crash_after_inserts_without_flush` — verify per-commit fsync alone is sufficient.
    - `test_crash_during_inserts_partial_then_recover` — mid-insert SIGKILL; surviving state must be a prefix of the client's ack log.
    - `test_crash_during_index_creation` — partial CREATE INDEX; either the index exists and is correct, or it does not exist; never half-built.
-   - `test_crash_during_compaction` — mid-COMPACT SIGKILL; live row count and surviving documents intact.
+   - `test_crash_during_compaction` — mid-COMPACT SIGKILL; live-row visibility (SCAN/GET) and surviving documents intact.
    - `test_repeated_crash_recovery` — 10 consecutive crash/restart cycles produce no corruption.
 2. **`grumpydb-testing/src/server.rs`** extended with `crash()` and `restart()`.
 3. **Property-based test (proptest):** deferred. Integrating proptest with async/tokio

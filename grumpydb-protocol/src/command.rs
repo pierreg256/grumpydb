@@ -172,15 +172,9 @@ pub enum Command {
     /// Preview ownership deltas for removing a node.
     PlanRebalanceRemoveNode { node_id: String },
     /// Execute add-node transfer for one collection in the selected database.
-    ExecuteRebalanceAddNode {
-        node_id: String,
-        collection: String,
-    },
+    ExecuteRebalanceAddNode { node_id: String, collection: String },
     /// Execute remove-node transfer for one collection in the selected database.
-    ExecuteRebalanceRemoveNode {
-        node_id: String,
-        collection: String,
-    },
+    ExecuteRebalanceRemoveNode { node_id: String, collection: String },
 }
 
 /// The type of action a command performs (for RBAC).

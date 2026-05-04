@@ -36,9 +36,9 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
+use grumpydb::GrumpyError;
 use grumpydb::SharedServer;
 use grumpydb::document::value::{CrdtKind, Value};
-use grumpydb::GrumpyError;
 
 use crate::cluster::NodeIdentity;
 use crate::config::ServerConfig;
@@ -529,10 +529,7 @@ pub async fn upsert_peer_value(
 }
 
 /// Delete one key on a peer over the authenticated cluster channel.
-pub async fn delete_peer_value(
-    ctx: &PeerRpcContext,
-    key_path: &PeerKeyPath,
-) -> Result<(), String> {
+pub async fn delete_peer_value(ctx: &PeerRpcContext, key_path: &PeerKeyPath) -> Result<(), String> {
     let mut stream = TcpStream::connect(&ctx.addr)
         .await
         .map_err(|e| format!("connect failed: {e}"))?;
@@ -767,9 +764,7 @@ fn handle_peer_data_op(op: PeerDataOp, shared_server: &SharedServer) -> PeerData
             {
                 Ok(db) => db,
                 Err(e) => {
-                    return PeerDataOpResponse::Error {
-                        message: e,
-                    };
+                    return PeerDataOpResponse::Error { message: e };
                 }
             };
             let value = match serde_json::from_str::<serde_json::Value>(&value_json) {
@@ -811,9 +806,7 @@ fn handle_peer_data_op(op: PeerDataOp, shared_server: &SharedServer) -> PeerData
             {
                 Ok(db) => db,
                 Err(e) => {
-                    return PeerDataOpResponse::Error {
-                        message: e,
-                    };
+                    return PeerDataOpResponse::Error { message: e };
                 }
             };
             match db.delete(&collection, &uuid) {
@@ -912,9 +905,13 @@ fn value_to_serde_json(val: &Value) -> serde_json::Value {
         Value::Integer(i) => serde_json::json!(*i),
         Value::Float(f) => serde_json::json!(*f),
         Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::Bytes(b) => serde_json::json!({"$bytes": base64::engine::general_purpose::STANDARD.encode(b)}),
+        Value::Bytes(b) => {
+            serde_json::json!({"$bytes": base64::engine::general_purpose::STANDARD.encode(b)})
+        }
         Value::Ref(coll, id) => serde_json::json!({"$ref": {"collection": coll, "id": id}}),
-        Value::Array(arr) => serde_json::Value::Array(arr.iter().map(value_to_serde_json).collect()),
+        Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(value_to_serde_json).collect())
+        }
         Value::Object(obj) => {
             let mut map = serde_json::Map::new();
             for (k, v) in obj {
@@ -1095,8 +1092,12 @@ mod tests {
 
         assert!(matches!(resp, PeerDataOpResponse::Ack));
 
-        let db = shared.database("tenant1", "db1").expect("db exists after upsert");
-        let got = db.get("docs", &key).expect("get value from auto-created collection");
+        let db = shared
+            .database("tenant1", "db1")
+            .expect("db exists after upsert");
+        let got = db
+            .get("docs", &key)
+            .expect("get value from auto-created collection");
         assert!(got.is_some());
     }
 }

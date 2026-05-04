@@ -10,10 +10,10 @@ use futures::FutureExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
+use grumpydb::GrumpyError;
 use grumpydb::concurrency::shared::SharedServer;
 use grumpydb::document::crdt::merge_values as merge_crdt_values;
 use grumpydb::document::value::{CrdtKind, Value};
-use grumpydb::GrumpyError;
 use grumpydb_protocol::{Command, MAX_LINE_LENGTH, PROTOCOL_VERSION, Response, parse_command};
 
 use crate::auth::role::{ResourceScope, RoleAssignment, RoleName};
@@ -217,8 +217,13 @@ where
         .await;
 
         if !matches!(&response, Response::Error(_))
-            && let Err(e) =
-                wait_for_write_ack_quorum(&command, &session, coordinator.as_ref(), pipelines.hint_store.as_ref()).await
+            && let Err(e) = wait_for_write_ack_quorum(
+                &command,
+                &session,
+                coordinator.as_ref(),
+                pipelines.hint_store.as_ref(),
+            )
+            .await
         {
             tracing::warn!(error = %e, "write apply quorum failed");
             response = Response::Error(e);
@@ -373,14 +378,7 @@ async fn maybe_converge_read_quorum(
         }
 
         let repaired = coordinator
-            .repair_peer_value(
-                &node_id,
-                tenant,
-                db_name,
-                collection,
-                key,
-                &canonical,
-            )
+            .repair_peer_value(&node_id, tenant, db_name, collection, key, &canonical)
             .await;
         match repaired {
             Ok(()) => {
@@ -1214,12 +1212,12 @@ async fn execute_command(
                 collection.as_ref().map(|c| c.as_str()).unwrap_or("*")
             ))
         }
-        Command::PlanRebalanceAddNode { node_id } => {
-            Response::Bulk(Some(coordinator.plan_rebalance_add_node(node_id).to_string()))
-        }
-        Command::PlanRebalanceRemoveNode { node_id } => {
-            Response::Bulk(Some(coordinator.plan_rebalance_remove_node(node_id).to_string()))
-        }
+        Command::PlanRebalanceAddNode { node_id } => Response::Bulk(Some(
+            coordinator.plan_rebalance_add_node(node_id).to_string(),
+        )),
+        Command::PlanRebalanceRemoveNode { node_id } => Response::Bulk(Some(
+            coordinator.plan_rebalance_remove_node(node_id).to_string(),
+        )),
         Command::ExecuteRebalanceAddNode {
             node_id,
             collection,

@@ -112,7 +112,11 @@ impl HintStore {
     }
 
     /// Drain up to `limit` hints for the target node and persist the remainder.
-    pub fn drain_for_node(&self, target_node_id: &str, limit: usize) -> io::Result<Vec<HintRecord>> {
+    pub fn drain_for_node(
+        &self,
+        target_node_id: &str,
+        limit: usize,
+    ) -> io::Result<Vec<HintRecord>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -146,7 +150,11 @@ impl HintStore {
             return Ok(drained);
         }
 
-        let mut wf = OpenOptions::new().create(true).write(true).truncate(true).open(path)?;
+        let mut wf = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
         for line in keep {
             wf.write_all(line.as_bytes())?;
             wf.write_all(b"\n")?;
@@ -251,8 +259,12 @@ mod tests {
     fn test_hint_store_append_and_backlog_len() {
         let tmp = TempDir::new().expect("tmp");
         let store = HintStore::open(tmp.path()).expect("open");
-        store.append("node-b", &sample_hint("k1")).expect("append 1");
-        store.append("node-b", &sample_hint("k2")).expect("append 2");
+        store
+            .append("node-b", &sample_hint("k1"))
+            .expect("append 1");
+        store
+            .append("node-b", &sample_hint("k2"))
+            .expect("append 2");
 
         assert_eq!(store.backlog_len("node-b").expect("len"), 2);
         assert_eq!(store.backlog_len("node-c").expect("len empty"), 0);
@@ -262,9 +274,15 @@ mod tests {
     fn test_hint_store_drain_for_node_keeps_tail() {
         let tmp = TempDir::new().expect("tmp");
         let store = HintStore::open(tmp.path()).expect("open");
-        store.append("node-b", &sample_hint("k1")).expect("append 1");
-        store.append("node-b", &sample_hint("k2")).expect("append 2");
-        store.append("node-b", &sample_hint("k3")).expect("append 3");
+        store
+            .append("node-b", &sample_hint("k1"))
+            .expect("append 1");
+        store
+            .append("node-b", &sample_hint("k2"))
+            .expect("append 2");
+        store
+            .append("node-b", &sample_hint("k3"))
+            .expect("append 3");
 
         let drained = store.drain_for_node("node-b", 2).expect("drain");
         assert_eq!(drained.len(), 2);
@@ -282,8 +300,12 @@ mod tests {
     fn test_hint_store_lists_targets() {
         let tmp = TempDir::new().expect("tmp");
         let store = HintStore::open(tmp.path()).expect("open");
-        store.append("node-c", &sample_hint("k1")).expect("append c");
-        store.append("node-a", &sample_hint("k2")).expect("append a");
+        store
+            .append("node-c", &sample_hint("k1"))
+            .expect("append c");
+        store
+            .append("node-a", &sample_hint("k2"))
+            .expect("append a");
         let targets = store.list_targets().expect("targets");
         assert_eq!(targets, vec!["node-a".to_string(), "node-c".to_string()]);
     }
@@ -354,8 +376,12 @@ mod tests {
         let tmp = TempDir::new().expect("tmp");
         {
             let store = HintStore::open(tmp.path()).expect("open");
-            store.append("node-a", &sample_hint("k1")).expect("append 1");
-            store.append("node-a", &sample_hint("k2")).expect("append 2");
+            store
+                .append("node-a", &sample_hint("k1"))
+                .expect("append 1");
+            store
+                .append("node-a", &sample_hint("k2"))
+                .expect("append 2");
             assert_eq!(store.backlog_len("node-a").expect("len before reopen"), 2);
         }
 

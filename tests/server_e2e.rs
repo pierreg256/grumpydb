@@ -508,9 +508,11 @@ async fn test_e2e_put_with_vc_round_trips_crdt_pncounter_envelope() {
         .expect("get merged")
         .expect("doc");
     assert_eq!(got["$crdt"]["kind"], json!("PNCounter"));
+    // PNCounter merge keeps component-wise maxima between concurrent envelopes:
+    // left=(2,7), right=(9,3) => merged=(9,7).
     assert_eq!(
         got["$crdt"]["payload_b64"],
-        json!("CQAAAAAAAAADAAAAAAAAAA==")
+        json!("CQAAAAAAAAAHAAAAAAAAAA==")
     );
 }
 
@@ -592,7 +594,10 @@ async fn test_e2e_rebalance_execute_requires_selected_database() {
         .expect("rebalance execute add");
     match resp {
         grumpydb_protocol::Response::Error(msg) => {
-            assert!(msg.contains("no database selected"), "unexpected error: {msg}");
+            assert!(
+                msg.contains("no database selected"),
+                "unexpected error: {msg}"
+            );
         }
         other => panic!("expected error without USE, got: {other:?}"),
     }

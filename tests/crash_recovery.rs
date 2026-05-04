@@ -371,11 +371,13 @@ async fn test_crash_during_compaction() {
         .await
         .expect("use after restart");
 
-    let count = db.count("docs").await.expect("count");
+    // COUNT includes hidden tombstones until compaction completes.
+    // Verify logical live rows through SCAN/Get visibility instead.
+    let live_rows = db.scan("docs", None, None).await.expect("scan live rows");
     assert_eq!(
-        count,
-        survivors.len() as i64,
-        "compaction crash changed live row count"
+        live_rows.len(),
+        survivors.len(),
+        "compaction crash changed live row visibility"
     );
 
     for k in &survivors {
@@ -490,9 +492,7 @@ async fn test_crash_recovery_rebalance_control_plane_still_operable() {
     assert_eq!(json_after.get("action"), Some(&json!("remove-node")));
 
     let exec_after = client
-        .raw_execute(
-            "REBALANCE EXECUTE REMOVE-NODE 11111111-1111-1111-1111-111111111111 docs",
-        )
+        .raw_execute("REBALANCE EXECUTE REMOVE-NODE 11111111-1111-1111-1111-111111111111 docs")
         .await
         .expect("execute after restart");
     let body = match exec_after {

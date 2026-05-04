@@ -15,11 +15,11 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::cluster::NodeIdentity;
-use crate::cluster::hints::{HintOperation, HintRecord};
 use crate::cluster::handshake::{
-    ClusterHello, GossipPayload, PeerGossipState, PeerKeyPath, PeerRpcContext,
-    delete_peer_value, fetch_peer_value, probe_peer_acceptance, upsert_peer_value,
+    ClusterHello, GossipPayload, PeerGossipState, PeerKeyPath, PeerRpcContext, delete_peer_value,
+    fetch_peer_value, probe_peer_acceptance, upsert_peer_value,
 };
+use crate::cluster::hints::{HintOperation, HintRecord};
 use crate::config::{ClusterSection, PeerEntry, WriterEntry};
 
 /// Lightweight server-side coordinator.
@@ -97,7 +97,10 @@ impl Coordinator {
                 node_id.clone(),
                 PeerRuntime {
                     addr: addr.clone(),
-                    status: canonical_status(status.as_deref().unwrap_or("unknown"), *last_seen_at_unix),
+                    status: canonical_status(
+                        status.as_deref().unwrap_or("unknown"),
+                        *last_seen_at_unix,
+                    ),
                     last_seen_at_unix: *last_seen_at_unix,
                     vnode_assignments: if vnode_assignments.is_empty() {
                         default_vnode_assignments(cluster.vnodes_per_node)
@@ -627,7 +630,10 @@ impl Coordinator {
     /// Execute an add-node rebalance plan (phase-49 scaffolding).
     pub fn execute_rebalance_add_node(&self, node_id: &str) -> serde_json::Value {
         let plan = self.plan_rebalance_add_node(node_id);
-        let total = plan.get("range_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let total = plan
+            .get("range_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         metrics::counter!(
             "grumpydb_rebalance_transfers_total",
             "action" => "add-node"
@@ -645,7 +651,10 @@ impl Coordinator {
     /// Execute a remove-node rebalance plan (phase-49 scaffolding).
     pub fn execute_rebalance_remove_node(&self, node_id: &str) -> serde_json::Value {
         let plan = self.plan_rebalance_remove_node(node_id);
-        let total = plan.get("range_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let total = plan
+            .get("range_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         metrics::counter!(
             "grumpydb_rebalance_transfers_total",
             "action" => "remove-node"
@@ -708,7 +717,11 @@ impl Coordinator {
         let peers: Vec<(String, String)> = self
             .replica_peer_nodes_for_key(database, collection, key.as_bytes())
             .into_iter()
-            .filter_map(|node_id| self.peer_addrs.get(&node_id).map(|addr| (node_id, addr.clone())))
+            .filter_map(|node_id| {
+                self.peer_addrs
+                    .get(&node_id)
+                    .map(|addr| (node_id, addr.clone()))
+            })
             .collect();
 
         let server_version = format!("grumpydb-server/{}", env!("CARGO_PKG_VERSION"));
@@ -790,7 +803,9 @@ impl Coordinator {
         };
 
         match hint.resolved_operation() {
-            HintOperation::Upsert { value_json } => upsert_peer_value(&ctx, &key_path, &value_json).await,
+            HintOperation::Upsert { value_json } => {
+                upsert_peer_value(&ctx, &key_path, &value_json).await
+            }
             HintOperation::Delete => delete_peer_value(&ctx, &key_path).await,
         }
     }
@@ -995,9 +1010,13 @@ fn value_to_serde_json(val: &Value) -> serde_json::Value {
         Value::Integer(i) => serde_json::json!(*i),
         Value::Float(f) => serde_json::json!(*f),
         Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::Bytes(b) => serde_json::json!({"$bytes": base64::engine::general_purpose::STANDARD.encode(b)}),
+        Value::Bytes(b) => {
+            serde_json::json!({"$bytes": base64::engine::general_purpose::STANDARD.encode(b)})
+        }
         Value::Ref(coll, id) => serde_json::json!({"$ref": {"collection": coll, "id": id}}),
-        Value::Array(arr) => serde_json::Value::Array(arr.iter().map(value_to_serde_json).collect()),
+        Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(value_to_serde_json).collect())
+        }
         Value::Object(obj) => {
             let mut map = serde_json::Map::new();
             for (k, v) in obj {
@@ -1515,7 +1534,10 @@ mod tests {
     fn test_plan_rebalance_add_node_returns_delta_ranges() {
         let c = Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
         let plan = c.plan_rebalance_add_node("11111111-1111-1111-1111-111111111111");
-        assert_eq!(plan.get("action").and_then(|v| v.as_str()), Some("add-node"));
+        assert_eq!(
+            plan.get("action").and_then(|v| v.as_str()),
+            Some("add-node")
+        );
         assert_eq!(
             plan.get("node_id").and_then(|v| v.as_str()),
             Some("11111111-1111-1111-1111-111111111111")
@@ -1577,7 +1599,10 @@ mod tests {
     fn test_execute_rebalance_add_node_reports_progress() {
         let c = Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
         let out = c.execute_rebalance_add_node("11111111-1111-1111-1111-111111111111");
-        assert_eq!(out.get("status").and_then(|v| v.as_str()), Some("planned-only"));
+        assert_eq!(
+            out.get("status").and_then(|v| v.as_str()),
+            Some("planned-only")
+        );
         assert!(
             out.get("executed_ranges")
                 .and_then(|v| v.as_u64())
