@@ -167,6 +167,20 @@ pub enum Command {
         database: String,
         collection: Option<String>,
     },
+    /// Preview ownership deltas for adding a node.
+    PlanRebalanceAddNode { node_id: String },
+    /// Preview ownership deltas for removing a node.
+    PlanRebalanceRemoveNode { node_id: String },
+    /// Execute add-node transfer for one collection in the selected database.
+    ExecuteRebalanceAddNode {
+        node_id: String,
+        collection: String,
+    },
+    /// Execute remove-node transfer for one collection in the selected database.
+    ExecuteRebalanceRemoveNode {
+        node_id: String,
+        collection: String,
+    },
 }
 
 /// The type of action a command performs (for RBAC).
@@ -184,7 +198,7 @@ pub enum Action {
     ManageDatabases,
     /// Manage the server: CREATE/DROP TENANT.
     ManageServer,
-    /// Manage the cluster: ELECT-WRITER.
+    /// Manage the cluster: ELECT-WRITER, REBALANCE.
     ManageCluster,
     /// Session commands that bypass RBAC: LOGIN, TOKEN, REFRESH, PING, QUIT, USE, WHOAMI.
     Session,
@@ -250,7 +264,11 @@ impl Command {
             }
 
             // Cluster management
-            Command::ElectWriter { .. } => Action::ManageCluster,
+            Command::ElectWriter { .. }
+            | Command::PlanRebalanceAddNode { .. }
+            | Command::PlanRebalanceRemoveNode { .. }
+            | Command::ExecuteRebalanceAddNode { .. }
+            | Command::ExecuteRebalanceRemoveNode { .. } => Action::ManageCluster,
 
             // Session (bypass RBAC)
             Command::Login { .. }
@@ -320,7 +338,11 @@ impl Command {
             | Command::Revoke { .. } => Resource::Server,
 
             // Cluster management → server scope
-            Command::ElectWriter { .. } => Resource::Server,
+            Command::ElectWriter { .. }
+            | Command::PlanRebalanceAddNode { .. }
+            | Command::PlanRebalanceRemoveNode { .. }
+            | Command::ExecuteRebalanceAddNode { .. }
+            | Command::ExecuteRebalanceRemoveNode { .. } => Resource::Server,
 
             // Session — no resource
             Command::Login { .. }
@@ -476,6 +498,19 @@ mod tests {
         };
         assert_eq!(elect.required_action(), Action::ManageCluster);
         assert_eq!(elect.target_resource(None), Resource::Server);
+
+        let plan_add = Command::PlanRebalanceAddNode {
+            node_id: "node-2".into(),
+        };
+        assert_eq!(plan_add.required_action(), Action::ManageCluster);
+        assert_eq!(plan_add.target_resource(None), Resource::Server);
+
+        let exec_remove = Command::ExecuteRebalanceRemoveNode {
+            node_id: "node-2".into(),
+            collection: "users".into(),
+        };
+        assert_eq!(exec_remove.required_action(), Action::ManageCluster);
+        assert_eq!(exec_remove.target_resource(Some("db")), Resource::Server);
     }
 
     #[test]

@@ -552,3 +552,82 @@ async fn test_e2e_put_with_vc_after_delete_restores_document() {
         .expect("doc");
     assert_eq!(got, json!({"name":"after","source":"put_with_vc"}));
 }
+
+#[tokio::test]
+async fn test_e2e_rebalance_plan_commands_return_json() {
+    let server = TestServer::spawn().await;
+    let mut client = admin_client(&server).await;
+
+    let resp = client
+        .raw_execute("REBALANCE PLAN ADD-NODE 11111111-1111-1111-1111-111111111111")
+        .await
+        .expect("rebalance plan add");
+    let body = match resp {
+        grumpydb_protocol::Response::Bulk(Some(s)) => s,
+        other => panic!("unexpected REBALANCE PLAN ADD response: {other:?}"),
+    };
+    let json: serde_json::Value = serde_json::from_str(&body).expect("plan add json");
+    assert_eq!(json.get("action"), Some(&json!("add-node")));
+
+    let resp = client
+        .raw_execute("REBALANCE PLAN REMOVE-NODE 11111111-1111-1111-1111-111111111111")
+        .await
+        .expect("rebalance plan remove");
+    let body = match resp {
+        grumpydb_protocol::Response::Bulk(Some(s)) => s,
+        other => panic!("unexpected REBALANCE PLAN REMOVE response: {other:?}"),
+    };
+    let json: serde_json::Value = serde_json::from_str(&body).expect("plan remove json");
+    assert_eq!(json.get("action"), Some(&json!("remove-node")));
+}
+
+#[tokio::test]
+async fn test_e2e_rebalance_execute_requires_selected_database() {
+    let server = TestServer::spawn().await;
+    let mut client = admin_client(&server).await;
+
+    let resp = client
+        .raw_execute("REBALANCE EXECUTE ADD-NODE 11111111-1111-1111-1111-111111111111 users")
+        .await
+        .expect("rebalance execute add");
+    match resp {
+        grumpydb_protocol::Response::Error(msg) => {
+            assert!(msg.contains("no database selected"), "unexpected error: {msg}");
+        }
+        other => panic!("expected error without USE, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_e2e_rebalance_execute_commands_return_json_with_use() {
+    let server = TestServer::spawn().await;
+    let mut client = admin_client(&server).await;
+    client
+        .create_database("rebalance_db")
+        .await
+        .expect("create db");
+    let mut db = client.database("rebalance_db").await.expect("use db");
+    db.create_collection("users").await.expect("create users");
+
+    let resp = client
+        .raw_execute("REBALANCE EXECUTE ADD-NODE 11111111-1111-1111-1111-111111111111 users")
+        .await
+        .expect("rebalance execute add");
+    let body = match resp {
+        grumpydb_protocol::Response::Bulk(Some(s)) => s,
+        other => panic!("unexpected REBALANCE EXECUTE ADD response: {other:?}"),
+    };
+    let json: serde_json::Value = serde_json::from_str(&body).expect("execute add json");
+    assert_eq!(json.get("action"), Some(&json!("add-node-transfer")));
+
+    let resp = client
+        .raw_execute("REBALANCE EXECUTE REMOVE-NODE 11111111-1111-1111-1111-111111111111 users")
+        .await
+        .expect("rebalance execute remove");
+    let body = match resp {
+        grumpydb_protocol::Response::Bulk(Some(s)) => s,
+        other => panic!("unexpected REBALANCE EXECUTE REMOVE response: {other:?}"),
+    };
+    let json: serde_json::Value = serde_json::from_str(&body).expect("execute remove json");
+    assert_eq!(json.get("action"), Some(&json!("remove-node-transfer")));
+}

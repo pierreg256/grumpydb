@@ -73,6 +73,7 @@ pub fn parse_command(line: &str) -> Result<Command, ProtocolError> {
         "GRANT" => parse_grant(rest),
         "REVOKE" => parse_revoke(rest),
         "ELECT-WRITER" | "ELECT_WRITER" => parse_elect_writer(rest),
+        "REBALANCE" => parse_rebalance(rest),
 
         // ── CRUD ────────────────────────────────────────────────────
         "INSERT" => parse_insert(rest),
@@ -496,6 +497,61 @@ fn parse_elect_writer(rest: &str) -> Result<Command, ProtocolError> {
         database: database.to_string(),
         collection,
     })
+}
+
+fn parse_rebalance(rest: &str) -> Result<Command, ProtocolError> {
+    let (mode, rest) = split_first_word(rest);
+    let (target, rest) = split_first_word(rest);
+    let mode_upper = mode.to_ascii_uppercase();
+    let target_upper = target.to_ascii_uppercase();
+
+    match (mode_upper.as_str(), target_upper.as_str()) {
+        ("PLAN", "ADD-NODE") | ("PLAN", "ADD_NODE") => {
+            let node_id = require_arg(rest, "REBALANCE PLAN ADD-NODE", "node_id")?;
+            let (node_id, _) = split_first_word(node_id);
+            Ok(Command::PlanRebalanceAddNode {
+                node_id: node_id.to_string(),
+            })
+        }
+        ("PLAN", "REMOVE-NODE") | ("PLAN", "REMOVE_NODE") => {
+            let node_id = require_arg(rest, "REBALANCE PLAN REMOVE-NODE", "node_id")?;
+            let (node_id, _) = split_first_word(node_id);
+            Ok(Command::PlanRebalanceRemoveNode {
+                node_id: node_id.to_string(),
+            })
+        }
+        ("EXECUTE", "ADD-NODE") | ("EXECUTE", "ADD_NODE") => {
+            let (node_id, rest) = split_first_word(rest);
+            if node_id.is_empty() {
+                return Err(ProtocolError::MissingArgument(
+                    "REBALANCE EXECUTE ADD-NODE requires <node_id> <collection>".into(),
+                ));
+            }
+            let collection = require_arg(rest, "REBALANCE EXECUTE ADD-NODE", "collection")?;
+            let (collection, _) = split_first_word(collection);
+            Ok(Command::ExecuteRebalanceAddNode {
+                node_id: node_id.to_string(),
+                collection: collection.to_string(),
+            })
+        }
+        ("EXECUTE", "REMOVE-NODE") | ("EXECUTE", "REMOVE_NODE") => {
+            let (node_id, rest) = split_first_word(rest);
+            if node_id.is_empty() {
+                return Err(ProtocolError::MissingArgument(
+                    "REBALANCE EXECUTE REMOVE-NODE requires <node_id> <collection>".into(),
+                ));
+            }
+            let collection = require_arg(rest, "REBALANCE EXECUTE REMOVE-NODE", "collection")?;
+            let (collection, _) = split_first_word(collection);
+            Ok(Command::ExecuteRebalanceRemoveNode {
+                node_id: node_id.to_string(),
+                collection: collection.to_string(),
+            })
+        }
+        _ => Err(ProtocolError::MissingArgument(
+            "REBALANCE requires PLAN|EXECUTE and ADD-NODE|REMOVE-NODE".into(),
+        )),
+    }
 }
 
 fn parse_scan(rest: &str) -> Result<Command, ProtocolError> {
@@ -1103,6 +1159,56 @@ mod tests {
                 collection: Some("users".into()),
             }
         );
+    }
+
+    #[test]
+    fn test_parse_rebalance_plan_add_node() {
+        assert_eq!(
+            parse_command("REBALANCE PLAN ADD-NODE node-2\r\n").unwrap(),
+            Command::PlanRebalanceAddNode {
+                node_id: "node-2".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_rebalance_plan_remove_node() {
+        assert_eq!(
+            parse_command("REBALANCE PLAN REMOVE_NODE node-3\r\n").unwrap(),
+            Command::PlanRebalanceRemoveNode {
+                node_id: "node-3".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_rebalance_execute_add_node() {
+        assert_eq!(
+            parse_command("REBALANCE EXECUTE ADD_NODE node-2 users\r\n").unwrap(),
+            Command::ExecuteRebalanceAddNode {
+                node_id: "node-2".into(),
+                collection: "users".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_rebalance_execute_remove_node() {
+        assert_eq!(
+            parse_command("REBALANCE EXECUTE REMOVE-NODE node-2 users\r\n").unwrap(),
+            Command::ExecuteRebalanceRemoveNode {
+                node_id: "node-2".into(),
+                collection: "users".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_rebalance_missing_args() {
+        assert!(parse_command("REBALANCE\r\n").is_err());
+        assert!(parse_command("REBALANCE PLAN\r\n").is_err());
+        assert!(parse_command("REBALANCE PLAN ADD-NODE\r\n").is_err());
+        assert!(parse_command("REBALANCE EXECUTE ADD-NODE node-2\r\n").is_err());
     }
 
     // ── Error cases ─────────────────────────────────────────────────

@@ -1076,6 +1076,11 @@ collection); v6 will lift this constraint to true multi-writer.
    - New `TOPOLOGY` command.
    - New `PUT_WITH_VC <collection> <key> <value> <vector_clock>` command.
    - `ELECT-WRITER` parsing is now wired in the protocol parser.
+    - Rebalance control-plane command parsing is wired:
+       - `REBALANCE PLAN ADD-NODE <node_id>`
+       - `REBALANCE PLAN REMOVE-NODE <node_id>`
+       - `REBALANCE EXECUTE ADD-NODE <node_id> <collection>`
+       - `REBALANCE EXECUTE REMOVE-NODE <node_id> <collection>`
 3. **v5 concern enforcement wired in server handler**:
    - Validates concern prefixes on data commands.
    - Rejects any non-default concern with
@@ -1579,10 +1584,20 @@ Cross-cutting prerequisites:
    transfers keys whose prior owner was the removed node and whose new owner
    is a live remote peer, and reports `considered` / `retained_local` /
    `transferred` / `failed`.
+7. TCP handler control-plane wiring now routes:
+   - `REBALANCE PLAN ADD-NODE/REMOVE-NODE` to JSON preview responses.
+   - `REBALANCE EXECUTE ADD-NODE/REMOVE-NODE` to transfer executors.
+8. `REBALANCE EXECUTE ...` now requires a selected database (`USE <db>`) and
+   runs transfer execution against the selected database plus provided
+   collection.
+9. Coverage landed for protocol parser and e2e server behavior:
+   - parser tests for all new rebalance plan/execute forms and missing-arg
+     validation.
+   - e2e tests for JSON plan responses, `USE <db>` requirement on execute,
+     and JSON execute responses after `USE`.
 
 ### Remaining scope for Phase 49
-1. Wire transfer orchestration/control-plane hooks beyond direct coordinator
-   invocation.
+1. Broaden transfer orchestration beyond current per-command local execution.
 2. Validate rebalance correctness under concurrent writes and node churn.
 
 ## Phase 46: Conflict resolution (LWW + CRDT runtime) (v6)

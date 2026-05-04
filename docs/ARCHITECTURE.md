@@ -1094,7 +1094,7 @@ Client                                            Server
 | Maintenance | `COMPACT`, `FLUSH`, `COUNT` |
 | User mgmt | `CREATE USER`, `DROP USER`, `LIST USERS [@tenant]`, `GRANT`, `REVOKE` |
 | Tenant mgmt | `CREATE TENANT`, `DROP TENANT`, `LIST TENANTS` |
-| Cluster mgmt | `ELECT-WRITER` |
+| Cluster mgmt | `ELECT-WRITER`, `REBALANCE PLAN ADD-NODE`, `REBALANCE PLAN REMOVE-NODE`, `REBALANCE EXECUTE ADD-NODE`, `REBALANCE EXECUTE REMOVE-NODE` |
 
 Consistency prefixes (Phase 40f) are parsed as a wrapper around the base
 command: `READ_CONCERN R=<n>` and/or `WRITE_CONCERN W=<n>`. In v5, concerns
@@ -1338,15 +1338,20 @@ Phase 47/48/49 status (partial runtime, not complete):
   counters.
 - Rebalancing: `Coordinator` exposes preview helpers
   `plan_rebalance_add_node` / `plan_rebalance_remove_node` that return ring
-  key-range ownership deltas plus execute scaffolds
-  `execute_rebalance_add_node` / `execute_rebalance_remove_node` that currently
-  return planned-only progress payloads and increment transfer metrics.
-  It now includes both `execute_rebalance_add_node_transfer(...)` and
+  key-range ownership deltas. The wire protocol now includes:
+  - `REBALANCE PLAN ADD-NODE <node_id>`
+  - `REBALANCE PLAN REMOVE-NODE <node_id>`
+  - `REBALANCE EXECUTE ADD-NODE <node_id> <collection>`
+  - `REBALANCE EXECUTE REMOVE-NODE <node_id> <collection>`
+  PLAN commands return JSON previews. EXECUTE commands require a selected
+  database (`USE <db>`) and run collection-scoped transfer execution for that
+  selected database. It now includes both
+  `execute_rebalance_add_node_transfer(...)` and
   `execute_rebalance_remove_node_transfer(...)`. The remove-node path computes
   ownership before/after ring removal, scans local data, transfers keys whose
   previous owner was the removed node and new owner is a live remote peer, and
   reports considered/transferred/failed/retained-local counts.
-- Control-plane orchestration around transfer execution and churn convergence
+- Broader orchestration around transfer execution and churn convergence
   guarantees remain future Phase 48/49 work.
 
 **Panic isolation**: every `execute_command` invocation is wrapped in

@@ -332,18 +332,22 @@ Phases 48/49 remain partial and are not complete yet:
   metrics.
 - Phase 49 partial runtime: coordinator rebalance preview helpers based on ring
   key-range deltas (`plan_rebalance_add_node`, `plan_rebalance_remove_node`),
-  planned-only execute scaffolds (`execute_rebalance_add_node`,
-  `execute_rebalance_remove_node`), plus functional transfer executors:
-  `execute_rebalance_add_node_transfer` and
-  `execute_rebalance_remove_node_transfer`. The remove-node path computes
+  transfer executors (`execute_rebalance_add_node_transfer`,
+  `execute_rebalance_remove_node_transfer`), and control-plane command wiring:
+  `REBALANCE PLAN ADD-NODE <node_id>`,
+  `REBALANCE PLAN REMOVE-NODE <node_id>`,
+  `REBALANCE EXECUTE ADD-NODE <node_id> <collection>`,
+  `REBALANCE EXECUTE REMOVE-NODE <node_id> <collection>`. PLAN returns JSON
+  previews. EXECUTE requires `USE <db>` and runs transfer execution for the
+  selected database and provided collection. The remove-node path computes
   ownership before/after `ring.remove_node`, scans local collection data,
   transfers keys whose prior owner was the removed node and whose new owner is
   a live remote peer, tracks considered/transferred/failed/retained-local, and
   updates rebalance metrics.
 - Peer data RPC on the handshake channel now supports `GET`, `UPSERT`, and
   `DELETE` operations.
-- Missing for completion: control-plane wiring for transfer orchestration and
-  convergence validation under churn/concurrent writes.
+- Missing for completion: broader transfer orchestration and convergence
+  validation under churn/concurrent writes.
 
 ### RBAC roles
 

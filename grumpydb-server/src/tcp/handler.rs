@@ -508,6 +508,10 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::DropTenant(_) => "DROP_TENANT",
         Command::ListTenants => "LIST_TENANTS",
         Command::ElectWriter { .. } => "ELECT_WRITER",
+        Command::PlanRebalanceAddNode { .. } => "REBALANCE_PLAN_ADD_NODE",
+        Command::PlanRebalanceRemoveNode { .. } => "REBALANCE_PLAN_REMOVE_NODE",
+        Command::ExecuteRebalanceAddNode { .. } => "REBALANCE_EXECUTE_ADD_NODE",
+        Command::ExecuteRebalanceRemoveNode { .. } => "REBALANCE_EXECUTE_REMOVE_NODE",
     }
 }
 
@@ -1195,6 +1199,54 @@ async fn execute_command(
                 database,
                 collection.as_ref().map(|c| c.as_str()).unwrap_or("*")
             ))
+        }
+        Command::PlanRebalanceAddNode { node_id } => {
+            Response::Bulk(Some(coordinator.plan_rebalance_add_node(node_id).to_string()))
+        }
+        Command::PlanRebalanceRemoveNode { node_id } => {
+            Response::Bulk(Some(coordinator.plan_rebalance_remove_node(node_id).to_string()))
+        }
+        Command::ExecuteRebalanceAddNode {
+            node_id,
+            collection,
+        } => {
+            let tenant = match session.tenant() {
+                Ok(t) => t.to_string(),
+                Err(e) => return Response::Error(e.to_string()),
+            };
+            let db_name = match session.current_db() {
+                Some(db) => db.to_string(),
+                None => return Response::Error("no database selected (use USE <db>)".into()),
+            };
+            let db = match shared_server.database(&tenant, &db_name) {
+                Ok(db) => db,
+                Err(e) => return Response::Error(e.to_string()),
+            };
+            let out = coordinator
+                .execute_rebalance_add_node_transfer(node_id, &tenant, &db_name, collection, &db)
+                .await;
+            Response::Bulk(Some(out.to_string()))
+        }
+        Command::ExecuteRebalanceRemoveNode {
+            node_id,
+            collection,
+        } => {
+            let tenant = match session.tenant() {
+                Ok(t) => t.to_string(),
+                Err(e) => return Response::Error(e.to_string()),
+            };
+            let db_name = match session.current_db() {
+                Some(db) => db.to_string(),
+                None => return Response::Error("no database selected (use USE <db>)".into()),
+            };
+            let db = match shared_server.database(&tenant, &db_name) {
+                Ok(db) => db,
+                Err(e) => return Response::Error(e.to_string()),
+            };
+            let out = coordinator
+                .execute_rebalance_remove_node_transfer(node_id, &tenant, &db_name, collection, &db)
+                .await;
+            Response::Bulk(Some(out.to_string()))
         }
 
         // Already handled above
