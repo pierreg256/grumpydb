@@ -336,6 +336,15 @@ Phases 48/49 remain partial and are not complete yet:
   coordinator state, drains batches, replays each hint to peers over
   authenticated RPC, re-enqueues failures, and increments replay/retry
   metrics.
+- Current keyed write runtime semantics in this path: `WRITE_CONCERN W`
+  counts remote apply acknowledgements for `INSERT`, `UPDATE`, `DELETE`, and
+  `PUT_WITH_VC` (not only handshake reachability). When quorum is not met
+  before `write_ack_timeout_ms`, the command fails, but the local write may
+  already be committed; rollback is not attempted. Failed replica deliveries
+  are queued to hinted handoff for later replay.
+- Peer-applied replicated writes now auto-create missing target
+  tenant/database/collection on destination nodes, so replayed upserts/deletes
+  do not fail only because the namespace is absent.
 - Phase 49 partial runtime: coordinator rebalance preview helpers based on ring
   key-range deltas (`plan_rebalance_add_node`, `plan_rebalance_remove_node`),
   transfer executors (`execute_rebalance_add_node_transfer`,

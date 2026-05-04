@@ -188,18 +188,6 @@ where
             continue;
         }
 
-        if let Err(e) = wait_for_write_ack_quorum(&command, &session, coordinator.as_ref()).await {
-            persist_write_hints_on_quorum_failure(
-                &command,
-                &session,
-                coordinator.as_ref(),
-                pipelines.hint_store.as_ref(),
-            );
-            tracing::warn!(error = %e, "write ack quorum failed");
-            write_resp(&mut writer, &Response::Error(e)).await?;
-            continue;
-        }
-
         // Execute (with panic isolation: a corrupt page or bug in the engine
         // must not tear down the entire server. Surface as Corruption error.)
         let started = std::time::Instant::now();
@@ -227,6 +215,14 @@ where
             pipelines.read_repair_store.as_ref(),
         )
         .await;
+
+        if !matches!(&response, Response::Error(_))
+            && let Err(e) =
+                wait_for_write_ack_quorum(&command, &session, coordinator.as_ref(), pipelines.hint_store.as_ref()).await
+        {
+            tracing::warn!(error = %e, "write apply quorum failed");
+            response = Response::Error(e);
+        }
 
         let elapsed_us = started.elapsed().as_micros() as u64;
         let elapsed_secs = started.elapsed().as_secs_f64();
@@ -283,58 +279,23 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-fn persist_write_hints_on_quorum_failure(
-    command: &Command,
-    session: &SessionContext,
-    coordinator: &Coordinator,
-    hint_store: &HintStore,
-) {
-    let Some((collection, key)) = write_target(command) else {
-        return;
-    };
-    let Some(db_name) = session.current_db() else {
-        return;
-    };
-    let Ok(tenant) = session.tenant() else {
-        return;
-    };
-
-    let operation = match base_command(command) {
-        Command::Insert { value, .. } | Command::Update { value, .. } => HintOperation::Upsert {
-            value_json: value.clone(),
-        },
-        Command::Delete { .. } => HintOperation::Delete,
+fn write_hint_operation(command: &Command) -> Option<HintOperation> {
+    match base_command(command) {
+        Command::Insert { value, .. } | Command::Update { value, .. } => {
+            Some(HintOperation::Upsert {
+                value_json: value.clone(),
+            })
+        }
+        Command::Delete { .. } => Some(HintOperation::Delete),
         Command::PutWithVc {
             value,
             vector_clock,
             ..
-        } => HintOperation::Upsert {
+        } => Some(HintOperation::Upsert {
             value_json: serde_json::json!({"value": value, "vector_clock": vector_clock})
                 .to_string(),
-        },
-        _ => return,
-    };
-
-    let replicas = coordinator.unavailable_replica_peer_nodes_for_key(
-        db_name,
-        collection,
-        key.as_bytes(),
-    );
-    for node_id in replicas {
-        let hint = HintRecord {
-            created_at_unix: now_unix(),
-            tenant: tenant.to_string(),
-            database: db_name.to_string(),
-            collection: collection.to_string(),
-            key: key.to_string(),
-            operation: Some(operation.clone()),
-            payload_json: None,
-        };
-        if let Err(e) = hint_store.append(&node_id, &hint) {
-            tracing::warn!(error = %e, node_id, "failed to persist hinted handoff record");
-        } else {
-            metrics::counter!("grumpydb_hints_enqueued_total").increment(1);
-        }
+        }),
+        _ => None,
     }
 }
 
@@ -686,9 +647,11 @@ async fn wait_for_write_ack_quorum(
     command: &Command,
     session: &SessionContext,
     coordinator: &Coordinator,
+    hint_store: &HintStore,
 ) -> Result<(), String> {
     let (_, write_concern) = consistency_values(command);
-    if write_concern.unwrap_or(1) <= 1 {
+    let w = write_concern.unwrap_or(1) as usize;
+    if w <= 1 {
         return Ok(());
     }
 
@@ -699,9 +662,60 @@ async fn wait_for_write_ack_quorum(
         return Ok(());
     };
 
-    coordinator
-        .wait_for_write_ack_quorum(db_name, collection, key.as_bytes(), write_concern)
-        .await
+    let tenant = session.tenant().map_err(|e| e.to_string())?.to_string();
+    let operation = match write_hint_operation(command) {
+        Some(op) => op,
+        None => return Ok(()),
+    };
+
+    let replicas = coordinator.replica_peer_nodes_for_key(db_name, collection, key.as_bytes());
+    let required_remote = w.saturating_sub(1);
+    if replicas.len() < required_remote {
+        return Err(format!(
+            "write quorum cannot be satisfied: need {required_remote} remote acks, only {} replica peers available",
+            replicas.len()
+        ));
+    }
+
+    let mut acked_remote = 0usize;
+    let mut failures = Vec::new();
+    for node_id in replicas {
+        let hint = HintRecord {
+            created_at_unix: now_unix(),
+            tenant: tenant.clone(),
+            database: db_name.to_string(),
+            collection: collection.to_string(),
+            key: key.to_string(),
+            operation: Some(operation.clone()),
+            payload_json: None,
+        };
+
+        match coordinator.replay_hint_to_peer(&node_id, &hint).await {
+            Ok(()) => acked_remote += 1,
+            Err(e) => {
+                failures.push(format!("{node_id}: {e}"));
+                if let Err(store_err) = hint_store.append(&node_id, &hint) {
+                    tracing::warn!(
+                        error = %store_err,
+                        node_id = %node_id,
+                        "failed to persist hinted handoff record"
+                    );
+                } else {
+                    metrics::counter!("grumpydb_hints_enqueued_total").increment(1);
+                }
+            }
+        }
+    }
+
+    let acked = 1 + acked_remote;
+    if acked >= w {
+        return Ok(());
+    }
+
+    Err(format!(
+        "write quorum not reached: acked {acked}/{w}; failures: {}",
+        failures.join(" | ")
+    ))
 }
 
 async fn write_resp<W: tokio::io::AsyncWrite + Unpin>(

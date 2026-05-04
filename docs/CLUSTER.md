@@ -12,8 +12,10 @@ Status note (v6 Stream E):
   `N = min(3, cluster_size)`, write admission is allowed on any local write
   replica in the key's preference list, and bounded `WRITE_CONCERN W` in
   `[1, N]` is validated (with `R` still pinned to `1`). Keyed writes now fan
-  out ack waits to replica peers over the handshake transport and fail when
-  quorum cannot be met before `write_ack_timeout_ms`.
+  out apply-ack waits to replica peers over the handshake transport and fail
+  when quorum cannot be met before `write_ack_timeout_ms`. Quorum failure does
+  not imply rollback of an already-applied local write; failed replicas are
+  enqueued to hinted handoff for retry.
 
 ## Mental model
 
@@ -247,8 +249,15 @@ escape valves. v5/v6/v7 all read the same `node.json` and the same
   writes when the local node is part of the ring preference list
   (`N=min(3, cluster_size)`), static validation accepts `W ∈ [1, N]`
   (`R` remains `1`), keyed writes validate `W` against currently live replicas,
-  and keyed write execution performs ack fanout/wait. If quorum is not reached
-  before `write_ack_timeout_ms`, the write fails with quorum-wait failure.
+  and keyed write execution performs remote apply-ack fanout/wait for
+  `INSERT`/`UPDATE`/`DELETE`/`PUT_WITH_VC`. If quorum is not reached before
+  `write_ack_timeout_ms`, the write fails with quorum-wait failure; the local
+  replica may already be committed and failed replicas are queued for hinted
+  handoff replay.
+- **v6 (replication apply behavior)**: peer-applied writes auto-create missing
+  target tenant/database/collection before apply so replicated
+  upserts/deletes can succeed on destination nodes that have not pre-created
+  the namespace.
 - **v7 (multi-region)**: a `region` field is reserved on `PeerEntry`
   (added in this doc when Phase 51 lands) and the ring becomes a
   per-region affair.

@@ -763,11 +763,12 @@ fn handle_peer_data_op(op: PeerDataOp, shared_server: &SharedServer) -> PeerData
                     };
                 }
             };
-            let db = match shared_server.database(&tenant, &database) {
+            let db = match ensure_peer_write_target(shared_server, &tenant, &database, &collection)
+            {
                 Ok(db) => db,
                 Err(e) => {
                     return PeerDataOpResponse::Error {
-                        message: e.to_string(),
+                        message: e,
                     };
                 }
             };
@@ -806,11 +807,12 @@ fn handle_peer_data_op(op: PeerDataOp, shared_server: &SharedServer) -> PeerData
                     };
                 }
             };
-            let db = match shared_server.database(&tenant, &database) {
+            let db = match ensure_peer_write_target(shared_server, &tenant, &database, &collection)
+            {
                 Ok(db) => db,
                 Err(e) => {
                     return PeerDataOpResponse::Error {
-                        message: e.to_string(),
+                        message: e,
                     };
                 }
             };
@@ -823,6 +825,39 @@ fn handle_peer_data_op(op: PeerDataOp, shared_server: &SharedServer) -> PeerData
             }
         }
     }
+}
+
+fn ensure_peer_write_target(
+    shared_server: &SharedServer,
+    tenant: &str,
+    database: &str,
+    collection: &str,
+) -> Result<grumpydb::SharedDatabase, String> {
+    if let Err(e) = shared_server.create_client(tenant)
+        && !is_already_exists_error(&e)
+    {
+        return Err(e.to_string());
+    }
+    if let Err(e) = shared_server.create_database(tenant, database)
+        && !is_already_exists_error(&e)
+    {
+        return Err(e.to_string());
+    }
+
+    let db = shared_server
+        .database(tenant, database)
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = db.create_collection(collection)
+        && !is_already_exists_error(&e)
+    {
+        return Err(e.to_string());
+    }
+
+    Ok(db)
+}
+
+fn is_already_exists_error(err: &GrumpyError) -> bool {
+    err.to_string().contains("already exists")
 }
 
 fn json_to_value(json: &serde_json::Value) -> Value {
@@ -909,6 +944,7 @@ fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
     use tokio::io::duplex;
 
     fn version() -> &'static str {
@@ -1038,5 +1074,29 @@ mod tests {
             matches!(err, HandshakeError::FrameTooLarge { .. }),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn test_peer_upsert_auto_creates_database_and_collection() {
+        let dir = TempDir::new().expect("tempdir");
+        let shared = SharedServer::open(dir.path()).expect("open shared server");
+        let key = Uuid::new_v4();
+
+        let resp = handle_peer_data_op(
+            PeerDataOp::Upsert {
+                tenant: "tenant1".to_string(),
+                database: "db1".to_string(),
+                collection: "docs".to_string(),
+                key: key.to_string(),
+                value_json: "{\"k\":\"v\"}".to_string(),
+            },
+            &shared,
+        );
+
+        assert!(matches!(resp, PeerDataOpResponse::Ack));
+
+        let db = shared.database("tenant1", "db1").expect("db exists after upsert");
+        let got = db.get("docs", &key).expect("get value from auto-created collection");
+        assert!(got.is_some());
     }
 }
