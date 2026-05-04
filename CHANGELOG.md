@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `R=1` keeps the existing local secondary-index fast path.
 - Added verified-query candidate ceiling: `4096` UUIDs (command errors when
   exceeded).
+- Hardened verified `QUERY`/`QUERYRANGE` execution for effective `R>1`:
+  command now fails when peer candidate collection/read RPC fails or when a
+  peer returns an invalid candidate UUID.
+- Added secondary-index DDL replication over peer RPC (`CREATEINDEX` /
+  `DROPINDEX`) with hinted-handoff durability on failed peer fanout.
+  `HintOperation` now also carries `create_index` and `drop_index`.
 
 - Phase 46 (conflict resolution runtime) entered implementation with a
   foundation tranche across `grumpydb`, `grumpydb-server`, and `grumpy-repl`.

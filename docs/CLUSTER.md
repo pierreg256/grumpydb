@@ -71,6 +71,10 @@ path:
 3. Re-evaluate index predicate against hydrated document fields.
 4. Return only rows that validate.
 
+Verified mode is fail-fast on peer anomalies: if peer candidate collection/read
+RPC fails, or a peer returns an invalid candidate UUID, the command returns an
+error.
+
 Fast path remains local index-only behavior when `R=1`.
 
 Safety limit: verified query mode enforces a candidate ceiling of `4096` UUIDs.
@@ -309,11 +313,14 @@ escape valves. v5/v6/v7 all read the same `node.json` and the same
   candidate collection to peers, then query execution hydrates candidates via
   quorum reads and re-validates predicates against document fields before
   returning rows. `R=1` keeps the original local-index fast path. Verified
-  mode rejects candidate sets above `4096` UUIDs.
+  mode rejects candidate sets above `4096` UUIDs and fails on peer candidate
+  collection/read errors or invalid peer candidate UUID payloads.
 - **v6 (replication apply behavior)**: peer-applied writes auto-create missing
   target tenant/database/collection before apply so replicated
   upserts/deletes can succeed on destination nodes that have not pre-created
-  the namespace.
+  the namespace. Secondary-index DDL (`CREATEINDEX`/`DROPINDEX`) also
+  replicates over peer RPC and is durable via hinted handoff replay when
+  immediate fanout fails.
 - **v7 (multi-region)**: a `region` field is reserved on `PeerEntry`
   (added in this doc when Phase 51 lands) and the ring becomes a
   per-region affair.

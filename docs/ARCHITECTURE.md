@@ -748,7 +748,8 @@ Cluster runtime note (v6): for protocol `QUERY`/`QUERYRANGE`, effective
 
 For `R=1`, query execution keeps the original local-index fast path.
 Verified mode enforces a candidate ceiling of `4096` UUIDs and fails on
-overflow (no partial result set).
+overflow (no partial result set). Verified mode also fails if peer candidate
+collection/read RPC fails or if a peer returns an invalid candidate UUID.
 
 ### 13.5 Field Extraction
 
@@ -1347,7 +1348,9 @@ advertises local membership, and refreshes coordinator liveness used by
 
 The peer listener handshake serve path now receives `SharedServer` and can
 execute authenticated peer data operations over the same channel:
-`PeerDataOp::Get`, `PeerDataOp::Upsert`, and `PeerDataOp::Delete`.
+`PeerDataOp::Get`, `PeerDataOp::Upsert`, `PeerDataOp::Delete`,
+`PeerDataOp::CreateIndex`, `PeerDataOp::DropIndex`,
+`PeerDataOp::QueryIndexExact`, and `PeerDataOp::QueryIndexRange`.
 
 For v6 Phase 47 runtime work, listener startup opens a durable read-repair
 queue store from `data_dir` and spawns a background worker. The handler now
@@ -1363,12 +1366,12 @@ Phase 47/48/49 status (partial runtime, not complete):
 - Hinted handoff: `grumpydb-server/src/cluster/hints.rs` provides a durable
   per-target-node JSONL hint backlog (`append`, `backlog_len`,
   `drain_for_node`) under `<data_dir>/_cluster/hints/`. `HintRecord` now
-  carries tenant + logical operation (`upsert`/`delete`) with
-  backward-compatible replay from legacy `payload_json` records. Listener
-  startup opens the store and spawns a replay worker that lists target
-  backlogs, checks peer liveness via coordinator state, drains batches, replays
-  hints to peers, re-enqueues failed replays, and increments replay/retry
-  counters.
+  carries tenant + logical operation
+  (`upsert`/`delete`/`create_index`/`drop_index`) with backward-compatible
+  replay from legacy `payload_json` records. Listener startup opens the store
+  and spawns a replay worker that lists target backlogs, checks peer liveness
+  via coordinator state, drains batches, replays hints to peers, re-enqueues
+  failed replays, and increments replay/retry counters.
 - Rebalancing: `Coordinator` exposes preview helpers
   `plan_rebalance_add_node` / `plan_rebalance_remove_node` that return ring
   key-range ownership deltas. The wire protocol now includes:

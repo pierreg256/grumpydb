@@ -355,7 +355,8 @@ In current v6 work, static consistency validation accepts bounded concerns
 - `QUERY`/`QUERYRANGE` run a verified query path: gather candidate UUIDs from
   local index plus replica peers, hydrate candidates through quorum reads,
   re-evaluate the predicate against document fields, and return only validated
-  rows.
+  rows. Verified mode now fails the command if peer candidate collection/read
+  RPC fails or if a peer returns an invalid candidate UUID.
 - Fast path is unchanged for `R=1`: local secondary-index lookup behavior is
   retained.
 - Candidate ceiling is `4096` UUIDs for verified query mode; exceeding it
@@ -371,12 +372,15 @@ READ_CONCERN R=2 QUERYRANGE users by_age 20 30
 Phases 48/49 remain partial and are not complete yet:
 - Phase 48 partial runtime: durable per-node hinted-handoff JSONL backlog
   store (`grumpydb-server/src/cluster/hints.rs`) now records tenant +
-  operation (`upsert`/`delete`) and keeps backward-compatible replay from
-  legacy `payload_json` records. Listener startup now spawns a background
-  hint worker that lists target backlogs, checks peer liveness via
-  coordinator state, drains batches, replays each hint to peers over
-  authenticated RPC, re-enqueues failures, and increments replay/retry
-  metrics.
+  operation (`upsert`/`delete`/`create_index`/`drop_index`) and keeps
+  backward-compatible replay from legacy `payload_json` records. Listener
+  startup now spawns a background hint worker that lists target backlogs,
+  checks peer liveness via coordinator state, drains batches, replays each
+  hint to peers over authenticated RPC, re-enqueues failures, and increments
+  replay/retry metrics.
+- Secondary-index DDL (`CREATEINDEX`/`DROPINDEX`) now replicates to replica
+  peers over authenticated peer RPC, and failed deliveries enqueue hinted
+  handoff records for replay.
 - Current keyed write runtime semantics in this path: `WRITE_CONCERN W`
   counts remote apply acknowledgements for `INSERT`, `UPDATE`, `DELETE`, and
   `PUT_WITH_VC` (not only handshake reachability). When quorum is not met
