@@ -226,6 +226,19 @@ where
         .await;
 
         if !matches!(&response, Response::Error(_))
+            && let Err(e) = replicate_index_ddl(
+                &command,
+                &session,
+                coordinator.as_ref(),
+                pipelines.hint_store.as_ref(),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "index ddl replication failed");
+            response = Response::Error(e);
+        }
+
+        if !matches!(&response, Response::Error(_))
             && let Err(e) = wait_for_write_ack_quorum(
                 &command,
                 &session,
@@ -319,6 +332,17 @@ fn write_hint_operation(command: &Command) -> Option<HintOperation> {
             })
         }
         Command::Delete { .. } => Some(HintOperation::Delete),
+        Command::CreateIndex {
+            index_name,
+            field_path,
+            ..
+        } => Some(HintOperation::CreateIndex {
+            index_name: index_name.clone(),
+            field_path: field_path.clone(),
+        }),
+        Command::DropIndex { index_name, .. } => Some(HintOperation::DropIndex {
+            index_name: index_name.clone(),
+        }),
         Command::PutWithVc {
             value,
             vector_clock,
@@ -329,6 +353,95 @@ fn write_hint_operation(command: &Command) -> Option<HintOperation> {
         }),
         _ => None,
     }
+}
+
+fn index_ddl_target(command: &Command) -> Option<(&str, &str, Option<&str>)> {
+    match base_command(command) {
+        Command::CreateIndex {
+            collection,
+            index_name,
+            field_path,
+        } => Some((
+            collection.as_str(),
+            index_name.as_str(),
+            Some(field_path.as_str()),
+        )),
+        Command::DropIndex {
+            collection,
+            index_name,
+        } => Some((collection.as_str(), index_name.as_str(), None)),
+        _ => None,
+    }
+}
+
+async fn replicate_index_ddl(
+    command: &Command,
+    session: &SessionContext,
+    coordinator: &Coordinator,
+    hint_store: &HintStore,
+) -> Result<(), String> {
+    let Some((collection, index_name, field_path)) = index_ddl_target(command) else {
+        return Ok(());
+    };
+    let Some(db_name) = session.current_db() else {
+        return Ok(());
+    };
+    let tenant = session.tenant().map_err(|e| e.to_string())?.to_string();
+    let route_key = match field_path {
+        Some(path) => format!("ddl:create-index:{collection}:{index_name}:{path}"),
+        None => format!("ddl:drop-index:{collection}:{index_name}"),
+    };
+    let operation = match write_hint_operation(command) {
+        Some(op) => op,
+        None => return Ok(()),
+    };
+
+    let replicas =
+        coordinator.replica_peer_nodes_for_key(db_name, collection, route_key.as_bytes());
+    for node_id in replicas {
+        let result = match field_path {
+            Some(path) => {
+                coordinator
+                    .create_index_on_peer(&node_id, &tenant, db_name, collection, index_name, path)
+                    .await
+            }
+            None => {
+                coordinator
+                    .drop_index_on_peer(&node_id, &tenant, db_name, collection, index_name)
+                    .await
+            }
+        };
+
+        if let Err(e) = result {
+            tracing::warn!(
+                error = %e,
+                node_id = %node_id,
+                collection = %collection,
+                index_name = %index_name,
+                "index ddl replication failed, enqueueing hinted handoff"
+            );
+            let hint = HintRecord {
+                created_at_unix: now_unix(),
+                tenant: tenant.clone(),
+                database: db_name.to_string(),
+                collection: collection.to_string(),
+                key: route_key.clone(),
+                operation: Some(operation.clone()),
+                payload_json: None,
+            };
+            if let Err(store_err) = hint_store.append(&node_id, &hint) {
+                tracing::warn!(
+                    error = %store_err,
+                    node_id = %node_id,
+                    "failed to persist index ddl hinted handoff record"
+                );
+            } else {
+                metrics::counter!("grumpydb_hints_enqueued_total").increment(1);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn maybe_converge_read_quorum(

@@ -20,8 +20,17 @@ const HINTS_DIR: &str = "hints";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum HintOperation {
-    Upsert { value_json: String },
+    Upsert {
+        value_json: String,
+    },
     Delete,
+    CreateIndex {
+        index_name: String,
+        field_path: String,
+    },
+    DropIndex {
+        index_name: String,
+    },
 }
 
 /// Durable hint payload for a single write that could not be sent to a peer.

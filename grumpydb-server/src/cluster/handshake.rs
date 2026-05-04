@@ -145,6 +145,19 @@ pub enum PeerDataOp {
         collection: String,
         key: String,
     },
+    CreateIndex {
+        tenant: String,
+        database: String,
+        collection: String,
+        index_name: String,
+        field_path: String,
+    },
+    DropIndex {
+        tenant: String,
+        database: String,
+        collection: String,
+        index_name: String,
+    },
     QueryIndexExact {
         tenant: String,
         database: String,
@@ -589,6 +602,108 @@ pub async fn delete_peer_value(ctx: &PeerRpcContext, key_path: &PeerKeyPath) -> 
     }
 }
 
+/// Create one secondary index on a peer over the authenticated cluster channel.
+pub async fn create_peer_index(
+    ctx: &PeerRpcContext,
+    tenant: &str,
+    database: &str,
+    collection: &str,
+    index_name: &str,
+    field_path: &str,
+) -> Result<(), String> {
+    let mut stream = TcpStream::connect(&ctx.addr)
+        .await
+        .map_err(|e| format!("connect failed: {e}"))?;
+
+    let (_, outcome) = run_initiator(
+        &mut stream,
+        ctx.local_cluster_id,
+        ctx.local_node_id,
+        &ctx.server_version,
+    )
+    .await
+    .map_err(|e| format!("handshake error: {e}"))?;
+
+    match outcome {
+        HandshakeOutcome::Accepted { .. } => {}
+        HandshakeOutcome::Rejected { error } => {
+            return Err(format!("handshake rejected: {error}"));
+        }
+    }
+
+    let req = PeerDataOp::CreateIndex {
+        tenant: tenant.to_string(),
+        database: database.to_string(),
+        collection: collection.to_string(),
+        index_name: index_name.to_string(),
+        field_path: field_path.to_string(),
+    };
+    write_frame(&mut stream, &req)
+        .await
+        .map_err(|e| format!("write op failed: {e}"))?;
+
+    let resp: PeerDataOpResponse = read_frame(&mut stream)
+        .await
+        .map_err(|e| format!("read op response failed: {e}"))?;
+    match resp {
+        PeerDataOpResponse::Ack => Ok(()),
+        PeerDataOpResponse::Value { .. } => {
+            Err("unexpected value response for create_index".into())
+        }
+        PeerDataOpResponse::Keys { .. } => Err("unexpected keys response for create_index".into()),
+        PeerDataOpResponse::Error { message } => Err(message),
+    }
+}
+
+/// Drop one secondary index on a peer over the authenticated cluster channel.
+pub async fn drop_peer_index(
+    ctx: &PeerRpcContext,
+    tenant: &str,
+    database: &str,
+    collection: &str,
+    index_name: &str,
+) -> Result<(), String> {
+    let mut stream = TcpStream::connect(&ctx.addr)
+        .await
+        .map_err(|e| format!("connect failed: {e}"))?;
+
+    let (_, outcome) = run_initiator(
+        &mut stream,
+        ctx.local_cluster_id,
+        ctx.local_node_id,
+        &ctx.server_version,
+    )
+    .await
+    .map_err(|e| format!("handshake error: {e}"))?;
+
+    match outcome {
+        HandshakeOutcome::Accepted { .. } => {}
+        HandshakeOutcome::Rejected { error } => {
+            return Err(format!("handshake rejected: {error}"));
+        }
+    }
+
+    let req = PeerDataOp::DropIndex {
+        tenant: tenant.to_string(),
+        database: database.to_string(),
+        collection: collection.to_string(),
+        index_name: index_name.to_string(),
+    };
+    write_frame(&mut stream, &req)
+        .await
+        .map_err(|e| format!("write op failed: {e}"))?;
+
+    let resp: PeerDataOpResponse = read_frame(&mut stream)
+        .await
+        .map_err(|e| format!("read op response failed: {e}"))?;
+    match resp {
+        PeerDataOpResponse::Ack => Ok(()),
+        PeerDataOpResponse::Value { .. } => Err("unexpected value response for drop_index".into()),
+        PeerDataOpResponse::Keys { .. } => Err("unexpected keys response for drop_index".into()),
+        PeerDataOpResponse::Error { message } => Err(message),
+    }
+}
+
 /// Query an index on a peer and return matching UUID strings.
 pub async fn query_peer_index_exact(
     ctx: &PeerRpcContext,
@@ -940,6 +1055,51 @@ fn handle_peer_data_op(op: PeerDataOp, shared_server: &SharedServer) -> PeerData
                 },
             }
         }
+        PeerDataOp::CreateIndex {
+            tenant,
+            database,
+            collection,
+            index_name,
+            field_path,
+        } => {
+            let db = match ensure_peer_write_target(shared_server, &tenant, &database, &collection)
+            {
+                Ok(db) => db,
+                Err(e) => {
+                    return PeerDataOpResponse::Error { message: e };
+                }
+            };
+            match db.create_index(&collection, &index_name, &field_path) {
+                Ok(()) => PeerDataOpResponse::Ack,
+                Err(e) if is_already_exists_error(&e) => PeerDataOpResponse::Ack,
+                Err(e) => PeerDataOpResponse::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        PeerDataOp::DropIndex {
+            tenant,
+            database,
+            collection,
+            index_name,
+        } => {
+            let db = match shared_server.database(&tenant, &database) {
+                Ok(db) => db,
+                Err(GrumpyError::DatabaseNotFound(_)) => return PeerDataOpResponse::Ack,
+                Err(e) => {
+                    return PeerDataOpResponse::Error {
+                        message: e.to_string(),
+                    };
+                }
+            };
+            match db.drop_index(&collection, &index_name) {
+                Ok(()) => PeerDataOpResponse::Ack,
+                Err(e) if is_not_found_error(&e) => PeerDataOpResponse::Ack,
+                Err(e) => PeerDataOpResponse::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
         PeerDataOp::QueryIndexExact {
             tenant,
             database,
@@ -1047,6 +1207,13 @@ fn ensure_peer_write_target(
 
 fn is_already_exists_error(err: &GrumpyError) -> bool {
     err.to_string().contains("already exists")
+}
+
+fn is_not_found_error(err: &GrumpyError) -> bool {
+    matches!(
+        err,
+        GrumpyError::CollectionNotFound(_) | GrumpyError::IndexNotFound(_)
+    )
 }
 
 fn json_to_value(json: &serde_json::Value) -> Value {
@@ -1339,5 +1506,116 @@ mod tests {
             }
             other => panic!("unexpected response: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_peer_create_index_auto_creates_target_and_is_queryable() {
+        let dir = TempDir::new().expect("tempdir");
+        let shared = SharedServer::open(dir.path()).expect("open shared server");
+
+        let create = handle_peer_data_op(
+            PeerDataOp::CreateIndex {
+                tenant: "tenant1".to_string(),
+                database: "db1".to_string(),
+                collection: "docs".to_string(),
+                index_name: "name_idx".to_string(),
+                field_path: "name".to_string(),
+            },
+            &shared,
+        );
+        assert!(matches!(create, PeerDataOpResponse::Ack));
+
+        let key = Uuid::new_v4();
+        let upsert = handle_peer_data_op(
+            PeerDataOp::Upsert {
+                tenant: "tenant1".to_string(),
+                database: "db1".to_string(),
+                collection: "docs".to_string(),
+                key: key.to_string(),
+                value_json: "{\"name\":\"alice\"}".to_string(),
+            },
+            &shared,
+        );
+        assert!(matches!(upsert, PeerDataOpResponse::Ack));
+
+        let query = handle_peer_data_op(
+            PeerDataOp::QueryIndexExact {
+                tenant: "tenant1".to_string(),
+                database: "db1".to_string(),
+                collection: "docs".to_string(),
+                index_name: "name_idx".to_string(),
+                value_json: "\"alice\"".to_string(),
+            },
+            &shared,
+        );
+        match query {
+            PeerDataOpResponse::Keys { keys } => assert_eq!(keys, vec![key.to_string()]),
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_peer_drop_index_is_idempotent_when_target_missing() {
+        let dir = TempDir::new().expect("tempdir");
+        let shared = SharedServer::open(dir.path()).expect("open shared server");
+
+        let first = handle_peer_data_op(
+            PeerDataOp::DropIndex {
+                tenant: "tenant1".to_string(),
+                database: "db1".to_string(),
+                collection: "docs".to_string(),
+                index_name: "name_idx".to_string(),
+            },
+            &shared,
+        );
+        assert!(matches!(first, PeerDataOpResponse::Ack));
+
+        let key = Uuid::new_v4();
+        let upsert = handle_peer_data_op(
+            PeerDataOp::Upsert {
+                tenant: "tenant1".to_string(),
+                database: "db1".to_string(),
+                collection: "docs".to_string(),
+                key: key.to_string(),
+                value_json: "{\"name\":\"alice\"}".to_string(),
+            },
+            &shared,
+        );
+        assert!(matches!(upsert, PeerDataOpResponse::Ack));
+
+        let create = handle_peer_data_op(
+            PeerDataOp::CreateIndex {
+                tenant: "tenant1".to_string(),
+                database: "db1".to_string(),
+                collection: "docs".to_string(),
+                index_name: "name_idx".to_string(),
+                field_path: "name".to_string(),
+            },
+            &shared,
+        );
+        assert!(matches!(create, PeerDataOpResponse::Ack));
+
+        let second = handle_peer_data_op(
+            PeerDataOp::DropIndex {
+                tenant: "tenant1".to_string(),
+                database: "db1".to_string(),
+                collection: "docs".to_string(),
+                index_name: "name_idx".to_string(),
+            },
+            &shared,
+        );
+        assert!(matches!(second, PeerDataOpResponse::Ack));
+
+        let query = handle_peer_data_op(
+            PeerDataOp::QueryIndexExact {
+                tenant: "tenant1".to_string(),
+                database: "db1".to_string(),
+                collection: "docs".to_string(),
+                index_name: "name_idx".to_string(),
+                value_json: "\"alice\"".to_string(),
+            },
+            &shared,
+        );
+        assert!(matches!(query, PeerDataOpResponse::Error { .. }));
     }
 }

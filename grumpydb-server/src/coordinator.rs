@@ -16,9 +16,9 @@ use uuid::Uuid;
 
 use crate::cluster::NodeIdentity;
 use crate::cluster::handshake::{
-    ClusterHello, GossipPayload, PeerGossipState, PeerKeyPath, PeerRpcContext, delete_peer_value,
-    fetch_peer_value, probe_peer_acceptance, query_peer_index_exact, query_peer_index_range,
-    upsert_peer_value,
+    ClusterHello, GossipPayload, PeerGossipState, PeerKeyPath, PeerRpcContext, create_peer_index,
+    delete_peer_value, drop_peer_index, fetch_peer_value, probe_peer_acceptance,
+    query_peer_index_exact, query_peer_index_range, upsert_peer_value,
 };
 use crate::cluster::hints::{HintOperation, HintRecord};
 use crate::config::{ClusterSection, PeerEntry, WriterEntry};
@@ -862,6 +862,53 @@ impl Coordinator {
         upsert_peer_value(&ctx, &key_path, value_json).await
     }
 
+    /// Create one secondary index on a remote replica.
+    pub async fn create_index_on_peer(
+        &self,
+        peer_node_id: &str,
+        tenant: &str,
+        database: &str,
+        collection: &str,
+        index_name: &str,
+        field_path: &str,
+    ) -> Result<(), String> {
+        let addr = self
+            .peer_addrs
+            .get(peer_node_id)
+            .ok_or_else(|| format!("unknown peer: {peer_node_id}"))?;
+        let server_version = format!("grumpydb-server/{}", env!("CARGO_PKG_VERSION"));
+        let ctx = PeerRpcContext {
+            addr: addr.clone(),
+            local_cluster_id: self.cluster_uuid,
+            local_node_id: self.local_node_uuid,
+            server_version,
+        };
+        create_peer_index(&ctx, tenant, database, collection, index_name, field_path).await
+    }
+
+    /// Drop one secondary index on a remote replica.
+    pub async fn drop_index_on_peer(
+        &self,
+        peer_node_id: &str,
+        tenant: &str,
+        database: &str,
+        collection: &str,
+        index_name: &str,
+    ) -> Result<(), String> {
+        let addr = self
+            .peer_addrs
+            .get(peer_node_id)
+            .ok_or_else(|| format!("unknown peer: {peer_node_id}"))?;
+        let server_version = format!("grumpydb-server/{}", env!("CARGO_PKG_VERSION"));
+        let ctx = PeerRpcContext {
+            addr: addr.clone(),
+            local_cluster_id: self.cluster_uuid,
+            local_node_id: self.local_node_uuid,
+            server_version,
+        };
+        drop_peer_index(&ctx, tenant, database, collection, index_name).await
+    }
+
     /// Replay one hinted-handoff record to a peer.
     pub async fn replay_hint_to_peer(
         &self,
@@ -891,6 +938,30 @@ impl Coordinator {
                 upsert_peer_value(&ctx, &key_path, &value_json).await
             }
             HintOperation::Delete => delete_peer_value(&ctx, &key_path).await,
+            HintOperation::CreateIndex {
+                index_name,
+                field_path,
+            } => {
+                create_peer_index(
+                    &ctx,
+                    &hint.tenant,
+                    &hint.database,
+                    &hint.collection,
+                    &index_name,
+                    &field_path,
+                )
+                .await
+            }
+            HintOperation::DropIndex { index_name } => {
+                drop_peer_index(
+                    &ctx,
+                    &hint.tenant,
+                    &hint.database,
+                    &hint.collection,
+                    &index_name,
+                )
+                .await
+            }
         }
     }
 
