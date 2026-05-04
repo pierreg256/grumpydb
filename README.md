@@ -297,6 +297,12 @@ The TCP protocol now exposes coordinator and consistency-locking primitives:
 - `READ_CONCERN R=<n>` / `WRITE_CONCERN W=<n>` can prefix data commands.
 - `PUT_WITH_VC <collection> <uuid> <json> <vector_clock>` is accepted for
   reconciled writes (vector clock validated as JSON).
+- In the v6 Phase 46 kickoff, `PUT_WITH_VC` now merges values when both the
+  stored value and incoming value are CRDT payloads. Helper-level merge
+  coverage is now complete for all CRDT kinds (`GCounter`, `PNCounter`,
+  `LwwSet`, `OrSet`, `Mvr`), while full end-to-end sibling/tombstone
+  reconciliation remains in progress in Phase 46.
+- TCP JSON bridge CRDT envelope: `{"$crdt":{"kind":"GCounter|PNCounter|LwwSet|OrSet|Mvr","payload_b64":"..."}}`.
 
 In v5, the server is intentionally locked to single-owner consistency
 (`N=1`, `R=1`, `W=1`):
@@ -304,6 +310,40 @@ In v5, the server is intentionally locked to single-owner consistency
 - Non-default concerns are rejected with `v5 only supports R=1, W=1`.
 - If a request targets a key owned by another node, the server returns
   `forward to <node>@<addr>; not the owner`.
+
+In current v6 work, static consistency validation accepts bounded concerns
+(`R, W ∈ [1, N]`) for data commands. Runtime behavior is now functional for the
+implemented keyed `GET` path with `R > 1`: the handler performs read-quorum
+liveness + read-ack quorum checks, fans out value reads to remote replicas over
+the authenticated cluster handshake channel, selects a canonical value
+deterministically, applies local convergence, and attempts immediate remote
+read-repair upserts. Failed immediate repairs are persisted as durable
+`ReadRepairIntent` retries and replayed by a background worker (with
+re-enqueue on failure).
+
+Phases 48/49 remain partial and are not complete yet:
+- Phase 48 partial runtime: durable per-node hinted-handoff JSONL backlog
+  store (`grumpydb-server/src/cluster/hints.rs`) now records tenant +
+  operation (`upsert`/`delete`) and keeps backward-compatible replay from
+  legacy `payload_json` records. Listener startup now spawns a background
+  hint worker that lists target backlogs, checks peer liveness via
+  coordinator state, drains batches, replays each hint to peers over
+  authenticated RPC, re-enqueues failures, and increments replay/retry
+  metrics.
+- Phase 49 partial runtime: coordinator rebalance preview helpers based on ring
+  key-range deltas (`plan_rebalance_add_node`, `plan_rebalance_remove_node`),
+  planned-only execute scaffolds (`execute_rebalance_add_node`,
+  `execute_rebalance_remove_node`), plus functional transfer executors:
+  `execute_rebalance_add_node_transfer` and
+  `execute_rebalance_remove_node_transfer`. The remove-node path computes
+  ownership before/after `ring.remove_node`, scans local collection data,
+  transfers keys whose prior owner was the removed node and whose new owner is
+  a live remote peer, tracks considered/transferred/failed/retained-local, and
+  updates rebalance metrics.
+- Peer data RPC on the handshake channel now supports `GET`, `UPSERT`, and
+  `DELETE` operations.
+- Missing for completion: control-plane wiring for transfer orchestration and
+  convergence validation under churn/concurrent writes.
 
 ### RBAC roles
 

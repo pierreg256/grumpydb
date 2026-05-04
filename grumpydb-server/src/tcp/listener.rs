@@ -13,11 +13,13 @@ use grumpydb::SharedServer;
 
 use crate::auth::store::AuthStore;
 use crate::cluster::NodeIdentity;
+use crate::cluster::hints::HintStore;
+use crate::cluster::read_repair::ReadRepairStore;
 use crate::config::ServerConfig;
 use crate::coordinator::Coordinator;
 use crate::http::HttpState;
 use crate::limits::{AcquireConnError, Limits, LimitsConfig};
-use crate::tcp::handler::handle_connection;
+use crate::tcp::handler::{RepairPipelines, handle_connection};
 
 /// Start the TCP server and listen for connections.
 pub async fn listen(
@@ -52,6 +54,8 @@ pub async fn listen(
         &config.cluster,
         &config.server.bind,
     ));
+    let hint_store = Arc::new(HintStore::open(&config.server.data_dir)?);
+    let read_repair_store = Arc::new(ReadRepairStore::open(&config.server.data_dir)?);
 
     tracing::info!(
         bind = %config.server.bind,
@@ -70,7 +74,12 @@ pub async fn listen(
     // Phase 40e will graft the WAL streaming protocol onto the
     // accepted connections; v5 just performs the handshake and closes.
     if !config.cluster.listen_peer.is_empty() {
-        crate::cluster::handshake::serve(config.clone(), identity.clone(), coordinator.clone())
+        crate::cluster::handshake::serve(
+            config.clone(),
+            identity.clone(),
+            coordinator.clone(),
+            shared_server.clone(),
+        )
             .await?;
     }
 
@@ -81,6 +90,8 @@ pub async fn listen(
         identity.clone(),
         coordinator.clone(),
     );
+    crate::cluster::hints::spawn_worker(hint_store.clone(), coordinator.clone());
+    crate::cluster::read_repair::spawn_worker(read_repair_store.clone(), coordinator.clone());
 
     // Signal HTTP `/readyz` that we are now accepting connections.
     http_state.ready.store(true, Ordering::Release);
@@ -115,6 +126,8 @@ pub async fn listen(
                 let acceptor = tls_acceptor.clone();
                 let limits_for_conn = limits.clone();
                 let coordinator_for_conn = coordinator.clone();
+                let hint_store_for_conn = hint_store.clone();
+                let read_repair_store_for_conn = read_repair_store.clone();
                 let peer_ip = addr.ip();
 
                 let span = info_span!(
@@ -137,6 +150,10 @@ pub async fn listen(
                                     server,
                                     limits_for_conn.clone(),
                                     coordinator_for_conn.clone(),
+                                    RepairPipelines {
+                                        hint_store: hint_store_for_conn.clone(),
+                                        read_repair_store: read_repair_store_for_conn.clone(),
+                                    },
                                 )
                                 .await
                             }
@@ -153,6 +170,10 @@ pub async fn listen(
                             server,
                             limits_for_conn.clone(),
                             coordinator_for_conn.clone(),
+                            RepairPipelines {
+                                hint_store: hint_store_for_conn.clone(),
+                                read_repair_store: read_repair_store_for_conn.clone(),
+                            },
                         )
                         .await
                     };

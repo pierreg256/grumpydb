@@ -64,7 +64,7 @@ flowchart TB
 | Vnodes | **~256 per physical node** | Smooth rebalancing, industry-standard granularity |
 | Concurrency model | **Multi-writer concurrent** (v6+); v5 single-writer-per-collection enforced | Dynamo-style; lays the groundwork in v5 |
 | Versioning | **HLC + vector clocks** stamped on every WAL record (v5) | Detects concurrent writes; required for read repair (v6) and Merkle reconciliation (v7) |
-| Conflict resolution | **LWW by HLC** + opt-in CRDT types (`Value::CRDT(...)`) | Simple default; CRDT escape hatch for sensitive data |
+| Conflict resolution | **LWW by HLC** + opt-in CRDT types (`Value::Crdt { .. }`) | Simple default; CRDT escape hatch for sensitive data |
 | Coordinator | **Server-side proxy AND smart client** | Smart driver path is fast; dumb clients (`nc`) still work |
 | Membership | **Static TOML in v5 → gossip in v6**, no Raft | Eventually-consistent membership, no leader election |
 | Anti-entropy | **Read repair v6, Merkle trees v7** | Progressive complexity |
@@ -99,7 +99,7 @@ Phase 39:  RS256 JWT + JWKS                  ███████████�
 Phase 40a: Cluster identity + static memb.   ████████████████████  P3 ★ ✅ Done
 Phase 40b: HLC + vector clocks (WAL v2)      ████████████████████  P3 ★ ✅ Done (format-locked)
 Phase 40c: Ring + vnodes module              ████████████████████  P3 ★ ✅ Done
-Phase 40d: Tombstones in the engine          ████████░░░░░░░░░░░░  P3 ★ 🟡 Format-locked; semantics deferred to v6 Phase 46
+Phase 40d: Tombstones in the engine          ████████████████████  P3 ★ ✅ Done (v5 scope: format-locked; runtime semantics in v6/46)
 Phase 40e: WAL-stream replication (1-writer) ████████████████████  P3 ★ ✅ Done
 Phase 40f: Coordinator + tunable consistency ████████████████████  P3 ★ ✅ Done (protocol-locking)
 Phase 41:  MVCC read snapshots (HLC-indexed) ███████████████████░  P3 ★ ✅ Done (v5 scope)
@@ -108,10 +108,10 @@ Phase 43:  v5.0.0 release                    ███████████�
 ─── Streams E (v6) and F (v7) below: out of v5 scope ───────────────
 Phase 44:  Gossip membership                 ████████████████████  v6 ✅ Done
 Phase 45:  Multi-writer ack pipeline (W>1)   ████████████████████  v6 ✅ Done
-Phase 46:  Conflict resolution (LWW + CRDT)  ──────────────────── v6
-Phase 47:  Read repair + tunable R>1         ──────────────────── v6
-Phase 48:  Hinted handoff                    ──────────────────── v6
-Phase 49:  Ring rebalancing on add/remove    ──────────────────── v6
+Phase 46:  Conflict resolution (LWW + CRDT)  ████████░░░░░░░░░░░░  v6 🟡 Kickoff (partial)
+Phase 47:  Read repair + tunable R>1         ██████████░░░░░░░░░░  v6 🟡 Partial runtime (keyed GET path)
+Phase 48:  Hinted handoff                    ████████████░░░░░░░░  v6 🟡 Partial runtime (worker orchestration)
+Phase 49:  Ring rebalancing on add/remove    ████████████░░░░░░░░  v6 🟡 Partial runtime (add/remove transfer paths)
 Phase 50:  Merkle-tree anti-entropy          ──────────────────── v7
 Phase 51:  Multi-region replication          ──────────────────── v7
 Phase 52:  Schema validation (JSON-Schema)   ──────────────────── v7
@@ -727,7 +727,7 @@ Backup-able, restorable database. Foundation for replication seeding (Phase 40).
 > | Decision | Choice | Rationale |
 > |----------|--------|-----------|
 > | Vnodes | Cassandra-style, ~256 per physical node | Smooth rebalancing, industry default |
-> | Conflict resolution | LWW by HLC + opt-in CRDT types (`Value::CRDT(...)`) | Simple default, no silent loss for sensitive data |
+> | Conflict resolution | LWW by HLC + opt-in CRDT types (`Value::Crdt { .. }`) | Simple default, no silent loss for sensitive data |
 > | Coordinator | Server-side proxy **and** smart client | Smart driver path is fast; dumb clients (`nc`) still work |
 > | Membership | Static TOML in v5 → gossip in v6, no Raft | Eventual-consistent membership, no leader election |
 > | Anti-entropy | Read repair in v6, Merkle trees in v7 | Progressive deployment of cost |
@@ -928,14 +928,15 @@ tomorrow's N-node ring without changing call sites.
 
 ## Phase 40d: Tombstones in the Engine
 
-**Status: 🟡 Format-locked; semantics deferred to v6 Phase 46.** The
-on-disk encoding is final: `Value::Tombstone { vector_clock,
-deleted_at_hlc }` with `TAG_TOMBSTONE = 0x09` (see
-`src/document/codec.rs`), and `[cluster] gc_grace_seconds = 864_000`
-is honoured by `grumpydb-server/src/config.rs`. Live tombstone writes,
-GC, and replication-aware resurrection blocking are intentionally
-holdover for v6 (Phase 46) where multi-writer makes them load-bearing.
-See `docs/TOMBSTONES.md`.
+**Status: ✅ Done for v5 scope (format-locked); runtime semantics remain
+deferred to v6 Phase 46.** The on-disk encoding is final:
+`Value::Tombstone { vector_clock, deleted_at_hlc }` with
+`TAG_TOMBSTONE = 0x09` (see `src/document/codec.rs`), and
+`[cluster] gc_grace_seconds = 864_000` is honoured by
+`grumpydb-server/src/config.rs`. Live tombstone writes, GC, and
+replication-aware resurrection blocking are intentionally held for v6
+(Phase 46) where multi-writer makes them load-bearing. See
+`docs/TOMBSTONES.md`.
 
 ### Goal
 Make `delete` safe under replication: a deleted key must not "resurrect"
@@ -1117,7 +1118,7 @@ but the wire format is final.
      reconciled value that subsumes the siblings. Optional in v5; mandatory
      for CRDT round-trips in v6.
 5. **CRDT type sketch (v5 spec, v6 logic)**:
-   - `Value::CRDT { kind: CrdtKind, payload: Bytes }` variant.
+   - `Value::Crdt { kind: CrdtKind, payload: Bytes }` variant.
    - `CrdtKind` enum reserved: `GCounter`, `PNCounter`, `LwwSet`, `OrSet`,
      `Mvr`. Encoding stable.
    - In v5: stored and round-tripped opaquely; merge logic implemented in v6.
@@ -1353,10 +1354,67 @@ on-disk format changes. Six follow-up phases planned, **out of v5 scope**:
 |---|---|---|
 | 44 | Gossip membership protocol | Uses static peers as bootstrap seeds, then converges a runtime membership view. Eventually-consistent, no leader. SWIM-style failure detection. |
 | 45 | Multi-writer ack pipeline (W>1) | Lift the single-writer restriction. Coordinator waits for `W` acks before responding. |
-| 46 | Conflict resolution (LWW + CRDT runtime) | Activate the merge logic for `Value::CRDT(...)` variants registered in v5. LWW remains default. |
+| 46 | Conflict resolution (LWW + CRDT runtime) | Activate the merge logic for `Value::Crdt { .. }` variants registered in v5. LWW remains default. |
 | 47 | Read repair + tunable `R>1` | Coordinator collects R responses, repairs divergence in background. |
 | 48 | Hinted handoff | Coordinator buffers writes for unreachable peers, replays on recovery. |
 | 49 | Ring rebalancing | Add/remove physical nodes triggers transfer of the `vnode -> node` deltas computed by Phase 40c. |
+
+### V6 scope snapshot (current)
+
+1. **Phase 44**: ✅ Done.
+2. **Phase 45**: ✅ Done.
+3. **Phase 46**: 🟡 In progress (CRDT helpers + `PUT_WITH_VC` wiring landed; full
+   tombstone/LWW sibling runtime still pending).
+4. **Phase 47**: 🟡 Partial runtime landed (keyed `GET` with `R>1` now does
+   remote value fan-out, deterministic canonical selection, local convergence,
+   immediate remote repair attempts, and durable retry replays).
+5. **Phase 48**: 🟡 Partial runtime landed (durable hint backlog,
+   enqueue wiring on write-quorum failure, and startup-spawned replay worker
+   that drains/replays/retries hints).
+6. **Phase 49**: 🟡 Partial runtime landed (rebalance preview + execute
+   scaffolds, plus functional add-node and remove-node transfer executors with
+   transfer accounting).
+
+### V6 dependency map (delivery order)
+
+```
+Phase 44 (gossip membership)
+   ├──► Phase 45 (multi-writer ack pipeline)
+   │        └──► Phase 46 (conflict runtime: LWW + CRDT + tombstones)
+   │                 └──► Phase 47 (read repair + R>1)
+   │                          └──► Phase 48 (hinted handoff)
+   └──► Phase 49 (ring rebalancing, transfer orchestration)
+
+Cross-cutting prerequisites:
+- Phase 40b (HLC + vector clocks, WAL v2 format-lock)
+- Phase 40c (ring + vnode ownership deltas)
+- Phase 40e (replication transport/runtime)
+- Phase 40f (coordinator + (N,R,W) protocol surface)
+```
+
+### V6 closure checklist (Definition of Done)
+
+1. **Phase 46 complete**:
+   - delete path writes/keeps tombstones in conflict runtime flow.
+   - LWW + vector-clock reconciliation path fully wired (not only helpers).
+   - Sibling conflict behavior exercised end-to-end (server + client path).
+2. **Phase 47 complete**:
+   - `R>1` accepted and executed on read path.
+   - Divergence detection triggers background read repair.
+   - Repair convergence covered by deterministic integration tests.
+3. **Phase 48 complete**:
+   - Hints stored durably for unreachable replicas.
+   - Replay on peer recovery with idempotence guarantees.
+   - Lag/backlog observability exposed and tested.
+4. **Phase 49 complete**:
+   - Add/remove node triggers bounded ownership transfer by vnode delta.
+   - Transfer progress + safety checks exposed in topology/metrics.
+   - Rebalance correctness validated under concurrent writes.
+5. **Global V6 exit criteria**:
+   - 3-node + churn scenario (node add/remove + peer outage + recovery)
+     reaches convergence without resurrection.
+   - `cargo test --workspace`, strict clippy, and representative cluster
+     smoke scenario all green.
 
 ## Phase 44: Gossip membership (v6)
 
@@ -1409,7 +1467,8 @@ on-disk format changes. Six follow-up phases planned, **out of v5 scope**:
    validation error.
 6. E2E expectation for `W>1` was updated to tolerate topology-dependent
    rejection messages.
-7. `R>1` remains deferred to Phase 47.
+7. `R>1` execution semantics remain owned by Phase 47 (Phase 47 kickoff now
+   landed static validation + keyed read-quorum availability gating).
 
 ### Tranche 3 delivered
 1. Coordinator write execution now fans out acknowledgement waits to replica
@@ -1422,6 +1481,139 @@ on-disk format changes. Six follow-up phases planned, **out of v5 scope**:
 ### Follow-on interactions (outside Phase 45)
 - Read-repair interactions remain scoped to Phase 47.
 - Hinted-handoff interactions remain scoped to Phase 48.
+
+## Phase 47: Read repair + tunable `R>1` (v6)
+
+**Status: 🟡 Partial runtime landed (keyed `GET` fan-out/convergence + durable retry worker).**
+
+### Tranche 1 delivered
+1. Coordinator static consistency validation now accepts bounded read concerns
+   `R ∈ [1, N]` (alongside bounded `W ∈ [1, N]`).
+2. Keyed `GET` path now performs runtime read-concern liveness validation,
+   requiring requested `R` to be satisfiable from currently live candidates in
+   the key preference list.
+3. Keyed `GET` execution now waits for read-ack quorum probes before reporting
+   read-quorum success.
+
+### Tranche 2 runtime delivered
+1. Durable read-repair intent queue landed in
+   `grumpydb-server/src/cluster/read_repair.rs` as
+   `<data_dir>/_cluster/read_repair.jsonl` with:
+   - `ReadRepairStore::append`
+   - `ReadRepairStore::backlog_len`
+   - `ReadRepairStore::drain`
+2. `ReadRepairIntent` now carries full replay context
+   (`tenant`, `database`, `collection`, `key`, `target_node_id`, `value_json`)
+   so retries can execute real remote repair operations.
+3. Keyed `GET` with `R>1` now performs remote replica fan-out value collection,
+   deterministic canonical selection, local convergence, and immediate remote
+   read-repair attempts.
+4. Failed immediate repairs are persisted as durable retry intents.
+5. Listener startup opens the read-repair store from `data_dir` and spawns a
+   worker that replays actual remote repairs and re-enqueues failed attempts.
+6. Inter-node authenticated peer RPC over the handshake channel is now used for
+   read fan-out (`GET`), repair/rebalance writeback (`UPSERT`), and deletes
+   (`DELETE`).
+
+### Not yet delivered (still in Phase 47)
+1. Expand convergence beyond keyed `GET` path and harden behavior under
+   pathological split/merge scenarios.
+2. Add deterministic integration coverage for convergence and retry behavior
+   under churn/failure.
+3. Deepen conflict-runtime interplay (vector-clock/tombstone edge handling)
+   in read-repair convergence flows.
+
+## Phase 48: Hinted handoff (v6)
+
+**Status: 🟡 Partial runtime landed (not complete).**
+
+### Delivered
+1. New durable hinted-handoff module: `grumpydb-server/src/cluster/hints.rs`.
+2. Durable per-target-node JSONL backlog under:
+   `<data_dir>/_cluster/hints/<target_node_id>.jsonl`.
+3. `HintStore` currently provides:
+   - `append(target_node_id, hint)`
+   - `backlog_len(target_node_id)`
+   - `drain_for_node(target_node_id, limit)`
+4. Unit coverage landed for append/length tracking and bounded drain behavior.
+5. Listener startup now opens `HintStore` from `data_dir` and wires it into
+   per-connection handler pipelines.
+6. On keyed write quorum failure (`W>1`), handler now enqueues durable hints
+   for currently unavailable replica peers.
+7. `HintRecord` now stores tenant and logical operation (`upsert` / `delete`)
+   and keeps backward-compatible replay behavior for legacy `payload_json`
+   records.
+8. Listener startup now also spawns a hinted-handoff worker that continuously:
+   lists target nodes with backlog, gates replay on coordinator peer liveness,
+   drains batches, replays each hint over authenticated peer RPC, re-enqueues
+   failures, and increments replay/retry counters.
+
+### Remaining scope for Phase 48
+1. Harden idempotence/ordering semantics under churn and repeated retries.
+2. Add deterministic end-to-end recovery/convergence tests under failure.
+
+## Phase 49: Ring rebalancing on add/remove (v6)
+
+**Status: 🟡 Partial runtime landed (not complete).**
+
+### Delivered
+1. Coordinator now exposes rebalance preview helpers based on ring key-range
+   deltas:
+   - `plan_rebalance_add_node(node_id)`
+   - `plan_rebalance_remove_node(node_id)`
+2. Both helpers return a JSON preview (`action`, `node_id`, `range_count`,
+   `ranges`) and are covered by coordinator unit tests.
+3. Coordinator now includes execute scaffolds:
+   - `execute_rebalance_add_node(node_id)`
+   - `execute_rebalance_remove_node(node_id)`
+4. Execute scaffolds currently return planned-only progress payloads
+   (`planned_ranges`, `executed_ranges`, `status = "planned-only"`) and
+   increment rebalance transfer metrics.
+5. Coordinator now also provides
+   `execute_rebalance_add_node_transfer(...)`, which scans the local
+   collection, computes ownership shift to the added node, and performs actual
+   transfer via peer upsert with `considered` / `transferred` / `failed`
+   reporting.
+6. Coordinator now provides `execute_rebalance_remove_node_transfer(...)`,
+   which computes ownership before/after `ring.remove_node`, scans local data,
+   transfers keys whose prior owner was the removed node and whose new owner
+   is a live remote peer, and reports `considered` / `retained_local` /
+   `transferred` / `failed`.
+
+### Remaining scope for Phase 49
+1. Wire transfer orchestration/control-plane hooks beyond direct coordinator
+   invocation.
+2. Validate rebalance correctness under concurrent writes and node churn.
+
+## Phase 46: Conflict resolution (LWW + CRDT runtime) (v6)
+
+**Status: 🟡 Kickoff in progress (helper-level CRDT merge coverage complete).**
+
+### Tranche 1 delivered
+1. `Value` model extended with `Value::Crdt { kind, payload }` and
+   `CrdtKind` (`GCounter`, `PNCounter`, `LwwSet`, `OrSet`, `Mvr`).
+2. Document binary codec now persists CRDT values under a dedicated type tag
+   (`TAG_CRDT = 0x0A`) with a defensive payload-length cap.
+3. CRDT merge helper module (`src/document/crdt.rs`) now covers all declared
+   CRDT kinds:
+   - `GCounter`: max
+   - `PNCounter`: component-wise max
+   - `LwwSet`: JSON payload merged by max timestamp per entry for adds/rems
+   - `OrSet`: JSON payload merged by union of add/remove tag sets
+   - `Mvr`: JSON payload merged by union of value set
+4. `PUT_WITH_VC` now attempts CRDT merge when both existing and incoming
+   values are CRDT payloads.
+5. TCP JSON bridge accepts/emits CRDT envelopes as
+   `{"$crdt":{"kind":"...","payload_b64":"..."}}`.
+6. Initial end-to-end `PUT_WITH_VC` coverage added in `tests/server_e2e.rs`:
+   - `test_e2e_put_with_vc_merges_crdt_gcounter`
+   - `test_e2e_put_with_vc_round_trips_crdt_pncounter_envelope`
+   - `test_e2e_put_with_vc_after_delete_restores_document`
+
+### Remaining scope for Phase 46
+1. Finish end-to-end conflict runtime wiring with tombstone/LWW sibling
+   reconciliation under vector-clock concurrency.
+2. Extend conflict runtime/e2e validation beyond helper-level merges.
 
 # Stream F — v7 (anti-entropy at scale, cross-region)
 
@@ -1524,7 +1716,7 @@ can run in parallel with 40b. 39 has no dependency on the cluster work.
 - **Gossip-based membership** (replaces static `[cluster].peers`).
   Phase 44.
 - **Multi-writer ack pipeline** with `W>1`. v5 only supports `W=1`. Phase 45.
-- **Conflict resolution runtime** for `Value::CRDT(...)` and the LWW resolver
+- **Conflict resolution runtime** for `Value::Crdt { .. }` and the LWW resolver
   for vector-clock-incomparable concurrent writes. Phase 46. (The CRDT type
   variants and vector-clock format are frozen in v5 so v6 only touches
   merge logic, not encoding.)
@@ -1583,7 +1775,7 @@ and wire protocol stay frozen** through v6 and v7. Specifically:
 - **WAL format v2** is the format v6 and v7 use. No migration when v6
   enables multi-writer.
 - **Wire protocol** with `(N, R, W)` tokens, `TOPOLOGY` command, sibling
-  arrays in `GET` responses, and the `Value::CRDT(...)` variant is final.
+   arrays in `GET` responses, and the `Value::Crdt { .. }` variant is final.
   v6 changes only the *behaviour* (W>1, R>1, CRDT merge logic), never
   the bytes.
 - **Cluster identity** (`node_id` / `cluster_id`) and the `[cluster]`

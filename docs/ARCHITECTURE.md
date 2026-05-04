@@ -245,6 +245,22 @@ enum Value {
     Array(Vec<Value>),
     Object(BTreeMap<String, Value>),
     Ref(String, Uuid),  // (collection_name, document_uuid)
+    Tombstone {
+        deleted_at_hlc: u64,
+        vector_clock: Vec<u8>,
+    },
+    Crdt {
+        kind: CrdtKind,
+        payload: Vec<u8>,
+    },
+}
+
+enum CrdtKind {
+    GCounter,
+    PNCounter,
+    LwwSet,
+    OrSet,
+    Mvr,
 }
 ```
 
@@ -264,7 +280,14 @@ Tag  Type       Encoding
 0x06 Array      4 bytes count (u32 LE) + recursive elements
 0x07 Object     4 bytes count (u32 LE) + recursive pairs (key_string + value)
 0x08 Ref        4 bytes name len (u32 LE) + UTF-8 collection name + 16 bytes UUID
+0x09 Tombstone  8 bytes deleted_at_hlc (u64 LE) + 4 bytes vc_len (u32 LE) + vector_clock bytes
+0x0A CRDT       1 byte kind tag + 4 bytes payload_len (u32 LE) + payload bytes
 ```
+
+CRDT payloads are capped at 16 MiB by the codec. In Phase 46 kickoff,
+helper-level CRDT merge coverage is complete across `GCounter`, `PNCounter`,
+`LwwSet`, `OrSet`, and `Mvr`; full conflict-runtime wiring (sibling/tombstone
+reconciliation) remains in progress.
 
 ### 4.3 Document
 
@@ -1080,6 +1103,14 @@ are accepted only for data commands (`INSERT`, `GET`, `UPDATE`, `DELETE`,
 `R=1, W=1`; otherwise the server returns
 `-ERR v5 only supports R=1, W=1`.
 
+In v6, static concern validation is widened to bounded concerns for data
+commands (`R, W ∈ [1, N]`). Runtime semantics are now functional for keyed
+`GET` with `R>1`: reads gate on read-quorum liveness/read-ack probes, fan out
+to remote replicas, deterministically select a canonical value, and execute
+local + remote convergence (with durable retry intents when immediate remote
+repair fails). Remaining `R>1` coverage outside keyed `GET` is still in
+progress.
+
 Each `Command` carries RBAC metadata via `Command::required_action() -> Action` and `Command::target_resource() -> Resource`, used by the session enforcer.
 
 **Naming conventions on the wire**:
@@ -1237,7 +1268,7 @@ Each connection is spawned in its own tokio task. The handler:
 2. Parses via `grumpydb_protocol::parse_command`.
 3. Validates optional consistency prefixes (`READ_CONCERN` / `WRITE_CONCERN`) via
   the coordinator. In v6 Phase 45, validation accepts bounded
-  `WRITE_CONCERN W` in `[1, N]` while `READ_CONCERN R` remains pinned to `1`.
+  `WRITE_CONCERN W` and `READ_CONCERN R` in `[1, N]`.
   Read/non-write commands carrying `WRITE_CONCERN` return a clear validation
   error (`-ERR consistency concerns are only supported for data commands`).
 4. Calls `session.authorize(&cmd)` (returns `-ERR access denied` on failure).
@@ -1248,9 +1279,14 @@ Each connection is spawned in its own tokio task. The handler:
   potentially available).
 6. Dispatches to `execute_command` which maps to `SharedServer` calls.
 7. For key-based data commands, applies split routing checks:
-   - Read paths (`GET`, `GET_WITH_VC`) enforce primary-owner placement through
+   - Read paths (`GET`) enforce primary-owner placement through
      `Coordinator::enforce_local_owner`; when local node is not owner, returns
      `-ERR forward to <node>@<addr>; not the owner`.
+     For keyed reads with `R > 1`, the handler performs runtime read-concern
+     liveness validation, waits on read-ack quorum probes, fans out value reads
+     to remote replicas, deterministically selects a canonical value, applies
+     local convergence, then attempts immediate remote read-repair upserts.
+     Failed immediate repairs are persisted as durable retry intents.
    - Write paths (`INSERT`, `UPDATE`, `DELETE`, `PUT_WITH_VC`) enforce local
      write-replica admission through `Coordinator::enforce_local_write_replica`.
      In v6 Phase 45, writes are accepted on any local replica in the
@@ -1275,6 +1311,43 @@ Listener startup (`tcp/listener.rs`) also spawns a background gossip probe
 task in v6 Phase 44. The task periodically handshakes runtime-known peers,
 advertises local membership, and refreshes coordinator liveness used by
 `TOPOLOGY`.
+
+The peer listener handshake serve path now receives `SharedServer` and can
+execute authenticated peer data operations over the same channel:
+`PeerDataOp::Get`, `PeerDataOp::Upsert`, and `PeerDataOp::Delete`.
+
+For v6 Phase 47 runtime work, listener startup opens a durable read-repair
+queue store from `data_dir` and spawns a background worker. The handler now
+enqueues retry intents when immediate remote read-repair upserts fail.
+
+Phase 47/48/49 status (partial runtime, not complete):
+- Read repair: `grumpydb-server/src/cluster/read_repair.rs` now provides a
+  durable JSONL intent queue (`append`, `backlog_len`, `drain`) under
+  `<data_dir>/_cluster/read_repair.jsonl` plus a background worker. Intents now
+  carry replay context (`tenant`, `database`, `collection`, `key`,
+  `target_node_id`, `value_json`). The worker replays real remote repair
+  upserts and re-enqueues failed attempts.
+- Hinted handoff: `grumpydb-server/src/cluster/hints.rs` provides a durable
+  per-target-node JSONL hint backlog (`append`, `backlog_len`,
+  `drain_for_node`) under `<data_dir>/_cluster/hints/`. `HintRecord` now
+  carries tenant + logical operation (`upsert`/`delete`) with
+  backward-compatible replay from legacy `payload_json` records. Listener
+  startup opens the store and spawns a replay worker that lists target
+  backlogs, checks peer liveness via coordinator state, drains batches, replays
+  hints to peers, re-enqueues failed replays, and increments replay/retry
+  counters.
+- Rebalancing: `Coordinator` exposes preview helpers
+  `plan_rebalance_add_node` / `plan_rebalance_remove_node` that return ring
+  key-range ownership deltas plus execute scaffolds
+  `execute_rebalance_add_node` / `execute_rebalance_remove_node` that currently
+  return planned-only progress payloads and increment transfer metrics.
+  It now includes both `execute_rebalance_add_node_transfer(...)` and
+  `execute_rebalance_remove_node_transfer(...)`. The remove-node path computes
+  ownership before/after ring removal, scans local data, transfers keys whose
+  previous owner was the removed node and new owner is a live remote peer, and
+  reports considered/transferred/failed/retained-local counts.
+- Control-plane orchestration around transfer execution and churn convergence
+  guarantees remain future Phase 48/49 work.
 
 **Panic isolation**: every `execute_command` invocation is wrapped in
 `AssertUnwindSafe(...).catch_unwind().await` (via the `futures` crate's
@@ -1481,7 +1554,7 @@ cargo test --workspace --lib
 |------|---------|
 | `tests/crud_test.rs` | End-to-end engine CRUD against the `grumpydb` library. |
 | `tests/stress_test.rs` | Concurrency stress against the engine (SWMR). |
-| `tests/server_e2e.rs` | Full client → server → engine → response loop, 8 tests. Uses `TestServer` to spawn the real `grumpydb-server` binary on a random port. |
+| `tests/server_e2e.rs` | Full client → server → engine → response loop, 16 tests. Uses `TestServer` to spawn the real `grumpydb-server` binary on a random port. |
 | `tests/server_concurrency.rs` | 50 concurrent clients × 100 ops each. |
 | `tests/server_auth.rs` | Expired token, tampered token, role enforcement (3 tests). |
 | `tests/crash_recovery.rs` | 6 crash-and-restart scenarios using `TestServer::crash()` (SIGKILL) + `TestServer::restart()`: post-FLUSH crash, no-flush crash, mid-insert partial crash, crash during index creation, crash during compaction, repeated crash recovery loop. |

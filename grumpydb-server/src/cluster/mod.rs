@@ -32,6 +32,8 @@ use uuid::Uuid;
 
 pub mod gossip;
 pub mod handshake;
+pub mod hints;
+pub mod read_repair;
 
 /// Highest `identity_version` understood by this server.
 pub const IDENTITY_VERSION_CURRENT: u32 = 1;

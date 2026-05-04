@@ -29,11 +29,16 @@ use std::io;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use uuid::Uuid;
+
+use grumpydb::SharedServer;
+use grumpydb::document::value::{CrdtKind, Value};
+use grumpydb::GrumpyError;
 
 use crate::cluster::NodeIdentity;
 use crate::config::ServerConfig;
@@ -115,6 +120,58 @@ pub struct ClusterHelloResponse {
     /// Machine-readable error tag when `accepted == false`. Known
     /// values: `cluster_id_mismatch`, `unknown_peer`, `protocol_error`.
     pub error: Option<String>,
+}
+
+/// Peer operation request over an authenticated cluster connection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum PeerDataOp {
+    Get {
+        tenant: String,
+        database: String,
+        collection: String,
+        key: String,
+    },
+    Upsert {
+        tenant: String,
+        database: String,
+        collection: String,
+        key: String,
+        value_json: String,
+    },
+    Delete {
+        tenant: String,
+        database: String,
+        collection: String,
+        key: String,
+    },
+}
+
+/// Peer operation response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerDataOpResponse {
+    Value { value_json: Option<String> },
+    Ack,
+    Error { message: String },
+}
+
+/// Common peer-RPC connection context.
+#[derive(Debug, Clone)]
+pub struct PeerRpcContext {
+    pub addr: String,
+    pub local_cluster_id: Uuid,
+    pub local_node_id: Uuid,
+    pub server_version: String,
+}
+
+/// Logical key locator for peer-RPC operations.
+#[derive(Debug, Clone)]
+pub struct PeerKeyPath {
+    pub tenant: String,
+    pub database: String,
+    pub collection: String,
+    pub key: String,
 }
 
 /// Outcome of [`run_acceptor`] / [`run_initiator`].
@@ -379,6 +436,143 @@ pub async fn probe_peer_with_gossip(
     }
 }
 
+/// Fetch one key from a peer over the authenticated cluster channel.
+pub async fn fetch_peer_value(
+    ctx: &PeerRpcContext,
+    key_path: &PeerKeyPath,
+) -> Result<Option<String>, String> {
+    let mut stream = TcpStream::connect(&ctx.addr)
+        .await
+        .map_err(|e| format!("connect failed: {e}"))?;
+
+    let (_, outcome) = run_initiator(
+        &mut stream,
+        ctx.local_cluster_id,
+        ctx.local_node_id,
+        &ctx.server_version,
+    )
+    .await
+    .map_err(|e| format!("handshake error: {e}"))?;
+
+    match outcome {
+        HandshakeOutcome::Accepted { .. } => {}
+        HandshakeOutcome::Rejected { error } => {
+            return Err(format!("handshake rejected: {error}"));
+        }
+    }
+
+    let req = PeerDataOp::Get {
+        tenant: key_path.tenant.clone(),
+        database: key_path.database.clone(),
+        collection: key_path.collection.clone(),
+        key: key_path.key.clone(),
+    };
+    write_frame(&mut stream, &req)
+        .await
+        .map_err(|e| format!("write op failed: {e}"))?;
+
+    let resp: PeerDataOpResponse = read_frame(&mut stream)
+        .await
+        .map_err(|e| format!("read op response failed: {e}"))?;
+    match resp {
+        PeerDataOpResponse::Value { value_json } => Ok(value_json),
+        PeerDataOpResponse::Ack => Err("unexpected ack for get".to_string()),
+        PeerDataOpResponse::Error { message } => Err(message),
+    }
+}
+
+/// Upsert one key on a peer over the authenticated cluster channel.
+pub async fn upsert_peer_value(
+    ctx: &PeerRpcContext,
+    key_path: &PeerKeyPath,
+    value_json: &str,
+) -> Result<(), String> {
+    let mut stream = TcpStream::connect(&ctx.addr)
+        .await
+        .map_err(|e| format!("connect failed: {e}"))?;
+
+    let (_, outcome) = run_initiator(
+        &mut stream,
+        ctx.local_cluster_id,
+        ctx.local_node_id,
+        &ctx.server_version,
+    )
+    .await
+    .map_err(|e| format!("handshake error: {e}"))?;
+
+    match outcome {
+        HandshakeOutcome::Accepted { .. } => {}
+        HandshakeOutcome::Rejected { error } => {
+            return Err(format!("handshake rejected: {error}"));
+        }
+    }
+
+    let req = PeerDataOp::Upsert {
+        tenant: key_path.tenant.clone(),
+        database: key_path.database.clone(),
+        collection: key_path.collection.clone(),
+        key: key_path.key.clone(),
+        value_json: value_json.to_string(),
+    };
+    write_frame(&mut stream, &req)
+        .await
+        .map_err(|e| format!("write op failed: {e}"))?;
+
+    let resp: PeerDataOpResponse = read_frame(&mut stream)
+        .await
+        .map_err(|e| format!("read op response failed: {e}"))?;
+    match resp {
+        PeerDataOpResponse::Ack => Ok(()),
+        PeerDataOpResponse::Value { .. } => Err("unexpected value response for upsert".into()),
+        PeerDataOpResponse::Error { message } => Err(message),
+    }
+}
+
+/// Delete one key on a peer over the authenticated cluster channel.
+pub async fn delete_peer_value(
+    ctx: &PeerRpcContext,
+    key_path: &PeerKeyPath,
+) -> Result<(), String> {
+    let mut stream = TcpStream::connect(&ctx.addr)
+        .await
+        .map_err(|e| format!("connect failed: {e}"))?;
+
+    let (_, outcome) = run_initiator(
+        &mut stream,
+        ctx.local_cluster_id,
+        ctx.local_node_id,
+        &ctx.server_version,
+    )
+    .await
+    .map_err(|e| format!("handshake error: {e}"))?;
+
+    match outcome {
+        HandshakeOutcome::Accepted { .. } => {}
+        HandshakeOutcome::Rejected { error } => {
+            return Err(format!("handshake rejected: {error}"));
+        }
+    }
+
+    let req = PeerDataOp::Delete {
+        tenant: key_path.tenant.clone(),
+        database: key_path.database.clone(),
+        collection: key_path.collection.clone(),
+        key: key_path.key.clone(),
+    };
+    write_frame(&mut stream, &req)
+        .await
+        .map_err(|e| format!("write op failed: {e}"))?;
+
+    let resp: PeerDataOpResponse = read_frame(&mut stream)
+        .await
+        .map_err(|e| format!("read op response failed: {e}"))?;
+    match resp {
+        PeerDataOpResponse::Ack => Ok(()),
+        PeerDataOpResponse::Value { .. } => Err("unexpected value response for delete".into()),
+        PeerDataOpResponse::Error { message } => Err(message),
+    }
+}
+
 /// Phase 40a peer-port stub.
 ///
 /// Binds `config.cluster.listen_peer` and accepts inter-node TCP
@@ -395,6 +589,7 @@ pub async fn serve(
     config: ServerConfig,
     identity: Arc<NodeIdentity>,
     coordinator: Arc<Coordinator>,
+    shared_server: SharedServer,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bind = config.cluster.listen_peer.clone();
     if bind.is_empty() {
@@ -447,6 +642,7 @@ pub async fn serve(
                     let known = known_peers.clone();
                     let identity = identity.clone();
                     let coordinator = coordinator.clone();
+                    let shared_server = shared_server.clone();
                     let server_version = server_version.clone();
                     tokio::spawn(async move {
                         match run_acceptor_with_hello(
@@ -470,6 +666,27 @@ pub async fn serve(
                                     peer_node_id = %peer_node_id,
                                     "cluster peer handshake accepted"
                                 );
+
+                                let op = tokio::time::timeout(
+                                    tokio::time::Duration::from_millis(100),
+                                    read_frame::<_, PeerDataOp>(&mut stream),
+                                )
+                                .await;
+
+                                match op {
+                                    Ok(Ok(op)) => {
+                                        let resp = handle_peer_data_op(op, &shared_server);
+                                        if let Err(e) = write_frame(&mut stream, &resp).await {
+                                            tracing::warn!(peer = %peer, error = %e, "cluster peer op response write failed");
+                                        }
+                                    }
+                                    Ok(Err(HandshakeError::Io(e)))
+                                        if e.kind() == io::ErrorKind::UnexpectedEof => {}
+                                    Ok(Err(e)) => {
+                                        tracing::debug!(peer = %peer, error = %e, "cluster peer no-op or malformed op frame");
+                                    }
+                                    Err(_) => {}
+                                }
                             }
                             Ok((HandshakeOutcome::Rejected { error }, _)) => {
                                 tracing::warn!(
@@ -495,6 +712,191 @@ pub async fn serve(
     });
 
     Ok(())
+}
+
+fn handle_peer_data_op(op: PeerDataOp, shared_server: &SharedServer) -> PeerDataOpResponse {
+    match op {
+        PeerDataOp::Get {
+            tenant,
+            database,
+            collection,
+            key,
+        } => {
+            let uuid = match Uuid::parse_str(&key) {
+                Ok(u) => u,
+                Err(e) => {
+                    return PeerDataOpResponse::Error {
+                        message: format!("invalid key uuid: {e}"),
+                    };
+                }
+            };
+            let db = match shared_server.database(&tenant, &database) {
+                Ok(db) => db,
+                Err(e) => {
+                    return PeerDataOpResponse::Error {
+                        message: e.to_string(),
+                    };
+                }
+            };
+            match db.get(&collection, &uuid) {
+                Ok(Some(v)) => PeerDataOpResponse::Value {
+                    value_json: Some(value_to_json_string(&v)),
+                },
+                Ok(None) => PeerDataOpResponse::Value { value_json: None },
+                Err(e) => PeerDataOpResponse::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        PeerDataOp::Upsert {
+            tenant,
+            database,
+            collection,
+            key,
+            value_json,
+        } => {
+            let uuid = match Uuid::parse_str(&key) {
+                Ok(u) => u,
+                Err(e) => {
+                    return PeerDataOpResponse::Error {
+                        message: format!("invalid key uuid: {e}"),
+                    };
+                }
+            };
+            let db = match shared_server.database(&tenant, &database) {
+                Ok(db) => db,
+                Err(e) => {
+                    return PeerDataOpResponse::Error {
+                        message: e.to_string(),
+                    };
+                }
+            };
+            let value = match serde_json::from_str::<serde_json::Value>(&value_json) {
+                Ok(json) => json_to_value(&json),
+                Err(e) => {
+                    return PeerDataOpResponse::Error {
+                        message: format!("invalid value JSON: {e}"),
+                    };
+                }
+            };
+
+            let r = match db.insert(&collection, uuid, value.clone()) {
+                Ok(()) => Ok(()),
+                Err(GrumpyError::DuplicateKey(_)) => db.update(&collection, &uuid, value),
+                Err(e) => Err(e),
+            };
+            match r {
+                Ok(()) => PeerDataOpResponse::Ack,
+                Err(e) => PeerDataOpResponse::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        PeerDataOp::Delete {
+            tenant,
+            database,
+            collection,
+            key,
+        } => {
+            let uuid = match Uuid::parse_str(&key) {
+                Ok(u) => u,
+                Err(e) => {
+                    return PeerDataOpResponse::Error {
+                        message: format!("invalid key uuid: {e}"),
+                    };
+                }
+            };
+            let db = match shared_server.database(&tenant, &database) {
+                Ok(db) => db,
+                Err(e) => {
+                    return PeerDataOpResponse::Error {
+                        message: e.to_string(),
+                    };
+                }
+            };
+            match db.delete(&collection, &uuid) {
+                Ok(()) => PeerDataOpResponse::Ack,
+                Err(GrumpyError::KeyNotFound(_)) => PeerDataOpResponse::Ack,
+                Err(e) => PeerDataOpResponse::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+    }
+}
+
+fn json_to_value(json: &serde_json::Value) -> Value {
+    match json {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Integer(i)
+            } else if let Some(f) = n.as_f64() {
+                Value::Float(f)
+            } else {
+                Value::Null
+            }
+        }
+        serde_json::Value::String(s) => Value::String(s.clone()),
+        serde_json::Value::Array(arr) => Value::Array(arr.iter().map(json_to_value).collect()),
+        serde_json::Value::Object(obj) => {
+            if let Some(crdt_json) = obj.get("$crdt")
+                && let Some(crdt_obj) = crdt_json.as_object()
+            {
+                let kind = crdt_obj
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .and_then(CrdtKind::from_name);
+                let payload = crdt_obj
+                    .get("payload_b64")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+                if let (Some(kind), Some(payload)) = (kind, payload) {
+                    return Value::Crdt { kind, payload };
+                }
+            }
+
+            let mut map = std::collections::BTreeMap::new();
+            for (k, v) in obj {
+                map.insert(k.clone(), json_to_value(v));
+            }
+            Value::Object(map)
+        }
+    }
+}
+
+fn value_to_json_string(v: &Value) -> String {
+    serde_json::to_string(&value_to_serde_json(v)).unwrap_or_else(|_| "null".to_string())
+}
+
+fn value_to_serde_json(val: &Value) -> serde_json::Value {
+    match val {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::Integer(i) => serde_json::json!(*i),
+        Value::Float(f) => serde_json::json!(*f),
+        Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::Bytes(b) => serde_json::json!({"$bytes": base64::engine::general_purpose::STANDARD.encode(b)}),
+        Value::Ref(coll, id) => serde_json::json!({"$ref": {"collection": coll, "id": id}}),
+        Value::Array(arr) => serde_json::Value::Array(arr.iter().map(value_to_serde_json).collect()),
+        Value::Object(obj) => {
+            let mut map = serde_json::Map::new();
+            for (k, v) in obj {
+                map.insert(k.clone(), value_to_serde_json(v));
+            }
+            serde_json::Value::Object(map)
+        }
+        Value::Tombstone { deleted_at_hlc, .. } => {
+            serde_json::json!({"$tombstone": {"hlc": deleted_at_hlc}})
+        }
+        Value::Crdt { kind, payload } => serde_json::json!({
+            "$crdt": {
+                "kind": kind.as_str(),
+                "payload_b64": base64::engine::general_purpose::STANDARD.encode(payload)
+            }
+        }),
+    }
 }
 
 fn now_unix() -> u64 {

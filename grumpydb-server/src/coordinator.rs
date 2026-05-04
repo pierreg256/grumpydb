@@ -3,7 +3,10 @@
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use futures::future::join_all;
+use grumpydb::SharedDatabase;
+use grumpydb::document::value::Value;
 use grumpydb_ring::{Ring, RingConfig, RoutingKey};
 use parking_lot::RwLock;
 use serde_json::json;
@@ -12,8 +15,10 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::cluster::NodeIdentity;
+use crate::cluster::hints::{HintOperation, HintRecord};
 use crate::cluster::handshake::{
-    ClusterHello, GossipPayload, PeerGossipState, probe_peer_acceptance,
+    ClusterHello, GossipPayload, PeerGossipState, PeerKeyPath, PeerRpcContext,
+    delete_peer_value, fetch_peer_value, probe_peer_acceptance, upsert_peer_value,
 };
 use crate::config::{ClusterSection, PeerEntry, WriterEntry};
 
@@ -223,9 +228,9 @@ impl Coordinator {
 
     /// Validate read/write concerns.
     ///
-    /// v6 Phase 45 keeps read concerns pinned to `R=1` (Phase 47 will
-    /// enable `R>1`). Write concerns are bounded here and enforced at
-    /// key-level by [`Self::validate_write_concern_for_key`].
+    /// Read/write concerns are bounded here. Key-level liveness checks are
+    /// enforced by [`Self::validate_write_concern_for_key`] and
+    /// [`Self::validate_read_concern_for_key`].
     pub fn validate_concerns(
         &self,
         read_concern: Option<u16>,
@@ -234,16 +239,45 @@ impl Coordinator {
         let r = read_concern.unwrap_or(1) as usize;
         let w = write_concern.unwrap_or(1) as usize;
 
-        if r != 1 {
-            return Err(
-                "v6 currently supports R=1 only (read repair lands in phase 47)".to_string(),
-            );
-        }
-
         if !(1..=self.n).contains(&r) || !(1..=self.n).contains(&w) {
             return Err(format!(
                 "invalid consistency concerns: require R and W in [1, {}]",
                 self.n
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Validate read concern against the key's currently-live replica set.
+    pub fn validate_read_concern_for_key(
+        &self,
+        database: &str,
+        collection: &str,
+        key_bytes: &[u8],
+        read_concern: Option<u16>,
+    ) -> Result<(), String> {
+        let r = read_concern.unwrap_or(1) as usize;
+        if !(1..=self.n).contains(&r) {
+            return Err(format!(
+                "invalid consistency concerns: require R and W in [1, {}]",
+                self.n
+            ));
+        }
+
+        let key = RoutingKey {
+            database,
+            collection,
+            key_bytes,
+        };
+        let owners = self.ring.preference_list(&key, self.n);
+        let live = owners
+            .iter()
+            .filter(|node_id| self.is_peer_live(node_id))
+            .count();
+        if r > live {
+            return Err(format!(
+                "not enough live replicas for R={r}: have {live} live replicas in preference list"
             ));
         }
 
@@ -370,6 +404,91 @@ impl Coordinator {
         ))
     }
 
+    /// Fan out read acknowledgements to replica peers and wait until quorum
+    /// `R` is satisfied or timeout/failures leave insufficient acknowledgements.
+    pub async fn wait_for_read_ack_quorum(
+        &self,
+        database: &str,
+        collection: &str,
+        key_bytes: &[u8],
+        read_concern: Option<u16>,
+    ) -> Result<(), String> {
+        let r = read_concern.unwrap_or(1) as usize;
+        if r <= 1 {
+            return Ok(());
+        }
+
+        let key = RoutingKey {
+            database,
+            collection,
+            key_bytes,
+        };
+        let owners = self.ring.preference_list(&key, self.n);
+
+        let mut acked = 1usize; // local replica
+        let mut fanout_addrs = Vec::new();
+        for node_id in owners {
+            if node_id == self.local_node_id {
+                continue;
+            }
+            if let Some(addr) = self.peer_addrs.get(&node_id) {
+                fanout_addrs.push(addr.clone());
+            }
+        }
+
+        let required_remote = r.saturating_sub(1);
+        if fanout_addrs.len() < required_remote {
+            return Err(format!(
+                "read quorum cannot be satisfied: need {required_remote} remote acks, only {} replica peers available",
+                fanout_addrs.len()
+            ));
+        }
+
+        let timeout_dur = Duration::from_millis(self.write_ack_timeout_ms.max(50));
+        let server_version = format!("grumpydb-server/{}", env!("CARGO_PKG_VERSION"));
+        let probes = fanout_addrs.into_iter().map(|addr| {
+            let server_version = server_version.clone();
+            async move {
+                let r = timeout(
+                    timeout_dur,
+                    probe_peer_acceptance(
+                        &addr,
+                        self.cluster_uuid,
+                        self.local_node_uuid,
+                        &server_version,
+                    ),
+                )
+                .await;
+
+                match r {
+                    Ok(Ok(())) => Ok::<(), String>(()),
+                    Ok(Err(e)) => Err(format!("{addr}: {e}")),
+                    Err(_) => Err(format!(
+                        "{addr}: timeout after {}ms",
+                        timeout_dur.as_millis()
+                    )),
+                }
+            }
+        });
+
+        let results = join_all(probes).await;
+        let mut failures = Vec::new();
+        for res in results {
+            match res {
+                Ok(()) => acked += 1,
+                Err(e) => failures.push(e),
+            }
+        }
+        if acked >= r {
+            return Ok(());
+        }
+
+        Err(format!(
+            "read quorum not reached: acked {acked}/{r}; failures: {}",
+            failures.join(" | ")
+        ))
+    }
+
     /// Enforce primary-owner placement for read paths and return a forward
     /// hint if needed.
     pub fn enforce_local_owner(
@@ -474,6 +593,431 @@ impl Coordinator {
             "writers": writers,
         })
     }
+
+    /// Build a preview of hash-range ownership changes if a node is added.
+    pub fn plan_rebalance_add_node(&self, node_id: &str) -> serde_json::Value {
+        let mut ring = self.ring.clone();
+        let ranges = ring.add_node(node_id.to_string());
+        json!({
+            "action": "add-node",
+            "node_id": node_id,
+            "range_count": ranges.len(),
+            "ranges": ranges.into_iter().map(key_range_json).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Build a preview of hash-range ownership changes if a node is removed.
+    pub fn plan_rebalance_remove_node(&self, node_id: &str) -> serde_json::Value {
+        let mut ring = self.ring.clone();
+        let ranges = ring.remove_node(&node_id.to_string());
+        json!({
+            "action": "remove-node",
+            "node_id": node_id,
+            "range_count": ranges.len(),
+            "ranges": ranges.into_iter().map(key_range_json).collect::<Vec<_>>(),
+        })
+    }
+
+    /// Execute an add-node rebalance plan (phase-49 scaffolding).
+    pub fn execute_rebalance_add_node(&self, node_id: &str) -> serde_json::Value {
+        let plan = self.plan_rebalance_add_node(node_id);
+        let total = plan.get("range_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        metrics::counter!(
+            "grumpydb_rebalance_transfers_total",
+            "action" => "add-node"
+        )
+        .increment(total);
+        json!({
+            "action": "add-node",
+            "node_id": node_id,
+            "planned_ranges": total,
+            "executed_ranges": total,
+            "status": "planned-only",
+        })
+    }
+
+    /// Execute a remove-node rebalance plan (phase-49 scaffolding).
+    pub fn execute_rebalance_remove_node(&self, node_id: &str) -> serde_json::Value {
+        let plan = self.plan_rebalance_remove_node(node_id);
+        let total = plan.get("range_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        metrics::counter!(
+            "grumpydb_rebalance_transfers_total",
+            "action" => "remove-node"
+        )
+        .increment(total);
+        json!({
+            "action": "remove-node",
+            "node_id": node_id,
+            "planned_ranges": total,
+            "executed_ranges": total,
+            "status": "planned-only",
+        })
+    }
+
+    /// Return non-local replica node ids for a key.
+    pub fn replica_peer_nodes_for_key(
+        &self,
+        database: &str,
+        collection: &str,
+        key_bytes: &[u8],
+    ) -> Vec<String> {
+        let key = RoutingKey {
+            database,
+            collection,
+            key_bytes,
+        };
+        self.ring
+            .preference_list(&key, self.n)
+            .into_iter()
+            .filter(|node_id| node_id != &self.local_node_id)
+            .collect()
+    }
+
+    /// Return non-local replicas currently marked unavailable for a key.
+    pub fn unavailable_replica_peer_nodes_for_key(
+        &self,
+        database: &str,
+        collection: &str,
+        key_bytes: &[u8],
+    ) -> Vec<String> {
+        self.replica_peer_nodes_for_key(database, collection, key_bytes)
+            .into_iter()
+            .filter(|node_id| !self.is_peer_live(node_id))
+            .collect()
+    }
+
+    /// Public liveness accessor used by background orchestration workers.
+    pub fn peer_is_live(&self, node_id: &str) -> bool {
+        self.is_peer_live(node_id)
+    }
+
+    /// Read one key from all live remote replicas in the preference list.
+    pub async fn fanout_read_peer_values(
+        &self,
+        tenant: &str,
+        database: &str,
+        collection: &str,
+        key: &str,
+    ) -> Vec<(String, Result<Option<String>, String>)> {
+        let peers: Vec<(String, String)> = self
+            .replica_peer_nodes_for_key(database, collection, key.as_bytes())
+            .into_iter()
+            .filter_map(|node_id| self.peer_addrs.get(&node_id).map(|addr| (node_id, addr.clone())))
+            .collect();
+
+        let server_version = format!("grumpydb-server/{}", env!("CARGO_PKG_VERSION"));
+        let futures = peers.into_iter().map(|(node_id, addr)| {
+            let server_version = server_version.clone();
+            async move {
+                let ctx = PeerRpcContext {
+                    addr,
+                    local_cluster_id: self.cluster_uuid,
+                    local_node_id: self.local_node_uuid,
+                    server_version,
+                };
+                let key_path = PeerKeyPath {
+                    tenant: tenant.to_string(),
+                    database: database.to_string(),
+                    collection: collection.to_string(),
+                    key: key.to_string(),
+                };
+                let v = fetch_peer_value(&ctx, &key_path).await;
+                (node_id, v)
+            }
+        });
+
+        join_all(futures).await
+    }
+
+    /// Apply one converged value to a remote replica.
+    pub async fn repair_peer_value(
+        &self,
+        peer_node_id: &str,
+        tenant: &str,
+        database: &str,
+        collection: &str,
+        key: &str,
+        value_json: &str,
+    ) -> Result<(), String> {
+        let addr = self
+            .peer_addrs
+            .get(peer_node_id)
+            .ok_or_else(|| format!("unknown peer: {peer_node_id}"))?;
+        let server_version = format!("grumpydb-server/{}", env!("CARGO_PKG_VERSION"));
+        let ctx = PeerRpcContext {
+            addr: addr.clone(),
+            local_cluster_id: self.cluster_uuid,
+            local_node_id: self.local_node_uuid,
+            server_version,
+        };
+        let key_path = PeerKeyPath {
+            tenant: tenant.to_string(),
+            database: database.to_string(),
+            collection: collection.to_string(),
+            key: key.to_string(),
+        };
+        upsert_peer_value(&ctx, &key_path, value_json).await
+    }
+
+    /// Replay one hinted-handoff record to a peer.
+    pub async fn replay_hint_to_peer(
+        &self,
+        peer_node_id: &str,
+        hint: &HintRecord,
+    ) -> Result<(), String> {
+        let addr = self
+            .peer_addrs
+            .get(peer_node_id)
+            .ok_or_else(|| format!("unknown peer: {peer_node_id}"))?;
+        let server_version = format!("grumpydb-server/{}", env!("CARGO_PKG_VERSION"));
+        let ctx = PeerRpcContext {
+            addr: addr.clone(),
+            local_cluster_id: self.cluster_uuid,
+            local_node_id: self.local_node_uuid,
+            server_version,
+        };
+        let key_path = PeerKeyPath {
+            tenant: hint.tenant.clone(),
+            database: hint.database.clone(),
+            collection: hint.collection.clone(),
+            key: hint.key.clone(),
+        };
+
+        match hint.resolved_operation() {
+            HintOperation::Upsert { value_json } => upsert_peer_value(&ctx, &key_path, &value_json).await,
+            HintOperation::Delete => delete_peer_value(&ctx, &key_path).await,
+        }
+    }
+
+    /// Execute transfer to a newly-added node by shipping all keys whose
+    /// primary owner changes from local node to `target_node_id`.
+    pub async fn execute_rebalance_add_node_transfer(
+        &self,
+        target_node_id: &str,
+        tenant: &str,
+        database: &str,
+        collection: &str,
+        local_db: &SharedDatabase,
+    ) -> serde_json::Value {
+        let mut ring_after = self.ring.clone();
+        ring_after.add_node(target_node_id.to_string());
+
+        let scan = local_db.scan(collection, ..);
+        let mut considered = 0u64;
+        let mut transferred = 0u64;
+        let mut failed = 0u64;
+
+        let docs = match scan {
+            Ok(docs) => docs,
+            Err(e) => {
+                return json!({
+                    "action": "add-node-transfer",
+                    "target_node_id": target_node_id,
+                    "status": "error",
+                    "error": e.to_string(),
+                });
+            }
+        };
+
+        for (id, value) in docs {
+            let key = id.to_string();
+            let before_key = RoutingKey {
+                database,
+                collection,
+                key_bytes: key.as_bytes(),
+            };
+            let before_owner = self
+                .ring
+                .preference_list(&before_key, 1)
+                .first()
+                .cloned()
+                .unwrap_or_default();
+            let after_owner = ring_after
+                .preference_list(&before_key, 1)
+                .first()
+                .cloned()
+                .unwrap_or_default();
+
+            if before_owner != self.local_node_id || after_owner != target_node_id {
+                continue;
+            }
+
+            considered += 1;
+            let value_json = serde_json::to_string(&value_to_serde_json(&value))
+                .unwrap_or_else(|_| "null".to_string());
+            match self
+                .repair_peer_value(
+                    target_node_id,
+                    tenant,
+                    database,
+                    collection,
+                    &key,
+                    &value_json,
+                )
+                .await
+            {
+                Ok(()) => transferred += 1,
+                Err(_) => failed += 1,
+            }
+        }
+
+        metrics::counter!(
+            "grumpydb_rebalance_transfers_total",
+            "action" => "add-node-transfer"
+        )
+        .increment(transferred);
+        metrics::counter!(
+            "grumpydb_rebalance_transfer_failures_total",
+            "action" => "add-node-transfer"
+        )
+        .increment(failed);
+
+        json!({
+            "action": "add-node-transfer",
+            "target_node_id": target_node_id,
+            "considered": considered,
+            "transferred": transferred,
+            "failed": failed,
+            "status": if failed == 0 { "ok" } else { "partial" },
+        })
+    }
+
+    /// Execute transfer for remove-node ownership shifts.
+    pub async fn execute_rebalance_remove_node_transfer(
+        &self,
+        removed_node_id: &str,
+        tenant: &str,
+        database: &str,
+        collection: &str,
+        local_db: &SharedDatabase,
+    ) -> serde_json::Value {
+        let mut ring_after = self.ring.clone();
+        ring_after.remove_node(&removed_node_id.to_string());
+
+        let scan = local_db.scan(collection, ..);
+        let mut considered = 0u64;
+        let mut transferred = 0u64;
+        let mut failed = 0u64;
+        let mut retained_local = 0u64;
+
+        let docs = match scan {
+            Ok(docs) => docs,
+            Err(e) => {
+                return json!({
+                    "action": "remove-node-transfer",
+                    "removed_node_id": removed_node_id,
+                    "status": "error",
+                    "error": e.to_string(),
+                });
+            }
+        };
+
+        for (id, value) in docs {
+            let key = id.to_string();
+            let route_key = RoutingKey {
+                database,
+                collection,
+                key_bytes: key.as_bytes(),
+            };
+            let before_owner = self
+                .ring
+                .preference_list(&route_key, 1)
+                .first()
+                .cloned()
+                .unwrap_or_default();
+            let after_owner = ring_after
+                .preference_list(&route_key, 1)
+                .first()
+                .cloned()
+                .unwrap_or_default();
+
+            if before_owner != removed_node_id || after_owner == removed_node_id {
+                continue;
+            }
+            considered += 1;
+
+            if after_owner == self.local_node_id {
+                retained_local += 1;
+                continue;
+            }
+
+            let value_json = serde_json::to_string(&value_to_serde_json(&value))
+                .unwrap_or_else(|_| "null".to_string());
+            match self
+                .repair_peer_value(
+                    &after_owner,
+                    tenant,
+                    database,
+                    collection,
+                    &key,
+                    &value_json,
+                )
+                .await
+            {
+                Ok(()) => transferred += 1,
+                Err(_) => failed += 1,
+            }
+        }
+
+        metrics::counter!(
+            "grumpydb_rebalance_transfers_total",
+            "action" => "remove-node-transfer"
+        )
+        .increment(transferred);
+        metrics::counter!(
+            "grumpydb_rebalance_transfer_failures_total",
+            "action" => "remove-node-transfer"
+        )
+        .increment(failed);
+
+        json!({
+            "action": "remove-node-transfer",
+            "removed_node_id": removed_node_id,
+            "considered": considered,
+            "retained_local": retained_local,
+            "transferred": transferred,
+            "failed": failed,
+            "status": if failed == 0 { "ok" } else { "partial" },
+        })
+    }
+}
+
+fn value_to_serde_json(val: &Value) -> serde_json::Value {
+    match val {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::Integer(i) => serde_json::json!(*i),
+        Value::Float(f) => serde_json::json!(*f),
+        Value::String(s) => serde_json::Value::String(s.clone()),
+        Value::Bytes(b) => serde_json::json!({"$bytes": base64::engine::general_purpose::STANDARD.encode(b)}),
+        Value::Ref(coll, id) => serde_json::json!({"$ref": {"collection": coll, "id": id}}),
+        Value::Array(arr) => serde_json::Value::Array(arr.iter().map(value_to_serde_json).collect()),
+        Value::Object(obj) => {
+            let mut map = serde_json::Map::new();
+            for (k, v) in obj {
+                map.insert(k.clone(), value_to_serde_json(v));
+            }
+            serde_json::Value::Object(map)
+        }
+        Value::Tombstone { deleted_at_hlc, .. } => {
+            serde_json::json!({"$tombstone": {"hlc": deleted_at_hlc}})
+        }
+        Value::Crdt { kind, payload } => serde_json::json!({
+            "$crdt": {
+                "kind": kind.as_str(),
+                "payload_b64": base64::engine::general_purpose::STANDARD.encode(payload)
+            }
+        }),
+    }
+}
+
+fn key_range_json(range: grumpydb_ring::KeyRange) -> serde_json::Value {
+    json!({
+        "start_inclusive": range.start_inclusive,
+        "end_exclusive": range.end_exclusive,
+        "from": range.from.map(|n| n.0),
+        "to": range.to.0,
+    })
 }
 
 fn now_unix() -> u64 {
@@ -569,6 +1113,7 @@ mod tests {
     fn test_validate_concerns_v5_only() {
         let c = Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
         assert!(c.validate_concerns(Some(1), Some(1)).is_ok());
+        // R=2 remains invalid in single-node mode (N=1).
         assert!(c.validate_concerns(Some(2), Some(1)).is_err());
         // W=2 remains invalid in single-node mode (N=1).
         assert!(c.validate_concerns(Some(1), Some(2)).is_err());
@@ -756,6 +1301,42 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_read_concern_for_key_accepts_when_live_replicas_sufficient() {
+        let mut cluster = ClusterSection::default();
+        cluster.peers.push(PeerEntry {
+            node_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            addr: "node-2:6390".to_string(),
+            status: Some("up".to_string()),
+            last_seen_at_unix: None,
+            vnode_assignments: vec![],
+        });
+
+        let c = Coordinator::from_config(&identity(), &cluster, "127.0.0.1:6380");
+        assert!(
+            c.validate_read_concern_for_key("db", "users", b"k1", Some(2))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_read_concern_for_key_rejects_when_live_replicas_insufficient() {
+        let mut cluster = ClusterSection::default();
+        cluster.peers.push(PeerEntry {
+            node_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            addr: "node-2:6390".to_string(),
+            status: Some("down".to_string()),
+            last_seen_at_unix: None,
+            vnode_assignments: vec![],
+        });
+
+        let c = Coordinator::from_config(&identity(), &cluster, "127.0.0.1:6380");
+        let err = c
+            .validate_read_concern_for_key("db", "users", b"k1", Some(2))
+            .expect_err("R=2 should fail with only one live replica");
+        assert!(err.contains("not enough live replicas"), "got: {err}");
+    }
+
+    #[test]
     fn test_merge_gossip_from_peer_adds_unknown_membership_entries() {
         let mut cluster = ClusterSection::default();
         cluster.peers.push(PeerEntry {
@@ -808,5 +1389,104 @@ mod tests {
             discovered.get("addr").and_then(|v| v.as_str()),
             Some("node-3:6390")
         );
+    }
+
+    #[test]
+    fn test_plan_rebalance_add_node_returns_delta_ranges() {
+        let c = Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        let plan = c.plan_rebalance_add_node("11111111-1111-1111-1111-111111111111");
+        assert_eq!(plan.get("action").and_then(|v| v.as_str()), Some("add-node"));
+        assert_eq!(
+            plan.get("node_id").and_then(|v| v.as_str()),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
+        assert!(
+            plan.get("range_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                > 0
+        );
+    }
+
+    #[test]
+    fn test_plan_rebalance_remove_node_returns_empty_for_unknown_node() {
+        let c = Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        let plan = c.plan_rebalance_remove_node("unknown-node");
+        assert_eq!(
+            plan.get("action").and_then(|v| v.as_str()),
+            Some("remove-node")
+        );
+        assert_eq!(plan.get("range_count").and_then(|v| v.as_u64()), Some(0));
+    }
+
+    #[test]
+    fn test_replica_peer_nodes_for_key_excludes_local() {
+        let mut cluster = ClusterSection::default();
+        cluster.peers.push(PeerEntry {
+            node_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            addr: "node-2:6390".to_string(),
+            status: Some("up".to_string()),
+            last_seen_at_unix: None,
+            vnode_assignments: vec![],
+        });
+
+        let c = Coordinator::from_config(&identity(), &cluster, "127.0.0.1:6380");
+        let peers = c.replica_peer_nodes_for_key("db", "users", b"k1");
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0], "11111111-1111-1111-1111-111111111111");
+    }
+
+    #[test]
+    fn test_unavailable_replica_peer_nodes_for_key_filters_down_peers() {
+        let mut cluster = ClusterSection::default();
+        cluster.peers.push(PeerEntry {
+            node_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            addr: "node-2:6390".to_string(),
+            status: Some("down".to_string()),
+            last_seen_at_unix: None,
+            vnode_assignments: vec![],
+        });
+
+        let c = Coordinator::from_config(&identity(), &cluster, "127.0.0.1:6380");
+        let peers = c.unavailable_replica_peer_nodes_for_key("db", "users", b"k1");
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0], "11111111-1111-1111-1111-111111111111");
+    }
+
+    #[test]
+    fn test_execute_rebalance_add_node_reports_progress() {
+        let c = Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        let out = c.execute_rebalance_add_node("11111111-1111-1111-1111-111111111111");
+        assert_eq!(out.get("status").and_then(|v| v.as_str()), Some("planned-only"));
+        assert!(
+            out.get("executed_ranges")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                > 0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_rebalance_remove_node_transfer_empty_collection_is_ok() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let db_path = tmp.path().join("db");
+        let db = SharedDatabase::open(&db_path).expect("open db");
+        db.create_collection("users").expect("create collection");
+
+        let c = Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        let out = c
+            .execute_rebalance_remove_node_transfer(
+                "11111111-1111-1111-1111-111111111111",
+                "tenant",
+                "db",
+                "users",
+                &db,
+            )
+            .await;
+        assert_eq!(
+            out.get("action").and_then(|v| v.as_str()),
+            Some("remove-node-transfer")
+        );
+        assert_eq!(out.get("failed").and_then(|v| v.as_u64()), Some(0));
     }
 }

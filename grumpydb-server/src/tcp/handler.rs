@@ -5,19 +5,31 @@ use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use futures::FutureExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
 use grumpydb::concurrency::shared::SharedServer;
-use grumpydb::document::value::Value;
+use grumpydb::document::crdt::merge_values as merge_crdt_values;
+use grumpydb::document::value::{CrdtKind, Value};
+use grumpydb::GrumpyError;
 use grumpydb_protocol::{Command, MAX_LINE_LENGTH, PROTOCOL_VERSION, Response, parse_command};
 
 use crate::auth::role::{ResourceScope, RoleAssignment, RoleName};
 use crate::auth::store::AuthStore;
+use crate::cluster::hints::{HintOperation, HintRecord, HintStore};
+use crate::cluster::read_repair::{ReadRepairIntent, ReadRepairStore};
 use crate::coordinator::Coordinator;
 use crate::limits::Limits;
 use crate::session::SessionContext;
+
+/// Background pipelines used by connection handlers.
+#[derive(Clone)]
+pub struct RepairPipelines {
+    pub hint_store: Arc<HintStore>,
+    pub read_repair_store: Arc<ReadRepairStore>,
+}
 
 /// Handle a single client connection (plaintext or TLS).
 pub async fn handle_connection<S>(
@@ -27,6 +39,7 @@ pub async fn handle_connection<S>(
     shared_server: SharedServer,
     limits: Arc<Limits>,
     coordinator: Arc<Coordinator>,
+    pipelines: RepairPipelines,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send,
@@ -163,7 +176,25 @@ where
             continue;
         }
 
+        if let Err(e) = validate_read_concern_runtime(&command, &session, coordinator.as_ref()) {
+            tracing::warn!(error = %e, "read concern validation failed");
+            write_resp(&mut writer, &Response::Error(e)).await?;
+            continue;
+        }
+
+        if let Err(e) = wait_for_read_ack_quorum(&command, &session, coordinator.as_ref()).await {
+            tracing::warn!(error = %e, "read ack quorum failed");
+            write_resp(&mut writer, &Response::Error(e)).await?;
+            continue;
+        }
+
         if let Err(e) = wait_for_write_ack_quorum(&command, &session, coordinator.as_ref()).await {
+            persist_write_hints_on_quorum_failure(
+                &command,
+                &session,
+                coordinator.as_ref(),
+                pipelines.hint_store.as_ref(),
+            );
             tracing::warn!(error = %e, "write ack quorum failed");
             write_resp(&mut writer, &Response::Error(e)).await?;
             continue;
@@ -172,7 +203,7 @@ where
         // Execute (with panic isolation: a corrupt page or bug in the engine
         // must not tear down the entire server. Surface as Corruption error.)
         let started = std::time::Instant::now();
-        let response = AssertUnwindSafe(execute_command(
+        let mut response = AssertUnwindSafe(execute_command(
             base_command(&command),
             &mut session,
             &auth_store,
@@ -186,6 +217,17 @@ where
             tracing::error!(panic = %msg, "engine panic caught");
             Response::Error(format!("internal error (corruption): {msg}"))
         });
+
+        response = maybe_converge_read_quorum(
+            &command,
+            response,
+            &session,
+            coordinator.as_ref(),
+            &shared_server,
+            pipelines.read_repair_store.as_ref(),
+        )
+        .await;
+
         let elapsed_us = started.elapsed().as_micros() as u64;
         let elapsed_secs = started.elapsed().as_secs_f64();
         let result_label = match &response {
@@ -232,6 +274,196 @@ where
     }
 
     Ok(())
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn persist_write_hints_on_quorum_failure(
+    command: &Command,
+    session: &SessionContext,
+    coordinator: &Coordinator,
+    hint_store: &HintStore,
+) {
+    let Some((collection, key)) = write_target(command) else {
+        return;
+    };
+    let Some(db_name) = session.current_db() else {
+        return;
+    };
+    let Ok(tenant) = session.tenant() else {
+        return;
+    };
+
+    let operation = match base_command(command) {
+        Command::Insert { value, .. } | Command::Update { value, .. } => HintOperation::Upsert {
+            value_json: value.clone(),
+        },
+        Command::Delete { .. } => HintOperation::Delete,
+        Command::PutWithVc {
+            value,
+            vector_clock,
+            ..
+        } => HintOperation::Upsert {
+            value_json: serde_json::json!({"value": value, "vector_clock": vector_clock})
+                .to_string(),
+        },
+        _ => return,
+    };
+
+    let replicas = coordinator.unavailable_replica_peer_nodes_for_key(
+        db_name,
+        collection,
+        key.as_bytes(),
+    );
+    for node_id in replicas {
+        let hint = HintRecord {
+            created_at_unix: now_unix(),
+            tenant: tenant.to_string(),
+            database: db_name.to_string(),
+            collection: collection.to_string(),
+            key: key.to_string(),
+            operation: Some(operation.clone()),
+            payload_json: None,
+        };
+        if let Err(e) = hint_store.append(&node_id, &hint) {
+            tracing::warn!(error = %e, node_id, "failed to persist hinted handoff record");
+        } else {
+            metrics::counter!("grumpydb_hints_enqueued_total").increment(1);
+        }
+    }
+}
+
+async fn maybe_converge_read_quorum(
+    command: &Command,
+    response: Response,
+    session: &SessionContext,
+    coordinator: &Coordinator,
+    shared_server: &SharedServer,
+    repair_store: &ReadRepairStore,
+) -> Response {
+    let (read_concern, _) = consistency_values(command);
+    if read_concern.unwrap_or(1) <= 1 {
+        return response;
+    }
+    let Some((collection, key)) = read_target(command) else {
+        return response;
+    };
+
+    let Some(db_name) = session.current_db() else {
+        return response;
+    };
+    let Ok(tenant) = session.tenant() else {
+        return response;
+    };
+
+    let local_value = match &response {
+        Response::Bulk(Some(s)) => Some(s.clone()),
+        Response::Bulk(None) => None,
+        _ => return response,
+    };
+
+    let remote_reads = coordinator
+        .fanout_read_peer_values(tenant, db_name, collection, key)
+        .await;
+
+    let mut values = Vec::new();
+    if let Some(v) = &local_value {
+        values.push(v.clone());
+    }
+    for (_, v) in &remote_reads {
+        if let Ok(Some(json)) = v {
+            values.push(json.clone());
+        }
+    }
+    if values.is_empty() {
+        return response;
+    }
+
+    let canonical = choose_canonical_json(values);
+
+    // Local convergence.
+    if local_value.as_deref() != Some(canonical.as_str())
+        && let Some(current_db) = session.current_db()
+        && let Ok(db) = shared_server.database(tenant, current_db)
+        && let Ok(id) = parse_uuid(key)
+        && let Ok(val) = parse_json_value(&canonical)
+    {
+        if db.get(collection, &id).ok().flatten().is_some() {
+            let _ = db.update(collection, &id, val);
+        } else {
+            let _ = db.insert(collection, id, val);
+        }
+    }
+
+    // Remote convergence: immediate repair, durable retry on failure.
+    for (node_id, res) in remote_reads {
+        let needs_repair = match res {
+            Ok(Some(v)) => v != canonical,
+            Ok(None) => true,
+            Err(_) => true,
+        };
+        if !needs_repair {
+            continue;
+        }
+
+        let repaired = coordinator
+            .repair_peer_value(
+                &node_id,
+                tenant,
+                db_name,
+                collection,
+                key,
+                &canonical,
+            )
+            .await;
+        match repaired {
+            Ok(()) => {
+                metrics::counter!("grumpydb_read_repair_applied_total").increment(1);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, node_id = %node_id, key = %key, "read repair failed, enqueueing retry");
+                let intent = ReadRepairIntent {
+                    created_at_unix: now_unix(),
+                    tenant: tenant.to_string(),
+                    database: db_name.to_string(),
+                    collection: collection.to_string(),
+                    key: key.to_string(),
+                    target_node_id: node_id,
+                    value_json: canonical.clone(),
+                    reason: "convergence-retry".to_string(),
+                };
+                if let Err(err) = repair_store.append(&intent) {
+                    tracing::warn!(error = %err, "failed to persist read-repair retry intent");
+                } else {
+                    metrics::counter!("grumpydb_read_repair_intents_enqueued_total").increment(1);
+                }
+            }
+        }
+    }
+
+    Response::Bulk(Some(canonical))
+}
+
+fn choose_canonical_json(values: Vec<String>) -> String {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for v in values {
+        *counts.entry(v).or_insert(0) += 1;
+    }
+
+    let mut best = String::new();
+    let mut best_count = 0usize;
+    for (v, c) in counts {
+        if c > best_count || (c == best_count && v > best) {
+            best = v;
+            best_count = c;
+        }
+    }
+    best
 }
 
 /// Returns a stable string identifier for a command (for tracing fields).
@@ -369,6 +601,58 @@ fn write_target(command: &Command) -> Option<(&str, &str)> {
         } => Some((collection.as_str(), key.as_str())),
         _ => None,
     }
+}
+
+fn read_target(command: &Command) -> Option<(&str, &str)> {
+    match base_command(command) {
+        Command::Get { collection, key } => Some((collection.as_str(), key.as_str())),
+        _ => None,
+    }
+}
+
+fn validate_read_concern_runtime(
+    command: &Command,
+    session: &SessionContext,
+    coordinator: &Coordinator,
+) -> Result<(), String> {
+    let (read_concern, _) = consistency_values(command);
+    if read_concern.is_none() {
+        return Ok(());
+    }
+
+    let Some((collection, key)) = read_target(command) else {
+        return Ok(());
+    };
+
+    let Some(db_name) = session.current_db() else {
+        // Let normal command execution emit the canonical "no database selected"
+        // error if needed.
+        return Ok(());
+    };
+
+    coordinator.validate_read_concern_for_key(db_name, collection, key.as_bytes(), read_concern)
+}
+
+async fn wait_for_read_ack_quorum(
+    command: &Command,
+    session: &SessionContext,
+    coordinator: &Coordinator,
+) -> Result<(), String> {
+    let (read_concern, _) = consistency_values(command);
+    if read_concern.unwrap_or(1) <= 1 {
+        return Ok(());
+    }
+
+    let Some((collection, key)) = read_target(command) else {
+        return Ok(());
+    };
+    let Some(db_name) = session.current_db() else {
+        return Ok(());
+    };
+
+    coordinator
+        .wait_for_read_ack_quorum(db_name, collection, key.as_bytes(), read_concern)
+        .await
 }
 
 fn validate_write_concern_runtime(
@@ -654,11 +938,23 @@ async fn execute_command(
             let _: serde_json::Value = serde_json::from_str(vector_clock)
                 .map_err(|e| format!("invalid vector_clock JSON: {e}"))?;
             let uuid = parse_uuid(key)?;
-            let val = parse_json_value(value)?;
-            if s(db.get(collection, &uuid))?.is_some() {
-                s(db.update(collection, &uuid, val))?;
+            let incoming = parse_json_value(value)?;
+            if let Some(existing) = s(db.get(collection, &uuid))? {
+                let reconciled = match (existing.is_crdt(), incoming.is_crdt()) {
+                    (true, true) => merge_crdt_values(&existing, &incoming)
+                        .map_err(|e| format!("CRDT merge failed: {e}"))?,
+                    _ => incoming,
+                };
+                s(db.update(collection, &uuid, reconciled))?;
             } else {
-                s(db.insert(collection, uuid, val))?;
+                match db.insert(collection, uuid, incoming.clone()) {
+                    Ok(()) => {}
+                    Err(GrumpyError::DuplicateKey(_)) => {
+                        // A hidden tombstone still occupies the key; update replaces it.
+                        s(db.update(collection, &uuid, incoming))?;
+                    }
+                    Err(e) => return Err(e.to_string()),
+                }
             }
             Ok(Response::Ok("OK".into()))
         }),
@@ -1023,6 +1319,21 @@ fn json_to_value(json: &serde_json::Value) -> Value {
         serde_json::Value::String(s) => Value::String(s.clone()),
         serde_json::Value::Array(arr) => Value::Array(arr.iter().map(json_to_value).collect()),
         serde_json::Value::Object(obj) => {
+            if let Some(crdt_json) = obj.get("$crdt")
+                && let Some(crdt_obj) = crdt_json.as_object()
+            {
+                let kind = crdt_obj
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .and_then(CrdtKind::from_name);
+                let payload = crdt_obj
+                    .get("payload_b64")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+                if let (Some(kind), Some(payload)) = (kind, payload) {
+                    return Value::Crdt { kind, payload };
+                }
+            }
             let mut map = BTreeMap::new();
             for (k, v) in obj {
                 map.insert(k.clone(), json_to_value(v));
@@ -1062,5 +1373,11 @@ fn value_to_serde_json(val: &Value) -> serde_json::Value {
         Value::Tombstone { deleted_at_hlc, .. } => {
             serde_json::json!({"$tombstone": {"hlc": deleted_at_hlc}})
         }
+        Value::Crdt { kind, payload } => serde_json::json!({
+            "$crdt": {
+                "kind": kind.as_str(),
+                "payload_b64": base64::engine::general_purpose::STANDARD.encode(payload)
+            }
+        }),
     }
 }
