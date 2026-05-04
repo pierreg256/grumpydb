@@ -738,6 +738,18 @@ impl SecondaryIndex {
 - `query_index()` / `query_index_range()` — lookup + fetch full documents
 - `compact()` — rebuilds secondary indexes after defragmentation
 
+Cluster runtime note (v6): for protocol `QUERY`/`QUERYRANGE`, effective
+`READ_CONCERN R>1` uses a verified query mode in the server layer:
+
+1. Gather candidate UUIDs from local index and replica peers.
+2. Hydrate candidates through quorum reads.
+3. Re-check the predicate against hydrated document fields.
+4. Return only validated rows.
+
+For `R=1`, query execution keeps the original local-index fast path.
+Verified mode enforces a candidate ceiling of `4096` UUIDs and fails on
+overflow (no partial result set).
+
 ### 13.5 Field Extraction
 
 `extract_field(value, "address.city")` navigates a `Value::Object` using dot-separated paths. Missing fields are silently skipped (document not indexed).
@@ -1117,12 +1129,18 @@ For data commands, effective concerns are resolved in order:
 Defaults are persisted in database metadata and survive restart.
 
 In v6, static concern validation is widened to bounded concerns for data
-commands (`R, W ∈ [1, N]`). Runtime semantics are now functional for keyed
-`GET` with `R>1`: reads gate on read-quorum liveness/read-ack probes, fan out
-to remote replicas, deterministically select a canonical value, and execute
-local + remote convergence (with durable retry intents when immediate remote
-repair fails). Remaining `R>1` coverage outside keyed `GET` is still in
-progress.
+commands (`R, W ∈ [1, N]`). Runtime semantics are now functional for:
+
+- keyed `GET` with `R>1`: reads gate on read-quorum liveness/read-ack probes,
+  fan out to remote replicas, deterministically select a canonical value, and
+  execute local + remote convergence (with durable retry intents when
+  immediate remote repair fails).
+- secondary-index `QUERY`/`QUERYRANGE` with effective `R>1`: execution gathers
+  local + peer index candidates, hydrates via quorum reads, re-evaluates the
+  predicate against document fields, and returns validated rows.
+
+For `QUERY`/`QUERYRANGE`, `R=1` keeps the local-index fast path. Verified mode
+caps candidate UUIDs at `4096` and returns an error when exceeded.
 
 Each `Command` carries RBAC metadata via `Command::required_action() -> Action` and `Command::target_resource() -> Resource`, used by the session enforcer.
 

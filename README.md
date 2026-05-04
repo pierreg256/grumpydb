@@ -344,14 +344,29 @@ In v5, the server is intentionally locked to single-owner consistency
   strict quorum semantics and commands will fail; keep `R=1` and `W=1`.
 
 In current v6 work, static consistency validation accepts bounded concerns
-(`R, W ∈ [1, N]`) for data commands. Runtime behavior is now functional for the
-implemented keyed `GET` path with `R > 1`: the handler performs read-quorum
-liveness + read-ack quorum checks, fans out value reads to remote replicas over
-the authenticated cluster handshake channel, selects a canonical value
-deterministically, applies local convergence, and attempts immediate remote
-read-repair upserts. Failed immediate repairs are persisted as durable
-`ReadRepairIntent` retries and replayed by a background worker (with
-re-enqueue on failure).
+(`R, W ∈ [1, N]`) for data commands. Runtime behavior is functional for keyed
+`GET` and secondary-index `QUERY`/`QUERYRANGE` when `R > 1`:
+
+- `GET` performs read-quorum liveness + read-ack checks, fans out value reads
+  to remote replicas over the authenticated cluster handshake channel, selects
+  a canonical value deterministically, applies local convergence, and attempts
+  immediate remote read-repair upserts. Failed immediate repairs are persisted
+  as durable `ReadRepairIntent` retries and replayed by a background worker.
+- `QUERY`/`QUERYRANGE` run a verified query path: gather candidate UUIDs from
+  local index plus replica peers, hydrate candidates through quorum reads,
+  re-evaluate the predicate against document fields, and return only validated
+  rows.
+- Fast path is unchanged for `R=1`: local secondary-index lookup behavior is
+  retained.
+- Candidate ceiling is `4096` UUIDs for verified query mode; exceeding it
+  fails the command with an error instead of returning partial results.
+
+Example:
+
+```text
+READ_CONCERN R=2 QUERY users by_email "alice@test.com"
+READ_CONCERN R=2 QUERYRANGE users by_age 20 30
+```
 
 Phases 48/49 remain partial and are not complete yet:
 - Phase 48 partial runtime: durable per-node hinted-handoff JSONL backlog

@@ -16,6 +16,10 @@ Status note (v6 Stream E):
   when quorum cannot be met before `write_ack_timeout_ms`. Quorum failure does
   not imply rollback of an already-applied local write; failed replicas are
   enqueued to hinted handoff for retry.
+- Secondary-index read concern verification is now active for
+  `QUERY`/`QUERYRANGE` with effective `R>1`: the coordinator fans out index
+  candidate RPCs to peers, then the handler validates rows via quorum document
+  reads before returning results.
 
 ## Mental model
 
@@ -55,8 +59,22 @@ Example:
 ALTER DATABASE appdb SET CONSISTENCY READ_CONCERN R=1 WRITE_CONCERN W=2
 SHOW DATABASE appdb CONSISTENCY
 WRITE_CONCERN W=1 INSERT users 7b6f4f8e-1f73-4d41-8dd9-2f0f2a9b4a11 {"name":"alice"}
+READ_CONCERN R=2 QUERY users by_email "alice@example.com"
 ALTER DATABASE appdb RESET CONSISTENCY
 ```
+
+For `QUERY`/`QUERYRANGE` with effective `R>1`, the server executes a verified
+path:
+
+1. Gather candidate UUIDs from local secondary index and replica peers.
+2. Read candidate documents through the quorum read path.
+3. Re-evaluate index predicate against hydrated document fields.
+4. Return only rows that validate.
+
+Fast path remains local index-only behavior when `R=1`.
+
+Safety limit: verified query mode enforces a candidate ceiling of `4096` UUIDs.
+When exceeded, the command returns an error (no partial result set).
 
 Single-node caveat: in single-node deployments (`N=1`), concerns above `1`
 (`R>1` or `W>1`) cannot satisfy quorum semantics and requests fail. Use
@@ -285,6 +303,13 @@ escape valves. v5/v6/v7 all read the same `node.json` and the same
   `write_ack_timeout_ms`, the write fails with quorum-wait failure; the local
   replica may already be committed and failed replicas are queued for hinted
   handoff replay.
+- **v6 (read concern runtime expansion)**: handler read-concern validation/wait
+  now also applies to secondary-index `QUERY`/`QUERYRANGE` through synthetic
+  routing keys. For effective `R>1`, the coordinator fans out exact/range index
+  candidate collection to peers, then query execution hydrates candidates via
+  quorum reads and re-validates predicates against document fields before
+  returning rows. `R=1` keeps the original local-index fast path. Verified
+  mode rejects candidate sets above `4096` UUIDs.
 - **v6 (replication apply behavior)**: peer-applied writes auto-create missing
   target tenant/database/collection before apply so replicated
   upserts/deletes can succeed on destination nodes that have not pre-created

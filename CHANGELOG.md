@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request wrapper -> database defaults -> fallback `R=1/W=1`.
 - Database consistency defaults are persisted in database metadata and survive
   restart.
+- Added peer RPC operations for secondary-index candidate fanout and
+  coordinator support for exact/range candidate collection from replica peers.
+- Handler now applies read-concern runtime validation/wait to `QUERY` and
+  `QUERYRANGE` via synthetic routing keys.
+- For `QUERY`/`QUERYRANGE` with effective `R>1`, server query execution now
+  runs in verified mode:
+  - gather local + remote index candidate UUIDs,
+  - hydrate candidates through quorum reads,
+  - re-evaluate the index predicate against hydrated document fields,
+  - return only validated rows.
+- `R=1` keeps the existing local secondary-index fast path.
+- Added verified-query candidate ceiling: `4096` UUIDs (command errors when
+  exceeded).
 
 - Phase 46 (conflict resolution runtime) entered implementation with a
   foundation tranche across `grumpydb`, `grumpydb-server`, and `grumpy-repl`.
