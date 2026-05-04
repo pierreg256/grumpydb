@@ -619,11 +619,24 @@ async fn verify_index_query_quorum(
                     value,
                 )
                 .await;
-            for (_node_id, res) in remote {
-                if let Ok(keys) = res {
-                    for key in keys {
-                        if let Ok(id) = Uuid::parse_str(&key) {
+            for (node_id, res) in remote {
+                let keys = match res {
+                    Ok(keys) => keys,
+                    Err(e) => {
+                        return Response::Error(format!(
+                            "verified query failed to fetch candidates from peer {node_id}: {e}"
+                        ));
+                    }
+                };
+                for key in keys {
+                    match Uuid::parse_str(&key) {
+                        Ok(id) => {
                             let _ = candidates.insert(id);
+                        }
+                        Err(e) => {
+                            return Response::Error(format!(
+                                "verified query received invalid candidate key from peer {node_id}: {e}"
+                            ));
                         }
                     }
                 }
@@ -727,11 +740,24 @@ async fn verify_index_query_quorum(
                     end,
                 )
                 .await;
-            for (_node_id, res) in remote {
-                if let Ok(keys) = res {
-                    for key in keys {
-                        if let Ok(id) = Uuid::parse_str(&key) {
+            for (node_id, res) in remote {
+                let keys = match res {
+                    Ok(keys) => keys,
+                    Err(e) => {
+                        return Response::Error(format!(
+                            "verified query failed to fetch candidates from peer {node_id}: {e}"
+                        ));
+                    }
+                };
+                for key in keys {
+                    match Uuid::parse_str(&key) {
+                        Ok(id) => {
                             let _ = candidates.insert(id);
+                        }
+                        Err(e) => {
+                            return Response::Error(format!(
+                                "verified query received invalid candidate key from peer {node_id}: {e}"
+                            ));
                         }
                     }
                 }
@@ -815,9 +841,15 @@ async fn resolve_quorum_document_for_key(
     if let Some(v) = local_value_json {
         values.push(v);
     }
-    for (_node_id, res) in remote_reads {
-        if let Ok(Some(v)) = res {
-            values.push(v);
+    for (node_id, res) in remote_reads {
+        match res {
+            Ok(Some(v)) => values.push(v),
+            Ok(None) => {}
+            Err(e) => {
+                return Err(format!(
+                    "verified query failed to read candidate from peer {node_id}: {e}"
+                ));
+            }
         }
     }
     if values.is_empty() {
