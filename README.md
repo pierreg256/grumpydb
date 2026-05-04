@@ -523,6 +523,7 @@ For v5 migration and clustering demo assets:
 - Migration guide: `docs/MIGRATING_4_to_5.md`
 - 3-node demo compose: `docker-compose.cluster.yml`
 - Cluster smoke test script: `scripts/smoke_cluster.sh`
+- Cluster convergence script: `scripts/convergence_cluster.sh`
 - Demo node configs: `docker/cluster/node1.toml`, `docker/cluster/node2.toml`, `docker/cluster/node3.toml`
 
 Quick smoke run (uses `GRUMPYDB_BOOTSTRAP_PASSWORD=admin` by default):
@@ -531,6 +532,11 @@ Quick smoke run (uses `GRUMPYDB_BOOTSTRAP_PASSWORD=admin` by default):
 scripts/smoke_cluster.sh
 # override password and keep the cluster up for manual checks:
 GRUMPYDB_BOOTSTRAP_PASSWORD=monsecret scripts/smoke_cluster.sh --keep-up
+
+# convergence-oriented churn/replay scenario (stops/restarts node2)
+GRUMPYDB_BOOTSTRAP_PASSWORD=monsecret scripts/convergence_cluster.sh
+# keep cluster up for manual follow-up checks:
+GRUMPYDB_BOOTSTRAP_PASSWORD=monsecret scripts/convergence_cluster.sh --keep-up
 ```
 
 ## Backup & Restore

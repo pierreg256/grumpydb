@@ -31,3 +31,4 @@ drivers/typescript/*.tsbuildinfo
 # Docker local cluster runtime/auth artifacts
 docker/cluster/data/**/_auth/
 docker/cluster/data/**/_cluster/
+docker/cluster/data/**/_system/

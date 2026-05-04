@@ -71,6 +71,12 @@ docker compose --profile repl run --rm repl \
 scripts/smoke_cluster.sh
 GRUMPYDB_BOOTSTRAP_PASSWORD=monsecret scripts/smoke_cluster.sh --keep-up
 
+# 3-node convergence/churn scenario (topology-aware).
+# For N>=2: node2 outage + W=N writes (quorum failures), hinted backlog enqueue/drain,
+# and rebalance control-plane sanity. For N<2: control-plane-only churn checks.
+scripts/convergence_cluster.sh
+GRUMPYDB_BOOTSTRAP_PASSWORD=monsecret scripts/convergence_cluster.sh --keep-up
+
 # TypeScript driver (drivers/typescript/)
 cd drivers/typescript && npm ci && npm run lint && npm test && npm run build
 ```
