@@ -49,10 +49,26 @@ pub async fn listen(
         None
     };
 
+    let local_node_id = identity.node_id.to_string();
+    let coordinator_local_addr = config
+        .cluster
+        .peers
+        .iter()
+        .find(|p| p.node_id == local_node_id && !p.addr.is_empty())
+        .map(|p| p.addr.as_str())
+        .or({
+            if config.cluster.listen_peer.is_empty() {
+                None
+            } else {
+                Some(config.cluster.listen_peer.as_str())
+            }
+        })
+        .unwrap_or(config.server.bind.as_str());
+
     let coordinator = Arc::new(Coordinator::from_config(
         identity.as_ref(),
         &config.cluster,
-        &config.server.bind,
+        coordinator_local_addr,
     ));
     let hint_store = Arc::new(HintStore::open(&config.server.data_dir)?);
     let read_repair_store = Arc::new(ReadRepairStore::open(&config.server.data_dir)?);

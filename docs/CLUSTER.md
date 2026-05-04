@@ -135,9 +135,14 @@ For `TOPOLOGY`, runtime values are canonicalized for stability:
 - If the local `node_id` is duplicated in static `[cluster].peers`, the
   runtime-local entry remains authoritative (`up`, bound listen addr,
   `last_seen_at_unix = now`) and is not overwritten by static optional fields.
+- The local advertised peer address used by the coordinator prefers, in order:
+  local node `addr` from static `[cluster].peers`, then `[cluster].listen_peer`,
+  then `[server].bind` as fallback.
 - Incoming gossip with `status = "unknown"` and `last_seen_at_unix = Some(_)`
   is normalized to `"up"`.
 - Existing known status is never downgraded to `"unknown"` by fresher gossip.
+- Existing routable peer addresses are not overwritten by unroutable advertised
+  hosts (`0.0.0.0`, `127.0.0.1`, `::`, `[::]`) received via gossip merge.
 
 ## Handshake protocol (v5)
 

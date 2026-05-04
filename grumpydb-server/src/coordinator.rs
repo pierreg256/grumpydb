@@ -1063,7 +1063,9 @@ fn merge_peer_runtime(
 
     match peers.get_mut(node_id) {
         Some(existing) => {
-            if !incoming_addr.is_empty() {
+            if !incoming_addr.is_empty()
+                && (!is_unroutable_advertised_addr(incoming_addr) || existing.addr.is_empty())
+            {
                 existing.addr = incoming_addr.to_string();
             }
             if incoming_is_fresher(existing.last_seen_at_unix, last_seen_at_unix) {
@@ -1095,6 +1097,11 @@ fn canonical_status(status: &str, last_seen_at_unix: Option<u64>) -> String {
     } else {
         status.to_string()
     }
+}
+
+fn is_unroutable_advertised_addr(addr: &str) -> bool {
+    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
+    host == "0.0.0.0" || host == "127.0.0.1" || host == "::" || host == "[::]"
 }
 
 impl Coordinator {
@@ -1253,6 +1260,34 @@ mod tests {
 
         let p = peers.get("n2").expect("peer exists");
         assert_eq!(p.status, "up");
+        assert_eq!(p.last_seen_at_unix, Some(200));
+    }
+
+    #[test]
+    fn test_merge_peer_runtime_does_not_override_routable_addr_with_wildcard() {
+        let mut peers = BTreeMap::new();
+        peers.insert(
+            "n2".to_string(),
+            PeerRuntime {
+                addr: "node2:7390".to_string(),
+                status: "up".to_string(),
+                last_seen_at_unix: Some(100),
+                vnode_assignments: vec![0, 1],
+            },
+        );
+
+        merge_peer_runtime(
+            &mut peers,
+            "n2",
+            Some("0.0.0.0:7390"),
+            "up",
+            Some(200),
+            &[0, 1],
+            128,
+        );
+
+        let p = peers.get("n2").expect("peer exists");
+        assert_eq!(p.addr, "node2:7390");
         assert_eq!(p.last_seen_at_unix, Some(200));
     }
 

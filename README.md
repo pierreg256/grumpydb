@@ -295,8 +295,11 @@ The TCP protocol now exposes coordinator and consistency-locking primitives:
 
 - `TOPOLOGY` returns a JSON cluster snapshot for smart clients, with
   canonicalized runtime status merge rules (avoid local self-entry overwrite,
-  normalize `unknown`+`last_seen` to `up`, and prevent known -> `unknown`
-  downgrades).
+  normalize `unknown`+`last_seen` to `up`, prevent known -> `unknown`
+  downgrades, prefer local advertised peer address resolution in order
+  `peers(local node)` -> `listen_peer` -> `server.bind`, and avoid replacing a
+  known routable peer address with wildcard/loopback hosts
+  (`0.0.0.0`, `127.0.0.1`, `::`, `[::]`).
 - `READ_CONCERN R=<n>` / `WRITE_CONCERN W=<n>` can prefix data commands.
 - `PUT_WITH_VC <collection> <uuid> <json> <vector_clock>` is accepted for
   reconciled writes (vector clock validated as JSON).
