@@ -440,6 +440,86 @@ async fn test_e2e_database_level_consistency_defaults_and_override_precedence() 
 }
 
 #[tokio::test]
+async fn test_e2e_index_query_respects_db_read_concern_default_and_override() {
+    let server = TestServer::spawn().await;
+    let mut client = admin_client(&server).await;
+    client
+        .create_database("idx_consistency_db")
+        .await
+        .expect("create db");
+
+    let use_resp = client
+        .raw_execute("USE idx_consistency_db")
+        .await
+        .expect("use");
+    assert!(
+        matches!(use_resp, grumpydb_protocol::Response::Ok(_)),
+        "USE failed: {use_resp:?}"
+    );
+
+    let create_coll = client
+        .raw_execute("CREATE COLLECTION users")
+        .await
+        .expect("create collection");
+    assert!(
+        matches!(create_coll, grumpydb_protocol::Response::Ok(_)),
+        "CREATE COLLECTION failed: {create_coll:?}"
+    );
+
+    let create_idx = client
+        .raw_execute("CREATE INDEX users name_idx name")
+        .await
+        .expect("create index");
+    assert!(
+        matches!(create_idx, grumpydb_protocol::Response::Ok(_)),
+        "CREATE INDEX failed: {create_idx:?}"
+    );
+
+    let key = Uuid::new_v4();
+    let insert = client
+        .raw_execute(&format!(
+            "INSERT users {key} {{\"name\":\"alice\",\"age\":30}}"
+        ))
+        .await
+        .expect("insert");
+    assert!(
+        matches!(insert, grumpydb_protocol::Response::Ok(_)),
+        "INSERT failed: {insert:?}"
+    );
+
+    let set_resp = client
+        .raw_execute("ALTER DATABASE idx_consistency_db SET CONSISTENCY READ_CONCERN R=2")
+        .await
+        .expect("set consistency");
+    assert!(
+        matches!(set_resp, grumpydb_protocol::Response::Ok(_)),
+        "ALTER DATABASE SET failed: {set_resp:?}"
+    );
+
+    // R=2 from database default should reject on single-node topology.
+    let query_default = client
+        .raw_execute("QUERY users name_idx \"alice\"")
+        .await
+        .expect("query default concern");
+    assert!(
+        matches!(query_default, grumpydb_protocol::Response::Error(_)),
+        "expected QUERY to fail with default R=2, got: {query_default:?}"
+    );
+
+    // Per-request override must bypass the DB default.
+    let query_override = client
+        .raw_execute("READ_CONCERN R=1 QUERY users name_idx \"alice\"")
+        .await
+        .expect("query override concern");
+    match query_override {
+        grumpydb_protocol::Response::Array(items) => {
+            assert_eq!(items.len(), 1, "expected one row from QUERY override")
+        }
+        other => panic!("unexpected QUERY override response: {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn test_e2e_snapshot_hlc_exposed_to_clients() {
     let server = TestServer::spawn().await;
     let mut client = admin_client(&server).await;
