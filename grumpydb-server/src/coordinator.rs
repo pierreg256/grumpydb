@@ -85,13 +85,19 @@ impl Coordinator {
             vnode_assignments,
         } in &cluster.peers
         {
+            // Some deployments list the local node in `[cluster].peers`.
+            // Keep the runtime-local entry (`up`, bound addr, last_seen=now)
+            // instead of overriding it with optional static fields.
+            if node_id == &local_node_id {
+                continue;
+            }
             ring.add_node(node_id.clone());
             peer_addrs.insert(node_id.clone(), addr.clone());
             peers.insert(
                 node_id.clone(),
                 PeerRuntime {
                     addr: addr.clone(),
-                    status: status.clone().unwrap_or_else(|| "unknown".to_string()),
+                    status: canonical_status(status.as_deref().unwrap_or("unknown"), *last_seen_at_unix),
                     last_seen_at_unix: *last_seen_at_unix,
                     vnode_assignments: if vnode_assignments.is_empty() {
                         default_vnode_assignments(cluster.vnodes_per_node)
@@ -1040,6 +1046,7 @@ fn merge_peer_runtime(
     vnode_assignments: &[u32],
     vnodes_per_node: u32,
 ) {
+    let incoming_status = canonical_status(status, last_seen_at_unix);
     let incoming_vnodes = if vnode_assignments.is_empty() {
         default_vnode_assignments(vnodes_per_node)
     } else {
@@ -1060,7 +1067,10 @@ fn merge_peer_runtime(
                 existing.addr = incoming_addr.to_string();
             }
             if incoming_is_fresher(existing.last_seen_at_unix, last_seen_at_unix) {
-                existing.status = status.to_string();
+                // Do not downgrade a known runtime status to `unknown`.
+                if incoming_status != "unknown" || existing.status.eq_ignore_ascii_case("unknown") {
+                    existing.status = incoming_status;
+                }
                 existing.last_seen_at_unix = last_seen_at_unix;
                 existing.vnode_assignments = incoming_vnodes;
             }
@@ -1070,12 +1080,20 @@ fn merge_peer_runtime(
                 node_id.to_string(),
                 PeerRuntime {
                     addr: incoming_addr.to_string(),
-                    status: status.to_string(),
+                    status: incoming_status,
                     last_seen_at_unix,
                     vnode_assignments: incoming_vnodes,
                 },
             );
         }
+    }
+}
+
+fn canonical_status(status: &str, last_seen_at_unix: Option<u64>) -> String {
+    if status.eq_ignore_ascii_case("unknown") && last_seen_at_unix.is_some() {
+        "up".to_string()
+    } else {
+        status.to_string()
     }
 }
 
@@ -1169,6 +1187,73 @@ mod tests {
         let c = Coordinator::from_config(&identity(), &cluster, "127.0.0.1:6380");
         let topo = c.topology_json();
         assert_eq!(topo.get("n").and_then(|v| v.as_u64()), Some(3));
+    }
+
+    #[test]
+    fn test_from_config_ignores_duplicate_local_peer_entry() {
+        let id = identity();
+        let mut cluster = ClusterSection::default();
+        cluster.peers.push(PeerEntry {
+            node_id: id.node_id.to_string(),
+            addr: "node1:7390".to_string(),
+            status: None,
+            last_seen_at_unix: None,
+            vnode_assignments: vec![],
+        });
+
+        let c = Coordinator::from_config(&id, &cluster, "127.0.0.1:6380");
+        let topo = c.topology_json();
+        let peers = topo
+            .get("peers")
+            .and_then(|v| v.as_array())
+            .expect("peers array");
+        let local = peers
+            .iter()
+            .find(|p| {
+                p.get("node_id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|nid| nid == id.node_id.to_string())
+            })
+            .expect("local peer in topology");
+        assert_eq!(local.get("status").and_then(|v| v.as_str()), Some("up"));
+        assert_eq!(
+            local.get("addr").and_then(|v| v.as_str()),
+            Some("127.0.0.1:6380")
+        );
+        assert!(
+            local
+                .get("last_seen_at_unix")
+                .and_then(|v| v.as_u64())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_merge_peer_runtime_keeps_known_status_when_incoming_unknown() {
+        let mut peers = BTreeMap::new();
+        peers.insert(
+            "n2".to_string(),
+            PeerRuntime {
+                addr: "node2:7390".to_string(),
+                status: "up".to_string(),
+                last_seen_at_unix: Some(100),
+                vnode_assignments: vec![0, 1],
+            },
+        );
+
+        merge_peer_runtime(
+            &mut peers,
+            "n2",
+            Some("node2:7390"),
+            "unknown",
+            Some(200),
+            &[0, 1],
+            128,
+        );
+
+        let p = peers.get("n2").expect("peer exists");
+        assert_eq!(p.status, "up");
+        assert_eq!(p.last_seen_at_unix, Some(200));
     }
 
     #[test]

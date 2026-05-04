@@ -130,6 +130,15 @@ The reserved fields on each `PeerEntry` (`status`, `last_seen_at_unix`,
 these fields in memory and converges membership runtime state from handshake
 payload exchanges.
 
+For `TOPOLOGY`, runtime values are canonicalized for stability:
+
+- If the local `node_id` is duplicated in static `[cluster].peers`, the
+  runtime-local entry remains authoritative (`up`, bound listen addr,
+  `last_seen_at_unix = now`) and is not overwritten by static optional fields.
+- Incoming gossip with `status = "unknown"` and `last_seen_at_unix = Some(_)`
+  is normalized to `"up"`.
+- Existing known status is never downgraded to `"unknown"` by fresher gossip.
+
 ## Handshake protocol (v5)
 
 Every TCP+TLS connection on the cluster port begins with a single
@@ -227,6 +236,8 @@ escape valves. v5/v6/v7 all read the same `node.json` and the same
   `vnode_assignments` fields in the topology schema. In Phase 44, status
   transitions (`up`, `suspect`, `down`) are driven by periodic probes and
   membership converges by exchanging runtime gossip payloads over handshake.
+  Topology merge logic also canonicalizes unstable `unknown` states so runtime
+  status reporting remains consistent.
 - **v6 (multi-writer, Phase 45 complete)**: write-path admission accepts local
   writes when the local node is part of the ring preference list
   (`N=min(3, cluster_size)`), static validation accepts `W ∈ [1, N]`
