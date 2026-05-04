@@ -287,4 +287,65 @@ mod tests {
         let targets = store.list_targets().expect("targets");
         assert_eq!(targets, vec!["node-a".to_string(), "node-c".to_string()]);
     }
+
+    #[test]
+    fn test_hint_record_resolved_operation_prefers_modern_operation() {
+        let hint = HintRecord {
+            created_at_unix: 1,
+            tenant: "t".to_string(),
+            database: "db".to_string(),
+            collection: "c".to_string(),
+            key: "k".to_string(),
+            operation: Some(HintOperation::Delete),
+            payload_json: Some("{\"x\":1}".to_string()),
+        };
+        assert_eq!(hint.resolved_operation(), HintOperation::Delete);
+    }
+
+    #[test]
+    fn test_hint_record_resolved_operation_legacy_delete_payload() {
+        let hint = HintRecord {
+            created_at_unix: 1,
+            tenant: "t".to_string(),
+            database: "db".to_string(),
+            collection: "c".to_string(),
+            key: "k".to_string(),
+            operation: None,
+            payload_json: Some("{\"$delete\":true}".to_string()),
+        };
+        assert_eq!(hint.resolved_operation(), HintOperation::Delete);
+    }
+
+    #[test]
+    fn test_hint_record_resolved_operation_legacy_upsert_payload() {
+        let hint = HintRecord {
+            created_at_unix: 1,
+            tenant: "t".to_string(),
+            database: "db".to_string(),
+            collection: "c".to_string(),
+            key: "k".to_string(),
+            operation: None,
+            payload_json: Some("{\"name\":\"alice\"}".to_string()),
+        };
+        assert_eq!(
+            hint.resolved_operation(),
+            HintOperation::Upsert {
+                value_json: "{\"name\":\"alice\"}".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_hint_record_deserialize_legacy_defaults_tenant_and_operation() {
+        let raw = r#"{"created_at_unix":1,"database":"db","collection":"c","key":"k","payload_json":"{\"name\":\"alice\"}"}"#;
+        let hint: HintRecord = serde_json::from_str(raw).expect("deserialize legacy hint");
+        assert_eq!(hint.tenant, "_default");
+        assert!(hint.operation.is_none());
+        assert_eq!(
+            hint.resolved_operation(),
+            HintOperation::Upsert {
+                value_json: "{\"name\":\"alice\"}".to_string()
+            }
+        );
+    }
 }

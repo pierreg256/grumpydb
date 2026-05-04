@@ -1489,4 +1489,29 @@ mod tests {
         );
         assert_eq!(out.get("failed").and_then(|v| v.as_u64()), Some(0));
     }
+
+    #[tokio::test]
+    async fn test_replay_hint_to_peer_returns_error_for_unknown_peer() {
+        let c = Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        let hint = HintRecord {
+            created_at_unix: 1,
+            tenant: "tenant".to_string(),
+            database: "db".to_string(),
+            collection: "users".to_string(),
+            key: "11111111-1111-1111-1111-111111111111".to_string(),
+            operation: Some(HintOperation::Delete),
+            payload_json: None,
+        };
+        let err = c
+            .replay_hint_to_peer("unknown-peer", &hint)
+            .await
+            .expect_err("unknown peer should error");
+        assert!(err.contains("unknown peer"), "got: {err}");
+    }
+
+    #[test]
+    fn test_peer_is_live_returns_false_for_unknown_peer() {
+        let c = Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        assert!(!c.peer_is_live("unknown-peer"));
+    }
 }
