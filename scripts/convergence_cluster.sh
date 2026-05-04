@@ -116,6 +116,45 @@ hint_line_count() {
   done | awk '{sum += $1} END {print sum + 0}'
 }
 
+hint_line_count_all_nodes() {
+  local total=0
+  local path
+  for path in \
+    "docker/cluster/data/node1/_cluster/hints" \
+    "docker/cluster/data/node2/_cluster/hints" \
+    "docker/cluster/data/node3/_cluster/hints"; do
+    if [[ -d "$path" ]]; then
+      count=$(find "$path" -maxdepth 1 -type f -name '*.jsonl' 2>/dev/null | while read -r f; do
+        wc -l < "$f"
+      done | awk '{sum += $1} END {print sum + 0}')
+      total=$((total + count))
+    fi
+  done
+  echo "$total"
+}
+
+port_for_peer_host() {
+  local host="$1"
+  case "$host" in
+    node1) echo 6380 ;;
+    node2) echo 6382 ;;
+    node3) echo 6383 ;;
+    *) echo "" ;;
+  esac
+}
+
+extract_forward_port() {
+  local out="$1"
+  local addr host
+  addr=$(echo "$out" | sed -n 's/.*forward to [^@]*@\([^; ]*\).*/\1/p' | head -n1)
+  host="${addr%%:*}"
+  if [[ -z "$host" || "$host" == "$addr" ]]; then
+    echo ""
+    return
+  fi
+  port_for_peer_host "$host"
+}
+
 metric_value() {
   local metric="$1"
   local body
@@ -154,26 +193,56 @@ echo "    detected N=$REPLICATION_N"
 echo "==> Stopping node2 to induce churn"
 docker compose -f "$COMPOSE_FILE_PATH" stop node2 >/dev/null
 
-echo "==> Waiting ${CHURN_SETTLE_SECONDS}s for liveness to mark node2 down"
-sleep "$CHURN_SETTLE_SECONDS"
+echo "==> Starting writes immediately (before gossip marks node2 down)"
 
 if [[ "$REPLICATION_N" -ge 2 ]]; then
   echo "==> Issuing writes with WRITE_CONCERN W=$REPLICATION_N until hinted backlog appears"
   failures=0
   backlog_seen=0
+  availability_rejections=0
   for i in $(seq 1 "$MAX_WRITE_ATTEMPTS"); do
-    uuid=$(printf '00000000-0000-0000-0000-%012d' "$i")
+    if command -v uuidgen >/dev/null 2>&1; then
+      uuid=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    else
+      uuid=$(printf '00000000-0000-0000-0000-%012d' "$i")
+    fi
     cmd="WRITE_CONCERN W=$REPLICATION_N INSERT $COLLECTION_NAME $uuid {\"i\":$i,\"phase\":\"churn\"}"
+
+    # With node2 down, write against currently-up nodes and follow forward
+    # only when target is also up.
+    if (( i % 2 == 0 )); then
+      attempt_port=6383
+    else
+      attempt_port=6380
+    fi
+
     set +e
-    out=$(run_authed_command 6380 "$cmd")
+    out=$(run_authed_command "$attempt_port" "$cmd")
     rc=$?
     set -e
+
+    if [[ "$rc" -eq 2 ]]; then
+      if echo "$out" | grep -q "forward to "; then
+        forwarded_port=$(extract_forward_port "$out")
+        if [[ "$forwarded_port" == "6380" || "$forwarded_port" == "6383" ]]; then
+          set +e
+          out=$(run_authed_command "$forwarded_port" "$cmd")
+          rc=$?
+          set -e
+        fi
+      fi
+    fi
+
     if [[ "$rc" -eq 2 ]]; then
       failures=$((failures + 1))
+      if echo "$out" | grep -q "not enough live replicas for W="; then
+        availability_rejections=$((availability_rejections + 1))
+      fi
     fi
+
     echo "$out" >/dev/null
 
-    if [[ "$(hint_line_count)" -gt 0 ]]; then
+    if [[ "$(hint_line_count_all_nodes)" -gt 0 ]]; then
       backlog_seen=1
       break
     fi
@@ -185,12 +254,21 @@ if [[ "$REPLICATION_N" -ge 2 ]]; then
   fi
 
   echo "==> Verifying hinted backlog exists"
-  before_lines=$(hint_line_count)
+  before_lines=$(hint_line_count_all_nodes)
   if [[ "$before_lines" -le 0 || "$backlog_seen" -ne 1 ]]; then
     enqueued=$(metric_value "grumpydb_hints_enqueued_total")
-    echo "ERROR: no hinted backlog detected under docker/cluster/data/node1/_cluster/hints"
+    echo "ERROR: no hinted backlog detected under docker/cluster/data/node*/_cluster/hints"
     echo "       hints_enqueued_total=$enqueued failures=$failures attempts=$MAX_WRITE_ATTEMPTS"
+    if [[ "$availability_rejections" -gt 0 ]]; then
+      echo "       availability_rejections=$availability_rejections (writes rejected before hint enqueue)"
+      echo "       try lowering CHURN_SETTLE_SECONDS or increasing MAX_WRITE_ATTEMPTS"
+    fi
     exit 1
+  fi
+
+  if [[ "$CHURN_SETTLE_SECONDS" -gt 0 ]]; then
+    echo "==> Waiting ${CHURN_SETTLE_SECONDS}s for liveness convergence"
+    sleep "$CHURN_SETTLE_SECONDS"
   fi
 else
   echo "==> N<2 detected: skipping hinted-handoff assertions (W=2 path unavailable)"
@@ -207,7 +285,7 @@ if [[ "$REPLICATION_N" -ge 2 ]]; then
   echo "==> Waiting for hinted backlog drain"
   drained=0
   for _ in $(seq 1 "$REPLAY_TIMEOUT_SECONDS"); do
-    now_lines=$(hint_line_count)
+    now_lines=$(hint_line_count_all_nodes)
     if [[ "$now_lines" -eq 0 ]]; then
       drained=1
       break

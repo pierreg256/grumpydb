@@ -319,6 +319,127 @@ async fn test_e2e_rejects_r_gt_1_when_single_node_has_insufficient_replicas() {
 }
 
 #[tokio::test]
+async fn test_e2e_database_level_consistency_defaults_and_override_precedence() {
+    let server = TestServer::spawn().await;
+    let mut client = admin_client(&server).await;
+    client
+        .create_database("consistency_db")
+        .await
+        .expect("create db");
+
+    let use_resp = client.raw_execute("USE consistency_db").await.expect("use");
+    assert!(
+        matches!(use_resp, grumpydb_protocol::Response::Ok(_)),
+        "USE failed: {use_resp:?}"
+    );
+
+    let create_coll = client
+        .raw_execute("CREATE COLLECTION users")
+        .await
+        .expect("create collection");
+    assert!(
+        matches!(create_coll, grumpydb_protocol::Response::Ok(_)),
+        "CREATE COLLECTION failed: {create_coll:?}"
+    );
+
+    let set_resp = client
+        .raw_execute(
+            "ALTER DATABASE consistency_db SET CONSISTENCY READ_CONCERN R=2 WRITE_CONCERN W=2",
+        )
+        .await
+        .expect("set consistency");
+    assert!(
+        matches!(set_resp, grumpydb_protocol::Response::Ok(_)),
+        "ALTER DATABASE SET failed: {set_resp:?}"
+    );
+
+    let show_resp = client
+        .raw_execute("SHOW DATABASE consistency_db CONSISTENCY")
+        .await
+        .expect("show consistency");
+    let show_json = match show_resp {
+        grumpydb_protocol::Response::Bulk(Some(s)) => s,
+        other => panic!("unexpected SHOW response: {other:?}"),
+    };
+    let show_value: serde_json::Value = serde_json::from_str(&show_json).expect("valid show json");
+    assert_eq!(show_value.get("database"), Some(&json!("consistency_db")));
+    assert_eq!(show_value.get("read_concern"), Some(&json!(2)));
+    assert_eq!(show_value.get("write_concern"), Some(&json!(2)));
+
+    // Default W=2 applies to plain writes and fails on a single-node topology.
+    let failing_key = Uuid::new_v4();
+    let write_with_db_default = client
+        .raw_execute(&format!(
+            "INSERT users {failing_key} {{\"name\":\"blocked_by_default\"}}"
+        ))
+        .await
+        .expect("insert with db default");
+    assert!(
+        matches!(write_with_db_default, grumpydb_protocol::Response::Error(_)),
+        "expected write to fail due to default W=2, got: {write_with_db_default:?}"
+    );
+
+    // Per-request override must take precedence over DB default.
+    let ok_key = Uuid::new_v4();
+    let write_override = client
+        .raw_execute(&format!(
+            "WRITE_CONCERN W=1 INSERT users {ok_key} {{\"name\":\"override_ok\"}}"
+        ))
+        .await
+        .expect("insert with override");
+    assert!(
+        matches!(write_override, grumpydb_protocol::Response::Ok(_)),
+        "override write should succeed, got: {write_override:?}"
+    );
+
+    let read_with_db_default = client
+        .raw_execute(&format!("GET users {ok_key}"))
+        .await
+        .expect("get with db default");
+    assert!(
+        matches!(read_with_db_default, grumpydb_protocol::Response::Error(_)),
+        "expected read to fail due to default R=2, got: {read_with_db_default:?}"
+    );
+
+    let read_override = client
+        .raw_execute(&format!("READ_CONCERN R=1 GET users {ok_key}"))
+        .await
+        .expect("get with override");
+    assert!(
+        matches!(read_override, grumpydb_protocol::Response::Bulk(Some(_))),
+        "override read should succeed, got: {read_override:?}"
+    );
+
+    let reset_resp = client
+        .raw_execute("ALTER DATABASE consistency_db RESET CONSISTENCY")
+        .await
+        .expect("reset consistency");
+    assert!(
+        matches!(reset_resp, grumpydb_protocol::Response::Ok(_)),
+        "ALTER DATABASE RESET failed: {reset_resp:?}"
+    );
+
+    let show_after_reset = client
+        .raw_execute("SHOW DATABASE consistency_db CONSISTENCY")
+        .await
+        .expect("show after reset");
+    let reset_json = match show_after_reset {
+        grumpydb_protocol::Response::Bulk(Some(s)) => s,
+        other => panic!("unexpected SHOW response after reset: {other:?}"),
+    };
+    let reset_value: serde_json::Value =
+        serde_json::from_str(&reset_json).expect("valid reset show json");
+    assert_eq!(
+        reset_value.get("read_concern"),
+        Some(&serde_json::Value::Null)
+    );
+    assert_eq!(
+        reset_value.get("write_concern"),
+        Some(&serde_json::Value::Null)
+    );
+}
+
+#[tokio::test]
 async fn test_e2e_snapshot_hlc_exposed_to_clients() {
     let server = TestServer::spawn().await;
     let mut client = admin_client(&server).await;

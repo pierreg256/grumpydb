@@ -1087,7 +1087,7 @@ Client                                            Server
 |-------|----------|
 | Auth | `LOGIN`, `TOKEN`, `REFRESH`, `WHOAMI` |
 | Session | `USE`, `PING`, `QUIT`, `TOPOLOGY`, `SNAPSHOT_HLC` |
-| Database | `CREATE DATABASE`, `DROP DATABASE`, `LIST DATABASES` |
+| Database | `CREATE DATABASE`, `DROP DATABASE`, `LIST DATABASES`, `ALTER DATABASE <db> SET CONSISTENCY ...`, `ALTER DATABASE <db> RESET CONSISTENCY`, `SHOW DATABASE <db> CONSISTENCY` |
 | Collection | `CREATE COLLECTION`, `DROP COLLECTION`, `LIST COLLECTIONS` |
 | CRUD | `INSERT`, `GET`, `UPDATE`, `DELETE`, `PUT_WITH_VC`, `SCAN` |
 | Index | `CREATE INDEX`, `DROP INDEX`, `LIST INDEXES`, `QUERY`, `QUERYRANGE` |
@@ -1102,6 +1102,19 @@ are accepted only for data commands (`INSERT`, `GET`, `UPDATE`, `DELETE`,
 `PUT_WITH_VC`, `SCAN`, `QUERY`, `QUERYRANGE`, `COUNT`) and only with
 `R=1, W=1`; otherwise the server returns
 `-ERR v5 only supports R=1, W=1`.
+
+Database-level defaults are configured with:
+- `ALTER DATABASE <db> SET CONSISTENCY READ_CONCERN R=<n> [WRITE_CONCERN W=<n>]`
+- `ALTER DATABASE <db> SET CONSISTENCY WRITE_CONCERN W=<n> [READ_CONCERN R=<n>]`
+- `ALTER DATABASE <db> RESET CONSISTENCY`
+- `SHOW DATABASE <db> CONSISTENCY`
+
+For data commands, effective concerns are resolved in order:
+1. request wrapper (`READ_CONCERN` / `WRITE_CONCERN`)
+2. database defaults
+3. fallback `R=1`, `W=1`
+
+Defaults are persisted in database metadata and survive restart.
 
 In v6, static concern validation is widened to bounded concerns for data
 commands (`R, W ∈ [1, N]`). Runtime semantics are now functional for keyed
@@ -1271,6 +1284,8 @@ Each connection is spawned in its own tokio task. The handler:
   `WRITE_CONCERN W` and `READ_CONCERN R` in `[1, N]`.
   Read/non-write commands carrying `WRITE_CONCERN` return a clear validation
   error (`-ERR consistency concerns are only supported for data commands`).
+  When no wrapper concern is provided, the handler resolves effective
+  concerns from database defaults before falling back to `R=1`, `W=1`.
 4. Calls `session.authorize(&cmd)` (returns `-ERR access denied` on failure).
 5. For key-based write commands, applies runtime write-concern validation after
   auth and before execution. In v6 Phase 45, requested `W` must be

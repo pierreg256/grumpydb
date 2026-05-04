@@ -301,6 +301,11 @@ The TCP protocol now exposes coordinator and consistency-locking primitives:
   known routable peer address with wildcard/loopback hosts
   (`0.0.0.0`, `127.0.0.1`, `::`, `[::]`).
 - `READ_CONCERN R=<n>` / `WRITE_CONCERN W=<n>` can prefix data commands.
+- Database-level consistency defaults are configurable via:
+  - `ALTER DATABASE <db> SET CONSISTENCY READ_CONCERN R=<n> [WRITE_CONCERN W=<n>]`
+  - `ALTER DATABASE <db> SET CONSISTENCY WRITE_CONCERN W=<n> [READ_CONCERN R=<n>]`
+  - `ALTER DATABASE <db> RESET CONSISTENCY`
+  - `SHOW DATABASE <db> CONSISTENCY`
 - `PUT_WITH_VC <collection> <uuid> <json> <vector_clock>` is accepted for
   reconciled writes (vector clock validated as JSON).
 - In the v6 Phase 46 kickoff, `PUT_WITH_VC` now merges values when both the
@@ -310,12 +315,33 @@ The TCP protocol now exposes coordinator and consistency-locking primitives:
   reconciliation remains in progress in Phase 46.
 - TCP JSON bridge CRDT envelope: `{"$crdt":{"kind":"GCounter|PNCounter|LwwSet|OrSet|Mvr","payload_b64":"..."}}`.
 
+Consistency resolution precedence for data commands is:
+1. Per-request wrapper (`READ_CONCERN` / `WRITE_CONCERN`)
+2. Database defaults (from `ALTER DATABASE ... SET CONSISTENCY`)
+3. Fallback defaults (`R=1`, `W=1`)
+
+Database defaults are persisted in database metadata and survive restart.
+
+Examples:
+
+```text
+ALTER DATABASE appdb SET CONSISTENCY READ_CONCERN R=1 WRITE_CONCERN W=2
+SHOW DATABASE appdb CONSISTENCY
+
+READ_CONCERN R=1 GET users 7b6f4f8e-1f73-4d41-8dd9-2f0f2a9b4a11
+WRITE_CONCERN W=1 UPDATE users 7b6f4f8e-1f73-4d41-8dd9-2f0f2a9b4a11 {"name":"alice"}
+
+ALTER DATABASE appdb RESET CONSISTENCY
+```
+
 In v5, the server is intentionally locked to single-owner consistency
 (`N=1`, `R=1`, `W=1`):
 
 - Non-default concerns are rejected with `v5 only supports R=1, W=1`.
 - If a request targets a key owned by another node, the server returns
   `forward to <node>@<addr>; not the owner`.
+- Single-node caveat: with `N=1`, requesting `R>1` or `W>1` is invalid for
+  strict quorum semantics and commands will fail; keep `R=1` and `W=1`.
 
 In current v6 work, static consistency validation accepts bounded concerns
 (`R, W ∈ [1, N]`) for data commands. Runtime behavior is now functional for the

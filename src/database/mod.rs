@@ -42,6 +42,8 @@ const CHECKPOINT_INTERVAL: u32 = 100;
 const IDENTITY_DIR: &str = "_database";
 /// File name for the persisted engine identity.
 const IDENTITY_FILE: &str = "node.json";
+/// File name for persisted database-level consistency defaults.
+const CONSISTENCY_FILE: &str = "consistency.json";
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PersistedIdentity {
@@ -49,6 +51,16 @@ struct PersistedIdentity {
     node_id: String,
     /// Schema version of this file (currently 1).
     schema_version: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+struct PersistedConsistencyDefaults {
+    /// Schema version of this file (currently 1).
+    schema_version: u32,
+    /// Optional default read concern for this database.
+    read_concern: Option<u16>,
+    /// Optional default write concern for this database.
+    write_concern: Option<u16>,
 }
 
 /// A database containing multiple named collections.
@@ -74,6 +86,10 @@ pub struct Database {
     versions: HashMap<String, HashMap<Uuid, Vec<VersionedValue>>>,
     /// Active readers grouped by their snapshot HLC.
     active_readers: BTreeMap<Hlc, usize>,
+    /// Optional database-level defaults used by the server protocol layer.
+    read_concern_default: Option<u16>,
+    /// Optional database-level defaults used by the server protocol layer.
+    write_concern_default: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +181,7 @@ impl Database {
         let wal_path = path.join("wal.log");
         let wal = WalWriter::new_with_identity(&wal_path, node_id, Arc::clone(&clock))?;
         let applied_set = AppliedSet::load(path)?;
+        let (read_concern_default, write_concern_default) = load_consistency_defaults(path)?;
 
         // Discover existing collections by scanning subdirectories
         let mut collections = HashMap::new();
@@ -196,6 +213,8 @@ impl Database {
             applied_set,
             versions: HashMap::new(),
             active_readers: BTreeMap::new(),
+            read_concern_default,
+            write_concern_default,
         })
     }
 
@@ -582,6 +601,37 @@ impl Database {
         Ok(count)
     }
 
+    /// Returns database-level consistency defaults.
+    pub fn consistency_defaults(&self) -> (Option<u16>, Option<u16>) {
+        (self.read_concern_default, self.write_concern_default)
+    }
+
+    /// Sets database-level consistency defaults.
+    pub fn set_consistency_defaults(
+        &mut self,
+        read_concern: Option<u16>,
+        write_concern: Option<u16>,
+    ) -> Result<()> {
+        if read_concern == Some(0) {
+            return Err(GrumpyError::InvalidArgument(
+                "read_concern must be >= 1".into(),
+            ));
+        }
+        if write_concern == Some(0) {
+            return Err(GrumpyError::InvalidArgument(
+                "write_concern must be >= 1".into(),
+            ));
+        }
+        self.read_concern_default = read_concern;
+        self.write_concern_default = write_concern;
+        save_consistency_defaults(&self.path, read_concern, write_concern)
+    }
+
+    /// Resets database-level consistency defaults to engine fallbacks.
+    pub fn reset_consistency_defaults(&mut self) -> Result<()> {
+        self.set_consistency_defaults(None, None)
+    }
+
     /// Closes the database, flushing all data.
     pub fn close(mut self) -> Result<()> {
         // Persist the AppliedSet (no-op in v5 single-writer; the file
@@ -893,6 +943,58 @@ fn load_or_create_identity(path: &Path) -> Result<u128> {
     Ok(new_id.as_u128())
 }
 
+fn load_consistency_defaults(path: &Path) -> Result<(Option<u16>, Option<u16>)> {
+    let file = path.join(IDENTITY_DIR).join(CONSISTENCY_FILE);
+    if !file.exists() {
+        return Ok((None, None));
+    }
+
+    let bytes = std::fs::read(&file)?;
+    let parsed: PersistedConsistencyDefaults = serde_json::from_slice(&bytes)
+        .map_err(|e| GrumpyError::Corruption(format!("invalid {CONSISTENCY_FILE}: {e}")))?;
+
+    if parsed.read_concern == Some(0) {
+        return Err(GrumpyError::Corruption(
+            "invalid consistency default: read_concern must be >= 1".into(),
+        ));
+    }
+    if parsed.write_concern == Some(0) {
+        return Err(GrumpyError::Corruption(
+            "invalid consistency default: write_concern must be >= 1".into(),
+        ));
+    }
+
+    Ok((parsed.read_concern, parsed.write_concern))
+}
+
+fn save_consistency_defaults(
+    path: &Path,
+    read_concern: Option<u16>,
+    write_concern: Option<u16>,
+) -> Result<()> {
+    let dir = path.join(IDENTITY_DIR);
+    let file = dir.join(CONSISTENCY_FILE);
+
+    if read_concern.is_none() && write_concern.is_none() {
+        if file.exists() {
+            std::fs::remove_file(file)?;
+        }
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&dir)?;
+    let body = serde_json::to_vec_pretty(&PersistedConsistencyDefaults {
+        schema_version: 1,
+        read_concern,
+        write_concern,
+    })
+    .map_err(|e| GrumpyError::Corruption(format!("serialize consistency defaults: {e}")))?;
+    let tmp = dir.join(format!("{CONSISTENCY_FILE}.tmp"));
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, &file)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -978,6 +1080,42 @@ mod tests {
 
         db.delete("items", &key).unwrap();
         assert_eq!(db.get("items", &key).unwrap(), None);
+    }
+
+    #[test]
+    fn test_database_consistency_defaults_persist_across_reopen() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("settingsdb");
+
+        {
+            let mut db = Database::open(&db_path).unwrap();
+            db.set_consistency_defaults(Some(2), Some(3)).unwrap();
+            assert_eq!(db.consistency_defaults(), (Some(2), Some(3)));
+            db.close().unwrap();
+        }
+
+        {
+            let db = Database::open(&db_path).unwrap();
+            assert_eq!(db.consistency_defaults(), (Some(2), Some(3)));
+        }
+    }
+
+    #[test]
+    fn test_database_consistency_defaults_reset_removes_file() {
+        let (_dir, mut db) = setup();
+        db.set_consistency_defaults(Some(2), Some(2)).unwrap();
+        db.reset_consistency_defaults().unwrap();
+        assert_eq!(db.consistency_defaults(), (None, None));
+        assert!(!db.path().join(IDENTITY_DIR).join(CONSISTENCY_FILE).exists());
+    }
+
+    #[test]
+    fn test_database_consistency_defaults_reject_zero() {
+        let (_dir, mut db) = setup();
+        let err = db.set_consistency_defaults(Some(0), Some(1)).unwrap_err();
+        assert!(matches!(err, GrumpyError::InvalidArgument(_)));
+        let err = db.set_consistency_defaults(Some(1), Some(0)).unwrap_err();
+        assert!(matches!(err, GrumpyError::InvalidArgument(_)));
     }
 
     #[test]

@@ -170,19 +170,25 @@ where
             continue;
         }
 
-        if let Err(e) = validate_write_concern_runtime(&command, &session, coordinator.as_ref()) {
+        if let Err(e) =
+            validate_write_concern_runtime(&command, &session, coordinator.as_ref(), &shared_server)
+        {
             tracing::warn!(error = %e, "write concern validation failed");
             write_resp(&mut writer, &Response::Error(e)).await?;
             continue;
         }
 
-        if let Err(e) = validate_read_concern_runtime(&command, &session, coordinator.as_ref()) {
+        if let Err(e) =
+            validate_read_concern_runtime(&command, &session, coordinator.as_ref(), &shared_server)
+        {
             tracing::warn!(error = %e, "read concern validation failed");
             write_resp(&mut writer, &Response::Error(e)).await?;
             continue;
         }
 
-        if let Err(e) = wait_for_read_ack_quorum(&command, &session, coordinator.as_ref()).await {
+        if let Err(e) =
+            wait_for_read_ack_quorum(&command, &session, coordinator.as_ref(), &shared_server).await
+        {
             tracing::warn!(error = %e, "read ack quorum failed");
             write_resp(&mut writer, &Response::Error(e)).await?;
             continue;
@@ -222,6 +228,7 @@ where
                 &session,
                 coordinator.as_ref(),
                 pipelines.hint_store.as_ref(),
+                &shared_server,
             )
             .await
         {
@@ -312,7 +319,10 @@ async fn maybe_converge_read_quorum(
     shared_server: &SharedServer,
     repair_store: &ReadRepairStore,
 ) -> Response {
-    let (read_concern, _) = consistency_values(command);
+    let (read_concern, _) = match effective_consistency_values(command, session, shared_server) {
+        Ok(v) => v,
+        Err(_) => return response,
+    };
     if read_concern.unwrap_or(1) <= 1 {
         return response;
     }
@@ -441,6 +451,9 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::CreateDatabase(_) => "CREATE_DATABASE",
         Command::DropDatabase(_) => "DROP_DATABASE",
         Command::ListDatabases => "LIST_DATABASES",
+        Command::SetDatabaseConsistency { .. } => "SET_DATABASE_CONSISTENCY",
+        Command::ResetDatabaseConsistency { .. } => "RESET_DATABASE_CONSISTENCY",
+        Command::ShowDatabaseConsistency { .. } => "SHOW_DATABASE_CONSISTENCY",
         Command::CreateCollection(_) => "CREATE_COLLECTION",
         Command::DropCollection(_) => "DROP_COLLECTION",
         Command::ListCollections => "LIST_COLLECTIONS",
@@ -501,6 +514,25 @@ fn consistency_values(command: &Command) -> (Option<u16>, Option<u16>) {
         } => (*read_concern, *write_concern),
         _ => (None, None),
     }
+}
+
+fn effective_consistency_values(
+    command: &Command,
+    session: &SessionContext,
+    shared_server: &SharedServer,
+) -> Result<(Option<u16>, Option<u16>), String> {
+    let (explicit_read, explicit_write) = consistency_values(command);
+    if explicit_read.is_some() || explicit_write.is_some() {
+        return Ok((explicit_read, explicit_write));
+    }
+
+    let Some(db_name) = session.current_db() else {
+        return Ok((None, None));
+    };
+    let tenant = session.tenant().map_err(|e| e.to_string())?;
+    shared_server
+        .database_consistency_defaults(tenant, db_name)
+        .map_err(|e| e.to_string())
 }
 
 fn supports_consistency(command: &Command) -> bool {
@@ -577,8 +609,9 @@ fn validate_read_concern_runtime(
     command: &Command,
     session: &SessionContext,
     coordinator: &Coordinator,
+    shared_server: &SharedServer,
 ) -> Result<(), String> {
-    let (read_concern, _) = consistency_values(command);
+    let (read_concern, _) = effective_consistency_values(command, session, shared_server)?;
     if read_concern.is_none() {
         return Ok(());
     }
@@ -600,8 +633,9 @@ async fn wait_for_read_ack_quorum(
     command: &Command,
     session: &SessionContext,
     coordinator: &Coordinator,
+    shared_server: &SharedServer,
 ) -> Result<(), String> {
-    let (read_concern, _) = consistency_values(command);
+    let (read_concern, _) = effective_consistency_values(command, session, shared_server)?;
     if read_concern.unwrap_or(1) <= 1 {
         return Ok(());
     }
@@ -622,8 +656,9 @@ fn validate_write_concern_runtime(
     command: &Command,
     session: &SessionContext,
     coordinator: &Coordinator,
+    shared_server: &SharedServer,
 ) -> Result<(), String> {
-    let (_, write_concern) = consistency_values(command);
+    let (_, write_concern) = effective_consistency_values(command, session, shared_server)?;
     if write_concern.is_none() {
         return Ok(());
     }
@@ -646,8 +681,9 @@ async fn wait_for_write_ack_quorum(
     session: &SessionContext,
     coordinator: &Coordinator,
     hint_store: &HintStore,
+    shared_server: &SharedServer,
 ) -> Result<(), String> {
-    let (_, write_concern) = consistency_values(command);
+    let (_, write_concern) = effective_consistency_values(command, session, shared_server)?;
     let w = write_concern.unwrap_or(1) as usize;
     if w <= 1 {
         return Ok(());
@@ -862,6 +898,52 @@ async fn execute_command(
                         dbs.into_iter().map(|d| Response::Bulk(Some(d))).collect();
                     Response::Array(items)
                 }
+                Err(e) => Response::Error(e.to_string()),
+            }
+        }
+        Command::SetDatabaseConsistency {
+            database,
+            read_concern,
+            write_concern,
+        } => {
+            let tenant = match session.tenant() {
+                Ok(t) => t.to_string(),
+                Err(e) => return Response::Error(e.to_string()),
+            };
+            match shared_server.set_database_consistency_defaults(
+                &tenant,
+                database,
+                *read_concern,
+                *write_concern,
+            ) {
+                Ok(()) => Response::Ok("OK".into()),
+                Err(e) => Response::Error(e.to_string()),
+            }
+        }
+        Command::ResetDatabaseConsistency { database } => {
+            let tenant = match session.tenant() {
+                Ok(t) => t.to_string(),
+                Err(e) => return Response::Error(e.to_string()),
+            };
+            match shared_server.reset_database_consistency_defaults(&tenant, database) {
+                Ok(()) => Response::Ok("OK".into()),
+                Err(e) => Response::Error(e.to_string()),
+            }
+        }
+        Command::ShowDatabaseConsistency { database } => {
+            let tenant = match session.tenant() {
+                Ok(t) => t.to_string(),
+                Err(e) => return Response::Error(e.to_string()),
+            };
+            match shared_server.database_consistency_defaults(&tenant, database) {
+                Ok((read_concern, write_concern)) => Response::Bulk(Some(
+                    serde_json::json!({
+                        "database": database,
+                        "read_concern": read_concern,
+                        "write_concern": write_concern,
+                    })
+                    .to_string(),
+                )),
                 Err(e) => Response::Error(e.to_string()),
             }
         }

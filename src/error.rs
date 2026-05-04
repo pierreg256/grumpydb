@@ -52,6 +52,9 @@ pub enum GrumpyError {
     #[error("invalid name: {0}")]
     InvalidName(String),
 
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
     #[error("cyclic reference detected")]
     CyclicReference,
 

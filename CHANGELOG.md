@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### v6 stream — Stream E (Phase 46 kickoff)
 
+- Added database-level consistency default protocol support:
+  - `ALTER DATABASE <db> SET CONSISTENCY READ_CONCERN R=<n> [WRITE_CONCERN W=<n>]`
+  - `ALTER DATABASE <db> SET CONSISTENCY WRITE_CONCERN W=<n> [READ_CONCERN R=<n>]`
+  - `ALTER DATABASE <db> RESET CONSISTENCY`
+  - `SHOW DATABASE <db> CONSISTENCY`
+- Data-command consistency resolution now uses precedence:
+  request wrapper -> database defaults -> fallback `R=1/W=1`.
+- Database consistency defaults are persisted in database metadata and survive
+  restart.
+
 - Phase 46 (conflict resolution runtime) entered implementation with a
   foundation tranche across `grumpydb`, `grumpydb-server`, and `grumpy-repl`.
 - `Value` now includes `Value::Crdt { kind, payload }` and `CrdtKind`

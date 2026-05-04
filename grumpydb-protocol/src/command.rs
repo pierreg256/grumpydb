@@ -52,6 +52,16 @@ pub enum Command {
     DropDatabase(String),
     /// List all databases.
     ListDatabases,
+    /// Set default consistency concerns for a database.
+    SetDatabaseConsistency {
+        database: String,
+        read_concern: Option<u16>,
+        write_concern: Option<u16>,
+    },
+    /// Reset database-level consistency defaults to engine fallbacks.
+    ResetDatabaseConsistency { database: String },
+    /// Show effective consistency defaults configured for a database.
+    ShowDatabaseConsistency { database: String },
 
     // ── Collection management ───────────────────────────────────────
     /// Create a new collection.
@@ -241,9 +251,12 @@ impl Command {
             | Command::Flush => Action::Admin,
 
             // Database management
-            Command::CreateDatabase(_) | Command::DropDatabase(_) | Command::ListDatabases => {
-                Action::ManageDatabases
-            }
+            Command::CreateDatabase(_)
+            | Command::DropDatabase(_)
+            | Command::ListDatabases
+            | Command::SetDatabaseConsistency { .. }
+            | Command::ResetDatabaseConsistency { .. }
+            | Command::ShowDatabaseConsistency { .. } => Action::ManageDatabases,
 
             // User management
             Command::CreateUser { .. }
@@ -294,6 +307,9 @@ impl Command {
             Command::CreateDatabase(name) | Command::DropDatabase(name) => {
                 Resource::Database(name.clone())
             }
+            Command::SetDatabaseConsistency { database, .. }
+            | Command::ResetDatabaseConsistency { database }
+            | Command::ShowDatabaseConsistency { database } => Resource::Database(database.clone()),
             // ListDatabases is scoped to the session tenant, not server-level
             Command::ListDatabases => Resource::None,
 
@@ -417,6 +433,15 @@ mod tests {
             Action::ManageDatabases
         );
         assert_eq!(
+            Command::SetDatabaseConsistency {
+                database: "x".into(),
+                read_concern: Some(2),
+                write_concern: Some(2),
+            }
+            .required_action(),
+            Action::ManageDatabases
+        );
+        assert_eq!(
             Command::CreateTenant("x".into()).required_action(),
             Action::ManageServer
         );
@@ -463,6 +488,16 @@ mod tests {
         let create_db = Command::CreateDatabase("staging".into());
         assert_eq!(
             create_db.target_resource(None),
+            Resource::Database("staging".into())
+        );
+
+        let set_db_consistency = Command::SetDatabaseConsistency {
+            database: "staging".into(),
+            read_concern: Some(2),
+            write_concern: Some(3),
+        };
+        assert_eq!(
+            set_db_consistency.target_resource(None),
             Resource::Database("staging".into())
         );
 

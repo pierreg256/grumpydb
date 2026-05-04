@@ -31,6 +31,37 @@ default port 6390, configurable via `[cluster].listen_peer`) is reserved
 for inter-node traffic: handshake, WAL streaming (Phase 40e), and gossip
 (Phase 44).
 
+## Database-level consistency defaults (protocol)
+
+Database defaults can be configured per database and are applied when a
+request does not explicitly provide a wrapper concern:
+
+- `ALTER DATABASE <db> SET CONSISTENCY READ_CONCERN R=<n> [WRITE_CONCERN W=<n>]`
+- `ALTER DATABASE <db> SET CONSISTENCY WRITE_CONCERN W=<n> [READ_CONCERN R=<n>]`
+- `ALTER DATABASE <db> RESET CONSISTENCY`
+- `SHOW DATABASE <db> CONSISTENCY`
+
+Resolution precedence for data commands is:
+
+1. per-request `READ_CONCERN` / `WRITE_CONCERN` wrapper
+2. database defaults
+3. fallback `R=1` / `W=1`
+
+Defaults are persisted in database metadata and survive restart.
+
+Example:
+
+```text
+ALTER DATABASE appdb SET CONSISTENCY READ_CONCERN R=1 WRITE_CONCERN W=2
+SHOW DATABASE appdb CONSISTENCY
+WRITE_CONCERN W=1 INSERT users 7b6f4f8e-1f73-4d41-8dd9-2f0f2a9b4a11 {"name":"alice"}
+ALTER DATABASE appdb RESET CONSISTENCY
+```
+
+Single-node caveat: in single-node deployments (`N=1`), concerns above `1`
+(`R>1` or `W>1`) cannot satisfy quorum semantics and requests fail. Use
+`R=1` and `W=1`.
+
 For a ready-to-run v5 demo topology, use:
 
 - `docker-compose.cluster.yml` (3-node demo stack)

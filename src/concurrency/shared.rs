@@ -262,6 +262,27 @@ impl SharedDatabase {
         self.inner.write().compact(collection)
     }
 
+    /// Returns database-level consistency defaults.
+    pub fn consistency_defaults(&self) -> (Option<u16>, Option<u16>) {
+        self.inner.read().consistency_defaults()
+    }
+
+    /// Sets database-level consistency defaults.
+    pub fn set_consistency_defaults(
+        &self,
+        read_concern: Option<u16>,
+        write_concern: Option<u16>,
+    ) -> Result<()> {
+        self.inner
+            .write()
+            .set_consistency_defaults(read_concern, write_concern)
+    }
+
+    /// Resets database-level consistency defaults.
+    pub fn reset_consistency_defaults(&self) -> Result<()> {
+        self.inner.write().reset_consistency_defaults()
+    }
+
     /// Closes the database. Consumes the handle.
     pub fn close(self) -> Result<()> {
         match Arc::try_unwrap(self.inner) {
@@ -383,6 +404,33 @@ impl SharedServer {
         let shared_db = SharedDatabase::open(&db_path)?;
         self.databases.write().insert(key, shared_db.clone());
         Ok(shared_db)
+    }
+
+    /// Returns database-level consistency defaults.
+    pub fn database_consistency_defaults(
+        &self,
+        client: &str,
+        db_name: &str,
+    ) -> Result<(Option<u16>, Option<u16>)> {
+        self.database(client, db_name)
+            .map(|db| db.consistency_defaults())
+    }
+
+    /// Sets database-level consistency defaults.
+    pub fn set_database_consistency_defaults(
+        &self,
+        client: &str,
+        db_name: &str,
+        read_concern: Option<u16>,
+        write_concern: Option<u16>,
+    ) -> Result<()> {
+        self.database(client, db_name)?
+            .set_consistency_defaults(read_concern, write_concern)
+    }
+
+    /// Resets database-level consistency defaults.
+    pub fn reset_database_consistency_defaults(&self, client: &str, db_name: &str) -> Result<()> {
+        self.database(client, db_name)?.reset_consistency_defaults()
     }
 
     /// Closes the server.
@@ -785,5 +833,32 @@ mod tests {
 
         h1.join().unwrap();
         h2.join().unwrap();
+    }
+
+    #[test]
+    fn test_shared_server_database_consistency_defaults_roundtrip() {
+        let (_dir, server) = setup_shared_server();
+        server.create_client("alice").unwrap();
+        server.create_database("alice", "mydb").unwrap();
+
+        server
+            .set_database_consistency_defaults("alice", "mydb", Some(2), Some(3))
+            .unwrap();
+        assert_eq!(
+            server
+                .database_consistency_defaults("alice", "mydb")
+                .unwrap(),
+            (Some(2), Some(3))
+        );
+
+        server
+            .reset_database_consistency_defaults("alice", "mydb")
+            .unwrap();
+        assert_eq!(
+            server
+                .database_consistency_defaults("alice", "mydb")
+                .unwrap(),
+            (None, None)
+        );
     }
 }

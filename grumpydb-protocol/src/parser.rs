@@ -70,6 +70,8 @@ pub fn parse_command(line: &str) -> Result<Command, ProtocolError> {
         "CREATE" => parse_create(rest),
         "DROP" => parse_drop(rest),
         "LIST" => parse_list(rest),
+        "ALTER" => parse_alter(rest),
+        "SHOW" => parse_show(rest),
         "GRANT" => parse_grant(rest),
         "REVOKE" => parse_revoke(rest),
         "ELECT-WRITER" | "ELECT_WRITER" => parse_elect_writer(rest),
@@ -357,6 +359,145 @@ fn parse_list(rest: &str) -> Result<Command, ProtocolError> {
         )),
         _ => Err(ProtocolError::UnknownCommand(format!("LIST {sub}"))),
     }
+}
+
+// ── ALTER / SHOW ─────────────────────────────────────────────────────
+
+fn parse_alter(rest: &str) -> Result<Command, ProtocolError> {
+    let (sub, rest) = split_first_word(rest);
+    if !sub.eq_ignore_ascii_case("DATABASE") {
+        if sub.is_empty() {
+            return Err(ProtocolError::MissingArgument(
+                "ALTER requires DATABASE".into(),
+            ));
+        }
+        return Err(ProtocolError::UnknownCommand(format!("ALTER {sub}")));
+    }
+
+    let (database, rest) = split_first_word(rest);
+    if database.is_empty() {
+        return Err(ProtocolError::MissingArgument(
+            "ALTER DATABASE requires <name> SET|RESET CONSISTENCY".into(),
+        ));
+    }
+
+    let (action, rest) = split_first_word(rest);
+    if action.eq_ignore_ascii_case("SET") {
+        let (target, rest) = split_first_word(rest);
+        if !target.eq_ignore_ascii_case("CONSISTENCY") {
+            return Err(ProtocolError::MissingArgument(
+                "ALTER DATABASE <name> SET requires CONSISTENCY".into(),
+            ));
+        }
+        let (read_concern, write_concern) = parse_database_consistency_settings(rest)?;
+        return Ok(Command::SetDatabaseConsistency {
+            database: database.to_string(),
+            read_concern,
+            write_concern,
+        });
+    }
+
+    if action.eq_ignore_ascii_case("RESET") {
+        let target = require_arg(rest, "ALTER DATABASE <name> RESET", "CONSISTENCY")?;
+        if !target.eq_ignore_ascii_case("CONSISTENCY") {
+            return Err(ProtocolError::MissingArgument(
+                "ALTER DATABASE <name> RESET requires CONSISTENCY".into(),
+            ));
+        }
+        return Ok(Command::ResetDatabaseConsistency {
+            database: database.to_string(),
+        });
+    }
+
+    Err(ProtocolError::MissingArgument(
+        "ALTER DATABASE <name> requires SET|RESET CONSISTENCY".into(),
+    ))
+}
+
+fn parse_show(rest: &str) -> Result<Command, ProtocolError> {
+    let (sub, rest) = split_first_word(rest);
+    if !sub.eq_ignore_ascii_case("DATABASE") {
+        if sub.is_empty() {
+            return Err(ProtocolError::MissingArgument(
+                "SHOW requires DATABASE".into(),
+            ));
+        }
+        return Err(ProtocolError::UnknownCommand(format!("SHOW {sub}")));
+    }
+
+    let (database, rest) = split_first_word(rest);
+    if database.is_empty() {
+        return Err(ProtocolError::MissingArgument(
+            "SHOW DATABASE requires <name> CONSISTENCY".into(),
+        ));
+    }
+
+    let target = require_arg(rest, "SHOW DATABASE <name>", "CONSISTENCY")?;
+    if !target.eq_ignore_ascii_case("CONSISTENCY") {
+        return Err(ProtocolError::MissingArgument(
+            "SHOW DATABASE <name> requires CONSISTENCY".into(),
+        ));
+    }
+
+    Ok(Command::ShowDatabaseConsistency {
+        database: database.to_string(),
+    })
+}
+
+fn parse_database_consistency_settings(
+    rest: &str,
+) -> Result<(Option<u16>, Option<u16>), ProtocolError> {
+    let mut read_concern = None;
+    let mut write_concern = None;
+    let mut input = rest;
+
+    while !input.is_empty() {
+        let (word, tail) = split_first_word(input);
+        if word.eq_ignore_ascii_case("READ_CONCERN") {
+            if read_concern.is_some() {
+                return Err(ProtocolError::MissingArgument(
+                    "READ_CONCERN specified more than once".into(),
+                ));
+            }
+            let (token, remainder) = split_first_word(tail);
+            if token.is_empty() {
+                return Err(ProtocolError::MissingArgument(
+                    "READ_CONCERN requires R=<n>".into(),
+                ));
+            }
+            read_concern = Some(parse_concern_token(token, 'R', "READ_CONCERN")?);
+            input = remainder;
+            continue;
+        }
+        if word.eq_ignore_ascii_case("WRITE_CONCERN") {
+            if write_concern.is_some() {
+                return Err(ProtocolError::MissingArgument(
+                    "WRITE_CONCERN specified more than once".into(),
+                ));
+            }
+            let (token, remainder) = split_first_word(tail);
+            if token.is_empty() {
+                return Err(ProtocolError::MissingArgument(
+                    "WRITE_CONCERN requires W=<n>".into(),
+                ));
+            }
+            write_concern = Some(parse_concern_token(token, 'W', "WRITE_CONCERN")?);
+            input = remainder;
+            continue;
+        }
+        return Err(ProtocolError::MissingArgument(
+            "SET CONSISTENCY expects READ_CONCERN and/or WRITE_CONCERN".into(),
+        ));
+    }
+
+    if read_concern.is_none() && write_concern.is_none() {
+        return Err(ProtocolError::MissingArgument(
+            "ALTER DATABASE <name> SET CONSISTENCY requires READ_CONCERN and/or WRITE_CONCERN"
+                .into(),
+        ));
+    }
+
+    Ok((read_concern, write_concern))
 }
 
 // ── CRUD ────────────────────────────────────────────────────────────────
@@ -967,6 +1108,57 @@ mod tests {
             parse_command("LIST DATABASES\r\n").unwrap(),
             Command::ListDatabases
         );
+    }
+
+    #[test]
+    fn test_parse_alter_database_set_consistency() {
+        assert_eq!(
+            parse_command(
+                "ALTER DATABASE prod SET CONSISTENCY READ_CONCERN R=2 WRITE_CONCERN W=3\r\n"
+            )
+            .unwrap(),
+            Command::SetDatabaseConsistency {
+                database: "prod".into(),
+                read_concern: Some(2),
+                write_concern: Some(3),
+            }
+        );
+
+        assert_eq!(
+            parse_command("ALTER DATABASE prod SET CONSISTENCY WRITE_CONCERN W=2\r\n").unwrap(),
+            Command::SetDatabaseConsistency {
+                database: "prod".into(),
+                read_concern: None,
+                write_concern: Some(2),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_alter_database_reset_consistency() {
+        assert_eq!(
+            parse_command("ALTER DATABASE prod RESET CONSISTENCY\r\n").unwrap(),
+            Command::ResetDatabaseConsistency {
+                database: "prod".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_show_database_consistency() {
+        assert_eq!(
+            parse_command("SHOW DATABASE prod CONSISTENCY\r\n").unwrap(),
+            Command::ShowDatabaseConsistency {
+                database: "prod".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_alter_database_consistency_missing_args() {
+        assert!(parse_command("ALTER DATABASE prod SET CONSISTENCY\r\n").is_err());
+        assert!(parse_command("ALTER DATABASE prod RESET\r\n").is_err());
+        assert!(parse_command("SHOW DATABASE prod\r\n").is_err());
     }
 
     #[test]

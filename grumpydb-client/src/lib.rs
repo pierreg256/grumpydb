@@ -54,6 +54,14 @@ pub struct ClusterTopology {
     pub writers: Vec<TopologyWriter>,
 }
 
+/// Database-level consistency defaults returned by `SHOW DATABASE ... CONSISTENCY`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatabaseConsistency {
+    pub database: String,
+    pub read_concern: Option<u16>,
+    pub write_concern: Option<u16>,
+}
+
 /// A GrumpyDB client connected to a server.
 pub struct GrumpyClient {
     conn: Connection,
@@ -177,6 +185,56 @@ impl GrumpyClient {
     /// List all databases.
     pub async fn list_databases(&mut self) -> Result<Vec<String>, ClientError> {
         expect_string_array(self.conn.execute("LIST DATABASES").await?)
+    }
+
+    /// Set database-level default consistency concerns.
+    pub async fn set_database_consistency(
+        &mut self,
+        database: &str,
+        read_concern: Option<u16>,
+        write_concern: Option<u16>,
+    ) -> Result<(), ClientError> {
+        if read_concern.is_none() && write_concern.is_none() {
+            return Err(ClientError::Protocol(
+                "set_database_consistency requires read_concern and/or write_concern".into(),
+            ));
+        }
+        let mut cmd = format!("ALTER DATABASE {database} SET CONSISTENCY");
+        if let Some(r) = read_concern {
+            cmd.push_str(&format!(" READ_CONCERN R={r}"));
+        }
+        if let Some(w) = write_concern {
+            cmd.push_str(&format!(" WRITE_CONCERN W={w}"));
+        }
+        expect_ok(self.conn.execute(&cmd).await?)
+    }
+
+    /// Reset database-level default consistency concerns.
+    pub async fn reset_database_consistency(&mut self, database: &str) -> Result<(), ClientError> {
+        expect_ok(
+            self.conn
+                .execute(&format!("ALTER DATABASE {database} RESET CONSISTENCY"))
+                .await?,
+        )
+    }
+
+    /// Show database-level default consistency concerns.
+    pub async fn show_database_consistency(
+        &mut self,
+        database: &str,
+    ) -> Result<DatabaseConsistency, ClientError> {
+        match self
+            .conn
+            .execute(&format!("SHOW DATABASE {database} CONSISTENCY"))
+            .await?
+        {
+            Response::Bulk(Some(json)) => serde_json::from_str(&json)
+                .map_err(|e| ClientError::Protocol(format!("invalid consistency JSON: {e}"))),
+            Response::Error(msg) => Err(ClientError::Server(msg)),
+            _ => Err(ClientError::Protocol(
+                "unexpected SHOW DATABASE CONSISTENCY response".into(),
+            )),
+        }
     }
 
     /// Get session info.
