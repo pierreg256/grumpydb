@@ -791,6 +791,7 @@ impl Coordinator {
     }
 
     /// Range-query one index from all live remote replicas in the preference list.
+    #[allow(clippy::too_many_arguments)]
     pub async fn fanout_query_peer_candidates_range(
         &self,
         tenant: &str,
