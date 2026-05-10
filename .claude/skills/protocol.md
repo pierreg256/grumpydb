@@ -158,6 +158,24 @@ impl Command {
 - Arrays are recursive: array elements can be any response type
 - Null bulk string (`$-1\r\n`) represents missing values (e.g., GET on nonexistent key)
 
+### Cluster sentinel rows in arrays (Phase 44f)
+
+Verified `QUERY` / `QUERYRANGE` arrays with effective `R≥2` may include
+a trailing sentinel entry whose first byte is `_`:
+
+```text
+_warning convergence: 2 peer(s) not yet materialized: [nodeB,nodeE]
+```
+
+Real QUERY result rows are formatted as `<uuid> {json}` and UUIDs never
+start with `_`, so the sentinel is wire-distinguishable. Parsers MUST
+treat it as a regular bulk string and must NOT reject the response.
+Smart drivers SHOULD surface (or filter) any array entry that begins
+with a leading `_` as a convergence warning, never as a document. The
+related acceptor-side error string is
+`index_not_yet_materialized:<index_name>` (exposed in the server crate
+as `INDEX_NOT_YET_MATERIALIZED_PREFIX`).
+
 ## Common mistakes to avoid
 
 1. **Forgetting `\r\n`** — every response line must end with CRLF

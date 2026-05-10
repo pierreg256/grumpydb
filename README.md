@@ -313,6 +313,24 @@ cases: when the schema knows the index but the local materializer
 hasn't caught up the error message is explicit — smart drivers should
 treat this as a transient retryable error.
 
+**Phase 44f — fan-out skip-with-warning (`R≥2`).** When a verified
+`QUERY` / `QUERYRANGE` fans out candidate fetches to replica peers and
+one of those peers reports `index_not_yet_materialized:<index_name>`
+(its local materializer is still catching up on a known cluster index),
+the coordinator now **skips** that peer rather than failing the
+command, sleeps for `2 × gossip_probe_interval_ms` (capped at 5 s) and
+retries the fan-out **once**. If peers remain skipped after the retry,
+the trailing `Response::Array` includes a sentinel entry of the form:
+
+```text
+_warning convergence: 2 peer(s) not yet materialized: [nodeB,nodeE]
+```
+
+The leading `_` makes the entry trivially distinguishable from a real
+`<uuid> {json}` row (UUIDs never start with `_`). Drivers SHOULD
+filter or surface unrecognized leading-`_` entries as convergence
+warnings rather than treating them as documents.
+
 See [docs/SCHEMA_GOSSIP.md](docs/SCHEMA_GOSSIP.md) for the full design.
 
 ### Consistency and topology protocol (Phase 40f)

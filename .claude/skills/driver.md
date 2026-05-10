@@ -318,6 +318,34 @@ Then: give up, return ConnectionError
 
 Exponential backoff with jitter. Configurable max retries.
 
+### Cluster convergence sentinel in QUERY arrays (Phase 44f)
+
+Verified `QUERY` / `QUERYRANGE` responses with effective `R≥2` may
+contain a trailing entry that is **not** a result row, e.g.:
+
+```text
+_warning convergence: 2 peer(s) not yet materialized: [nodeB,nodeE]
+```
+
+Real rows are always `<uuid> {json}` and UUIDs never start with `_`, so
+the sentinel is trivially distinguishable on the wire. Driver guidance:
+
+- **Rust driver (`grumpydb-client`)**: when materializing a `Vec<(Uuid,
+  Value)>` from a QUERY response, skip array entries whose bulk-string
+  payload starts with `_`. Optionally expose them on a side channel
+  (e.g. `QueryResult { rows, warnings }`) so callers can react to
+  convergence lag.
+- **TypeScript driver (`@grumpydb/client`)**: same idea — filter
+  leading-`_` entries from the returned array, optionally surface them
+  as a `warnings: string[]` field on the result object.
+- The sentinel is non-fatal: preceding rows are valid verified matches.
+  Drivers MAY automatically retry the query after a short backoff if a
+  convergence warning is observed and the application requested strict
+  consistency.
+
+See [`docs/SCHEMA_GOSSIP.md`](../../docs/SCHEMA_GOSSIP.md) §5.5 for the
+full acceptor / coordinator / retry contract.
+
 ## Common mistakes to avoid
 
 1. **Not handling partial TCP reads** — TCP is a byte stream, not message-based. Always buffer.

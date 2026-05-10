@@ -237,19 +237,50 @@ it runs on each peer.
 Today, `QUERY by_name "x"` on a node that doesn't have the index returns
 `-ERR index not found: by_name`. With this design, that error now means
 **either** "index never existed" **or** "index exists in schema but not
-yet materialized here". To distinguish, the QUERY handler:
+yet materialized here". To distinguish:
 
-1. Checks `SchemaState`: if the index is **defined** but not yet on this
-   collection, return `-ERR index not yet materialized (schema_version
-   X, local_version Y); retry shortly`.
-2. Otherwise return `-ERR index not found` (real error).
+#### Local execution (44d)
 
-The fan-out QUERY in coordinator (`fanout_query_peer_candidates_*`) gets
-the same logic applied per-peer. A peer that returns "not yet
-materialized" is **skipped, not failed** — the query continues with the
-remaining peers, and the result set is union of what's available. A
-warning header is added to the response when at least one peer was
-skipped, so the client knows the result may be incomplete.
+The local QUERY handler (`Command::Query` / `Command::QueryRange`)
+intercepts `IndexNotFound` from the engine and asks
+`coordinator.schema_has_index()` whether the cluster schema knows the
+index. The error is rewritten when applicable:
+
+- *Schema knows it*: `-ERR index 'by_name' is in cluster schema
+  (version 7) but not yet materialized on this node; retry shortly`
+- *Schema does not know it*: `-ERR index not found: by_name`
+
+#### Verified-query fan-out (44f)
+
+When `R≥2`, the coordinator fans out candidate fetches to peers via
+`fanout_query_peer_candidates_*`. Two layers of refinement apply:
+
+1. **Acceptor side** (peer answering the RPC,
+   `handle_peer_data_op_with_coord`): if the index lookup fails with
+   `database not found` / `collection not found` / `index not found`
+   AND the local `SchemaState` knows the index, the response is
+   rewritten as `index_not_yet_materialized:<index_name>`. This is a
+   stable, machine-readable prefix.
+2. **Coordinator side** (handler, `collect_peer_candidates`): peer
+   responses with that prefix cause the peer to be **skipped** rather
+   than the QUERY to fail. The peer's `node_id` is collected.
+
+If at least one peer was skipped, the handler sleeps for
+`2 × gossip_probe_interval_ms` (capped at 5 s) and re-issues the
+fan-out **once**. Most schema diffs converge within one probe period.
+
+If peers remain skipped after the retry, the handler appends a
+sentinel entry to the trailing `Response::Array`:
+
+```text
+_warning convergence: 2 peer(s) not yet materialized: [nodeB,nodeE]
+```
+
+The leading `_` makes the entry trivially distinguishable from a real
+`<uuid> {json}` row (UUIDs never start with `_`). Drivers that don't
+understand the warning see what looks like a noop bulk string;
+schema-aware drivers can surface convergence lag to the application
+and trigger a retry.
 
 ## 6. Bootstrap / migration
 

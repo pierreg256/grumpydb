@@ -19,6 +19,7 @@ use grumpydb_protocol::{Command, MAX_LINE_LENGTH, PROTOCOL_VERSION, Response, pa
 
 use crate::auth::role::{ResourceScope, RoleAssignment, RoleName};
 use crate::auth::store::AuthStore;
+use crate::cluster::handshake::INDEX_NOT_YET_MATERIALIZED_PREFIX;
 use crate::cluster::hints::{HintOperation, HintRecord, HintStore};
 use crate::cluster::read_repair::{ReadRepairIntent, ReadRepairStore};
 use crate::coordinator::Coordinator;
@@ -413,6 +414,73 @@ fn now_unix_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// Phase 44f: outcome of a remote candidate fan-out.
+#[derive(Debug)]
+struct PeerCandidateFanout {
+    /// Newly-discovered candidate UUIDs from peers (deduplicated by
+    /// caller against local candidates).
+    new_candidates: Vec<Uuid>,
+    /// Peers that returned `index_not_yet_materialized` and were
+    /// skipped. Their `node_id` is collected so the caller can emit
+    /// a `_warning` entry in the final RESP array.
+    skipped_peers: Vec<String>,
+}
+
+/// Process one fan-out result list. Returns the structured outcome
+/// or a hard error on the first non-recoverable peer failure.
+fn collect_peer_candidates(
+    remote: Vec<(String, Result<Vec<String>, String>)>,
+) -> Result<PeerCandidateFanout, String> {
+    let mut new_candidates = Vec::new();
+    let mut skipped_peers = Vec::new();
+    for (node_id, res) in remote {
+        let keys = match res {
+            Ok(keys) => keys,
+            Err(e) if e.starts_with(INDEX_NOT_YET_MATERIALIZED_PREFIX) => {
+                tracing::debug!(
+                    node_id = %node_id,
+                    detail = %e,
+                    "verified query: peer is in schema-convergence catch-up; skipping"
+                );
+                skipped_peers.push(node_id);
+                continue;
+            }
+            Err(e) => {
+                return Err(format!(
+                    "verified query failed to fetch candidates from peer {node_id}: {e}"
+                ));
+            }
+        };
+        for key in keys {
+            match Uuid::parse_str(&key) {
+                Ok(id) => new_candidates.push(id),
+                Err(e) => {
+                    return Err(format!(
+                        "verified query received invalid candidate key from peer {node_id}: {e}"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(PeerCandidateFanout {
+        new_candidates,
+        skipped_peers,
+    })
+}
+
+/// Phase 44f: format the trailing `_warning` entry appended to a
+/// QUERY/QUERYRANGE result when at least one peer was skipped because
+/// its local materializer hadn't caught up. The leading `_` makes the
+/// entry trivially distinguishable from a real `<uuid> {json}` row
+/// (UUIDs never start with `_`).
+fn format_skip_warning(skipped: &[String]) -> String {
+    let n = skipped.len();
+    let names = skipped.join(",");
+    format!(
+        "_warning convergence: {n} peer(s) not yet materialized: [{names}]"
+    )
+}
+
 async fn maybe_converge_read_quorum(
     command: &Command,
     response: Response,
@@ -578,7 +646,7 @@ async fn verify_index_query_quorum(
             }
 
             let route_key = format!("q:{collection}:{index_name}:{value}");
-            let remote = coordinator
+            let mut remote = coordinator
                 .fanout_query_peer_candidates_exact(
                     &tenant,
                     db_name,
@@ -588,28 +656,40 @@ async fn verify_index_query_quorum(
                     value,
                 )
                 .await;
-            for (node_id, res) in remote {
-                let keys = match res {
-                    Ok(keys) => keys,
-                    Err(e) => {
-                        return Response::Error(format!(
-                            "verified query failed to fetch candidates from peer {node_id}: {e}"
-                        ));
-                    }
-                };
-                for key in keys {
-                    match Uuid::parse_str(&key) {
-                        Ok(id) => {
-                            let _ = candidates.insert(id);
-                        }
-                        Err(e) => {
-                            return Response::Error(format!(
-                                "verified query received invalid candidate key from peer {node_id}: {e}"
-                            ));
-                        }
-                    }
+            let mut fanout = match collect_peer_candidates(remote) {
+                Ok(f) => f,
+                Err(e) => return Response::Error(e),
+            };
+
+            // Phase 44f: if at least one peer was skipped because the
+            // schema gossip hadn't converged there yet, sleep briefly
+            // (2 × gossip probe interval, capped at 5 s) and retry the
+            // fan-out exactly once. Most convergence delays settle
+            // well within one probe period; the retry keeps results
+            // complete in the common case while bounding latency.
+            if !fanout.skipped_peers.is_empty() {
+                let delay_ms = (coordinator.gossip_probe_interval_ms().saturating_mul(2)).min(5_000);
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                remote = coordinator
+                    .fanout_query_peer_candidates_exact(
+                        &tenant,
+                        db_name,
+                        collection,
+                        route_key.as_bytes(),
+                        index_name,
+                        value,
+                    )
+                    .await;
+                match collect_peer_candidates(remote) {
+                    Ok(retry) => fanout = retry,
+                    Err(e) => return Response::Error(e),
                 }
             }
+
+            for id in fanout.new_candidates {
+                let _ = candidates.insert(id);
+            }
+            let skipped_peers = fanout.skipped_peers;
 
             if candidates.len() > VERIFIED_QUERY_MAX_CANDIDATES {
                 return Response::Error(format!(
@@ -658,6 +738,10 @@ async fn verify_index_query_quorum(
                 }
             }
 
+            if !skipped_peers.is_empty() {
+                items.push(Response::Bulk(Some(format_skip_warning(&skipped_peers))));
+            }
+
             Response::Array(items)
         }
         Command::QueryRange {
@@ -698,7 +782,7 @@ async fn verify_index_query_quorum(
             }
 
             let route_key = format!("qr:{collection}:{index_name}:{start}:{end}");
-            let remote = coordinator
+            let mut remote = coordinator
                 .fanout_query_peer_candidates_range(
                     &tenant,
                     db_name,
@@ -709,28 +793,36 @@ async fn verify_index_query_quorum(
                     end,
                 )
                 .await;
-            for (node_id, res) in remote {
-                let keys = match res {
-                    Ok(keys) => keys,
-                    Err(e) => {
-                        return Response::Error(format!(
-                            "verified query failed to fetch candidates from peer {node_id}: {e}"
-                        ));
-                    }
-                };
-                for key in keys {
-                    match Uuid::parse_str(&key) {
-                        Ok(id) => {
-                            let _ = candidates.insert(id);
-                        }
-                        Err(e) => {
-                            return Response::Error(format!(
-                                "verified query received invalid candidate key from peer {node_id}: {e}"
-                            ));
-                        }
-                    }
+            let mut fanout = match collect_peer_candidates(remote) {
+                Ok(f) => f,
+                Err(e) => return Response::Error(e),
+            };
+
+            // Phase 44f: same convergence retry as Command::Query.
+            if !fanout.skipped_peers.is_empty() {
+                let delay_ms = (coordinator.gossip_probe_interval_ms().saturating_mul(2)).min(5_000);
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                remote = coordinator
+                    .fanout_query_peer_candidates_range(
+                        &tenant,
+                        db_name,
+                        collection,
+                        route_key.as_bytes(),
+                        index_name,
+                        start,
+                        end,
+                    )
+                    .await;
+                match collect_peer_candidates(remote) {
+                    Ok(retry) => fanout = retry,
+                    Err(e) => return Response::Error(e),
                 }
             }
+
+            for id in fanout.new_candidates {
+                let _ = candidates.insert(id);
+            }
+            let skipped_peers = fanout.skipped_peers;
 
             if candidates.len() > VERIFIED_QUERY_MAX_CANDIDATES {
                 return Response::Error(format!(
@@ -780,6 +872,10 @@ async fn verify_index_query_quorum(
                     Ok(None) => {}
                     Err(e) => return Response::Error(e),
                 }
+            }
+
+            if !skipped_peers.is_empty() {
+                items.push(Response::Bulk(Some(format_skip_warning(&skipped_peers))));
             }
 
             Response::Array(items)
@@ -2032,5 +2128,63 @@ fn value_to_serde_json(val: &Value) -> serde_json::Value {
                 "payload_b64": base64::engine::general_purpose::STANDARD.encode(payload)
             }
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Phase 44f: helpers for verified-query peer skip-with-warning.
+
+    #[test]
+    fn test_collect_peer_candidates_collects_keys_when_all_peers_ok() {
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        let remote = vec![
+            ("nodeA".to_string(), Ok(vec![id1.to_string(), id2.to_string()])),
+            ("nodeB".to_string(), Ok(vec![])),
+        ];
+        let f = collect_peer_candidates(remote).expect("ok");
+        assert_eq!(f.new_candidates.len(), 2);
+        assert!(f.skipped_peers.is_empty());
+    }
+
+    #[test]
+    fn test_collect_peer_candidates_skips_index_not_yet_materialized() {
+        let id1 = Uuid::new_v4();
+        let remote = vec![
+            ("nodeA".to_string(), Ok(vec![id1.to_string()])),
+            (
+                "nodeB".to_string(),
+                Err(format!("{INDEX_NOT_YET_MATERIALIZED_PREFIX}by_name")),
+            ),
+            (
+                "nodeC".to_string(),
+                Err(format!("{INDEX_NOT_YET_MATERIALIZED_PREFIX}by_name")),
+            ),
+        ];
+        let f = collect_peer_candidates(remote).expect("ok");
+        assert_eq!(f.new_candidates.len(), 1);
+        assert_eq!(f.skipped_peers, vec!["nodeB", "nodeC"]);
+    }
+
+    #[test]
+    fn test_collect_peer_candidates_propagates_real_error() {
+        let remote = vec![
+            ("nodeA".to_string(), Ok(vec![])),
+            ("nodeB".to_string(), Err("connection refused".to_string())),
+        ];
+        let err = collect_peer_candidates(remote).unwrap_err();
+        assert!(err.contains("nodeB"));
+        assert!(err.contains("connection refused"));
+    }
+
+    #[test]
+    fn test_format_skip_warning_lists_peers() {
+        let s = format_skip_warning(&["nodeA".to_string(), "nodeB".to_string()]);
+        assert!(s.starts_with("_warning convergence: 2 peer(s) not yet materialized"));
+        assert!(s.contains("nodeA"));
+        assert!(s.contains("nodeB"));
     }
 }

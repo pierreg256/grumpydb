@@ -1326,6 +1326,14 @@ fn handle_peer_data_op(op: PeerDataOp, shared_server: &SharedServer) -> PeerData
 /// every legacy op to [`handle_peer_data_op`] and handles
 /// [`PeerDataOp::PullSchemaSince`] locally by reading from the
 /// coordinator's [`SchemaState`].
+///
+/// Phase 44f: post-processes `QueryIndexExact` / `QueryIndexRange`
+/// errors to distinguish "this index does not exist in the cluster
+/// schema at all" (real client error) from "the cluster schema knows
+/// about it but the local materializer hasn't caught up yet"
+/// (transient, retryable). The latter is encoded as
+/// `index_not_yet_materialized:<index_name>` so the calling node can
+/// skip the peer with a warning instead of failing the whole QUERY.
 fn handle_peer_data_op_with_coord(
     op: PeerDataOp,
     shared_server: &SharedServer,
@@ -1335,8 +1343,56 @@ fn handle_peer_data_op_with_coord(
         let entries = coordinator.local_schema_diff_since(since_version);
         return PeerDataOpResponse::SchemaDiff { entries };
     }
-    handle_peer_data_op(op, shared_server)
+
+    // Capture index-query coordinates before `op` is consumed so we
+    // can refine `IndexNotFound` errors after dispatch.
+    let index_query_coords = match &op {
+        PeerDataOp::QueryIndexExact {
+            tenant,
+            database,
+            collection,
+            index_name,
+            ..
+        }
+        | PeerDataOp::QueryIndexRange {
+            tenant,
+            database,
+            collection,
+            index_name,
+            ..
+        } => Some((
+            tenant.clone(),
+            database.clone(),
+            collection.clone(),
+            index_name.clone(),
+        )),
+        _ => None,
+    };
+
+    let resp = handle_peer_data_op(op, shared_server);
+
+    if let (PeerDataOpResponse::Error { message }, Some((tenant, db, coll, idx))) =
+        (&resp, index_query_coords)
+        && (message.contains("index not found")
+            || message.contains("database not found")
+            || message.contains("collection not found"))
+        && coordinator.schema_has_index(&tenant, &db, &coll, &idx)
+    {
+        return PeerDataOpResponse::Error {
+            message: format!("{INDEX_NOT_YET_MATERIALIZED_PREFIX}{idx}"),
+        };
+    }
+
+    resp
 }
+
+/// Phase 44f: prefix used to mark a peer's `IndexNotFound` as a
+/// transient convergence symptom rather than a real client error.
+/// The coordinator-side QUERY handler treats responses starting with
+/// this prefix as "skip this peer, append a `_warning` entry to the
+/// final array". Drivers that don't know about this format see a
+/// regular protocol error.
+pub(crate) const INDEX_NOT_YET_MATERIALIZED_PREFIX: &str = "index_not_yet_materialized:";
 
 fn ensure_peer_write_target(
     shared_server: &SharedServer,
@@ -1780,5 +1836,113 @@ mod tests {
             &shared,
         );
         assert!(matches!(query, PeerDataOpResponse::Error { .. }));
+    }
+
+    // ── Phase 44f: index_not_yet_materialized refinement ─────────
+
+    #[test]
+    fn test_handle_peer_data_op_with_coord_refines_when_schema_has_index() {
+        use crate::cluster::NodeIdentity;
+        use crate::cluster::schema::log::SchemaLog;
+        use crate::cluster::schema::{IndexKey, SchemaLogEntry, SchemaOp};
+        use crate::config::ClusterSection;
+        use crate::coordinator::Coordinator;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let server = SharedServer::open(dir.path()).expect("open server");
+        // No collection / no index file on disk.
+
+        // Build a coordinator whose schema state DOES contain the
+        // index, mimicking the case where gossip has converged but
+        // the local materializer hasn't run yet.
+        let identity = NodeIdentity {
+            node_id: Uuid::new_v4(),
+            cluster_id: Uuid::new_v4(),
+            created_at_unix: 0,
+            identity_version: 1,
+        };
+        let (log, state) = SchemaLog::open(dir.path()).expect("open schema log");
+        let mut coord =
+            Coordinator::from_config(&identity, &ClusterSection::default(), "127.0.0.1:6380");
+        coord.attach_schema(state, log);
+        coord.apply_remote_schema_entries(&[SchemaLogEntry {
+            version: 1,
+            hlc: 100,
+            op: SchemaOp::CreateIndex {
+                key: IndexKey {
+                    tenant: "_system".into(),
+                    database: "demo".into(),
+                    collection: "docs".into(),
+                    index_name: "by_name".into(),
+                },
+                field_path: "name".into(),
+            },
+        }]);
+
+        let resp = handle_peer_data_op_with_coord(
+            PeerDataOp::QueryIndexExact {
+                tenant: "_system".into(),
+                database: "demo".into(),
+                collection: "docs".into(),
+                index_name: "by_name".into(),
+                value_json: "\"x\"".into(),
+            },
+            &server,
+            &coord,
+        );
+
+        match resp {
+            PeerDataOpResponse::Error { message } => assert!(
+                message.starts_with(INDEX_NOT_YET_MATERIALIZED_PREFIX),
+                "expected refined error, got: {message}"
+            ),
+            other => panic!("expected refined Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_handle_peer_data_op_with_coord_passes_through_when_schema_unaware() {
+        use crate::cluster::NodeIdentity;
+        use crate::cluster::schema::log::SchemaLog;
+        use crate::config::ClusterSection;
+        use crate::coordinator::Coordinator;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let server = SharedServer::open(dir.path()).expect("open server");
+
+        let identity = NodeIdentity {
+            node_id: Uuid::new_v4(),
+            cluster_id: Uuid::new_v4(),
+            created_at_unix: 0,
+            identity_version: 1,
+        };
+        let (log, state) = SchemaLog::open(dir.path()).expect("open schema log");
+        let mut coord =
+            Coordinator::from_config(&identity, &ClusterSection::default(), "127.0.0.1:6380");
+        coord.attach_schema(state, log);
+        // Note: no schema entry for `by_name` — this is the genuine
+        // "client error" case.
+
+        let resp = handle_peer_data_op_with_coord(
+            PeerDataOp::QueryIndexExact {
+                tenant: "_system".into(),
+                database: "demo".into(),
+                collection: "docs".into(),
+                index_name: "by_name".into(),
+                value_json: "\"x\"".into(),
+            },
+            &server,
+            &coord,
+        );
+
+        match resp {
+            PeerDataOpResponse::Error { message } => {
+                assert!(
+                    !message.starts_with(INDEX_NOT_YET_MATERIALIZED_PREFIX),
+                    "expected raw error, got: {message}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
     }
 }

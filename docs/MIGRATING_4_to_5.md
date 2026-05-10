@@ -33,6 +33,38 @@ Recommended:
 - Current v5 engine behavior returns at most one sibling (LWW) with an empty vector-clock token.
 - Multi-sibling conflict surfaces are planned for future versions.
 
+## 4.1 QUERY / QUERYRANGE convergence sentinel (driver guidance)
+
+Starting with the Phase 44f schema-gossip work, verified `QUERY` /
+`QUERYRANGE` responses with effective `R≥2` may include a sentinel
+entry of the form:
+
+```text
+_warning convergence: 2 peer(s) not yet materialized: [nodeB,nodeE]
+```
+
+This sentinel is appended to the trailing `Response::Array` when one or
+more peers were skipped because their local materializer had not yet
+caught up with a known cluster-wide index (`index_not_yet_materialized:`
+acceptor-side error). The leading `_` is intentional: real result rows
+are always `<uuid> {json}` pairs and UUIDs never start with `_`, so the
+sentinel is unambiguously distinguishable.
+
+**Driver guidance:**
+
+- v4 drivers (and any client unaware of the sentinel) can safely treat
+  it as an opaque bulk string and ignore it — it will never collide
+  with a UUID-shaped row.
+- v5+ drivers SHOULD either filter out array entries that begin with a
+  leading underscore, or surface them as a typed convergence warning
+  to the application so it can choose to retry the query.
+- The sentinel is non-fatal: rows preceding it are valid verified
+  matches; only the result set may be incomplete with respect to the
+  skipped peers.
+
+See [`docs/SCHEMA_GOSSIP.md`](SCHEMA_GOSSIP.md) §5.5 for the full
+acceptor / coordinator / retry contract.
+
 ## 5. License model
 
 - Project licensing is now dual: `MIT OR Apache-2.0`.

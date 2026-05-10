@@ -42,6 +42,10 @@ pub struct Coordinator {
     cluster_uuid: Uuid,
     n: usize,
     write_ack_timeout_ms: u64,
+    /// Phase 44f: cached `[cluster].gossip_probe_interval_ms` so the
+    /// QUERY skip-with-warning retry path can compute its delay
+    /// without re-reading the config.
+    gossip_probe_interval_ms: u64,
     vnodes_per_node: u32,
     ring: Ring<String>,
     peer_addrs: BTreeMap<String, String>,
@@ -143,6 +147,7 @@ impl Coordinator {
             cluster_uuid: identity.cluster_id,
             n,
             write_ack_timeout_ms: cluster.write_ack_timeout_ms,
+            gossip_probe_interval_ms: cluster.gossip_probe_interval_ms,
             vnodes_per_node: cluster.vnodes_per_node,
             ring,
             peer_addrs,
@@ -175,6 +180,14 @@ impl Coordinator {
             .as_ref()
             .map(|s| s.read().version())
             .unwrap_or(0)
+    }
+
+    /// Phase 44f: cached `gossip_probe_interval_ms` from the cluster
+    /// config. Used by the QUERY skip-with-warning retry path to wait
+    /// `2 ×` this value before retrying a fan-out that returned at
+    /// least one `index_not_yet_materialized` peer error.
+    pub fn gossip_probe_interval_ms(&self) -> u64 {
+        self.gossip_probe_interval_ms
     }
 
     /// Phase 44d: JSON snapshot of every locally-known schema entry.

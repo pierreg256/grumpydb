@@ -17,6 +17,15 @@ Status note (v6 Stream E):
   `drop_index`. Two new admin commands (`SCHEMA VERSION`, `SCHEMA STATUS`)
   expose the local view. See [`SCHEMA_GOSSIP.md`](./SCHEMA_GOSSIP.md) and
   [`IMPLEMENTATION_PLAN_V5.md`](./IMPLEMENTATION_PLAN_V5.md) for details.
+- Phase 44f (QUERY fan-out skip-with-warning) is complete. Verified
+  `QUERY` / `QUERYRANGE` with `R≥2` no longer fail when a peer is mid
+  schema-materialization. Acceptors rewrite convergence-lag failures as
+  `index_not_yet_materialized:<index_name>`; the coordinator skips those
+  peers, retries the fan-out once after `2 × gossip_probe_interval_ms`
+  (capped at 5 s), and appends a sentinel
+  `_warning convergence: N peer(s) not yet materialized: [..]` entry to
+  the trailing `Response::Array` if any peer remains skipped. See
+  [`SCHEMA_GOSSIP.md`](./SCHEMA_GOSSIP.md) §5.5 for the full contract.
 - Phase 45 is complete. Coordinator routing defaults to
   `N = min(3, cluster_size)`, write admission is allowed on any local write
   replica in the key's preference list, and bounded `WRITE_CONCERN W` in
@@ -83,6 +92,17 @@ path:
 Verified mode is fail-fast on peer anomalies: if peer candidate collection/read
 RPC fails, or a peer returns an invalid candidate UUID, the command returns an
 error.
+
+Phase 44f exception (schema-gossip convergence lag): when a peer reports
+`index_not_yet_materialized:<index_name>` (the cluster schema knows the index
+but that peer's materializer has not caught up yet), the coordinator skips that
+peer rather than failing the command, retries the fan-out **once** after
+`2 × gossip_probe_interval_ms` (capped at 5 s), and appends a sentinel
+`_warning convergence: N peer(s) not yet materialized: [..]` entry to the
+trailing `Response::Array` if any peer remains skipped after the retry.
+Drivers SHOULD filter or surface unrecognized leading-`_` array entries as
+convergence warnings (UUID rows never start with `_`). See
+[`SCHEMA_GOSSIP.md`](./SCHEMA_GOSSIP.md) §5.5 for the full contract.
 
 Fast path remains local index-only behavior when `R=1`.
 
@@ -323,7 +343,13 @@ escape valves. v5/v6/v7 all read the same `node.json` and the same
   quorum reads and re-validates predicates against document fields before
   returning rows. `R=1` keeps the original local-index fast path. Verified
   mode rejects candidate sets above `4096` UUIDs and fails on peer candidate
-  collection/read errors or invalid peer candidate UUID payloads.
+  collection/read errors or invalid peer candidate UUID payloads. Phase 44f
+  adds one narrow exception: peer responses prefixed with
+  `index_not_yet_materialized:` (schema-gossip convergence lag) cause the
+  peer to be skipped, the fan-out to be retried once after
+  `2 × gossip_probe_interval_ms` (capped at 5 s), and a
+  `_warning convergence: N peer(s) not yet materialized: [..]` sentinel
+  to be appended to the trailing array if any peer remains skipped.
 - **v6 (replication apply behavior)**: peer-applied writes auto-create missing
   target tenant/database/collection before apply so replicated
   upserts/deletes can succeed on destination nodes that have not pre-created

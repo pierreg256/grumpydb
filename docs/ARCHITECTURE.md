@@ -751,6 +751,18 @@ Verified mode enforces a candidate ceiling of `4096` UUIDs and fails on
 overflow (no partial result set). Verified mode also fails if peer candidate
 collection/read RPC fails or if a peer returns an invalid candidate UUID.
 
+Phase 44f exception (schema-gossip convergence lag): peer responses prefixed
+with `index_not_yet_materialized:<index_name>` (cluster schema knows the
+index but the peer has not finished materializing it yet) cause the
+coordinator to **skip** the peer rather than fail the command, retry the
+fan-out **once** after `2 × gossip_probe_interval_ms` (capped at 5 s), and
+append a `_warning convergence: N peer(s) not yet materialized: [..]`
+sentinel to the trailing `Response::Array` if peers remain skipped after the
+retry. The leading `_` is a wire-level marker (UUID rows never start with
+`_`) so unaware drivers parse it as an opaque bulk string and
+schema-aware drivers can surface convergence lag to the caller. See
+[`docs/SCHEMA_GOSSIP.md`](SCHEMA_GOSSIP.md) §5.5.
+
 ### 13.5 Field Extraction
 
 `extract_field(value, "address.city")` navigates a `Value::Object` using dot-separated paths. Missing fields are silently skipped (document not indexed).
@@ -1151,7 +1163,13 @@ commands (`R, W ∈ [1, N]`). Runtime semantics are now functional for:
   immediate remote repair fails).
 - secondary-index `QUERY`/`QUERYRANGE` with effective `R>1`: execution gathers
   local + peer index candidates, hydrates via quorum reads, re-evaluates the
-  predicate against document fields, and returns validated rows.
+  predicate against document fields, and returns validated rows. Phase 44f
+  carves out a single exception: peer errors prefixed with
+  `index_not_yet_materialized:<index_name>` (schema-gossip convergence lag)
+  cause the peer to be skipped, the fan-out to be retried once after
+  `2 × gossip_probe_interval_ms` (capped at 5 s), and a
+  `_warning convergence: N peer(s) not yet materialized: [..]` sentinel to be
+  appended to the trailing array if any peer remains skipped.
 
 For `QUERY`/`QUERYRANGE`, `R=1` keeps the local-index fast path. Verified mode
 caps candidate UUIDs at `4096` and returns an error when exceeded.

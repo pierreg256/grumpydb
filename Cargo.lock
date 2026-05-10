@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "grumpy-repl"
-version = "5.1.0"
+version = "5.1.1"
 dependencies = [
  "grumpydb",
  "grumpydb-client",
@@ -1468,7 +1468,7 @@ dependencies = [
 
 [[package]]
 name = "grumpydb"
-version = "5.1.0"
+version = "5.1.1"
 dependencies = [
  "crc32fast",
  "criterion",
@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "grumpydb-client"
-version = "5.1.0"
+version = "5.1.1"
 dependencies = [
  "grumpydb-protocol",
  "jsonwebtoken",
@@ -1504,14 +1504,14 @@ dependencies = [
 
 [[package]]
 name = "grumpydb-protocol"
-version = "5.1.0"
+version = "5.1.1"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "grumpydb-replication"
-version = "5.1.0"
+version = "5.1.1"
 dependencies = [
  "async-trait",
  "crc32fast",
@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "grumpydb-ring"
-version = "5.1.0"
+version = "5.1.1"
 dependencies = [
  "criterion",
  "murmur3",
@@ -1539,7 +1539,7 @@ dependencies = [
 
 [[package]]
 name = "grumpydb-server"
-version = "5.1.0"
+version = "5.1.1"
 dependencies = [
  "argon2",
  "aws-config",
@@ -1588,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "grumpydb-testing"
-version = "5.1.0"
+version = "5.1.1"
 dependencies = [
  "rand 0.8.6",
  "tempfile",

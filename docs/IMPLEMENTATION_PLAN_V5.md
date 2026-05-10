@@ -12,7 +12,8 @@
 
 ## Status
 
-All five tranches (44a–44e) shipped in May 2026.
+All five tranches (44a–44e) shipped in May 2026; 44f added immediately
+after as a follow-up to a sub-bug surfaced by the demo cluster.
 
 | Tranche | Theme | Status |
 |---|---|---|
@@ -21,6 +22,7 @@ All five tranches (44a–44e) shipped in May 2026.
 | 44c | Background materializer + `record_local_index_ddl` | ✅ |
 | 44d | `SCHEMA VERSION` / `SCHEMA STATUS` + Prometheus + refined `IndexNotFound` | ✅ |
 | 44e | Integration tests + docs + demo script + legacy cleanup | ✅ |
+| 44f | QUERY fan-out skip-with-warning + bounded retry on convergence lag | ✅ |
 
 ## What changed for users
 
@@ -131,3 +133,99 @@ Four new Prometheus series surfaced via `/metrics`:
   current implementation is monotonic per-node, which is enough for
   per-node version allocation — concurrent CREATEs across nodes get
   tie-broken by HLC + (eventually) node-id ordering.
+
+## Tranche 44f — QUERY fan-out skip-with-warning
+
+### Problem
+
+After 44e shipped, `scripts/demo_cluster.sh` still occasionally
+returned a hard error of the form
+
+```text
+-ERR verified query failed to fetch candidates from peer ...aaa5: index not found: by_name
+```
+
+when a `QUERY` with `R≥2` arrived on a coordinator node before every
+peer in the preference list had finished materializing the index
+locally. The handler treated any peer failure as fatal, even when the
+schema gossip clearly knew the index existed cluster-wide.
+
+### Fix
+
+1. **Acceptor side** (`cluster::handshake::handle_peer_data_op_with_coord`):
+   when `QueryIndexExact` / `QueryIndexRange` triggers a
+   `database not found` / `collection not found` / `index not found`
+   reply **and** the local `SchemaState` knows the target index, the
+   error message is rewritten as
+   `index_not_yet_materialized:<index_name>`. This is a stable
+   machine-readable prefix.
+2. **Coordinator handler** (`tcp::handler::collect_peer_candidates`):
+   peer errors with that prefix are logged at `debug` level and the
+   peer's `node_id` is collected into `skipped_peers`; the fan-out
+   continues with the remaining peers instead of aborting.
+3. **Bounded retry** (Phase 44f extended scope): if at least one peer
+   was skipped, the handler sleeps `2 × gossip_probe_interval_ms`
+   (capped at 5 s) and re-issues the fan-out **once**. Most schema
+   diffs converge within one probe period; the retry keeps results
+   complete in the common case while bounding latency.
+4. **Result framing**: when one or more peers remain skipped after
+   the retry, a sentinel `_warning convergence: N peer(s) not yet
+   materialized: [nodeA,nodeB]` entry is appended to the trailing
+   `Response::Array`. The leading `_` makes it trivially distinguishable
+   from a normal `<uuid> {json}` row (UUIDs never start with `_`).
+   Drivers that don't know about it see what looks like a noop bulk
+   string; aware drivers can surface convergence lag to the caller
+   and trigger an application-level retry.
+
+### Why "skip" rather than "fail" or "block"
+
+- **Fail** (pre-44f): unusable in practice — every `CREATE INDEX`
+  followed quickly by a `QUERY` ran a real risk of intermittent
+  errors during the gossip convergence window.
+- **Block (synchronous quorum on DDL)**: would mean making
+  `CREATE INDEX` block until every replica has materialized, killing
+  the asynchronous, partition-tolerant model that motivated 44a–c.
+- **Skip + warning** (chosen): clients with `R≥2` get a useful
+  partial answer plus an explicit signal that the result may be
+  incomplete. The bounded retry inside the handler hides the
+  short-window common case.
+
+### Module touch-list
+
+- `grumpydb-server/src/coordinator.rs` — new field
+  `gossip_probe_interval_ms: u64` (cached from `[cluster]` config) +
+  `pub fn gossip_probe_interval_ms()` accessor.
+- `grumpydb-server/src/cluster/handshake.rs` — new
+  `pub(crate) const INDEX_NOT_YET_MATERIALIZED_PREFIX`;
+  `handle_peer_data_op_with_coord` now post-processes index-query
+  responses to rewrite convergence-lag errors. Two new unit tests.
+- `grumpydb-server/src/tcp/handler.rs` — new `PeerCandidateFanout`
+  struct + `collect_peer_candidates` helper + `format_skip_warning`
+  helper; both `Command::Query` and `Command::QueryRange` branches
+  refactored to use them and to perform the bounded retry. Four new
+  unit tests.
+
+### What the demo cluster shows
+
+After 44f, `scripts/demo_cluster.sh` no longer prints the
+`verified query failed to fetch candidates ... index not found`
+banner. Either:
+
+- the gossip has fully converged before the QUERY is issued (most
+  common — sub-second convergence), or
+- the handler's bounded retry resolves it transparently, or
+- a `_warning convergence: ...` entry is appended to the trailing
+  array (visible but non-fatal).
+
+### Out of scope for 44f
+
+- Recomputing the **R-quorum** in light of skipped peers (Option C
+  of the design discussion). For now `R` is treated against the
+  **liveness** of replicas, not their schema-readiness; a future
+  44g/45 may tighten this.
+- Driver-side retry helpers / typed warnings in `grumpydb-client` /
+  TS driver. Drivers can opportunistically filter `_warning` entries
+  today.
+- Peer-side caching of "convergence in flight" so we don't post-process
+  on every QUERY when a node knows it's catching up. Probably not
+  worth the bookkeeping in v5.

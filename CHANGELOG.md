@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.1] - 2026-05-10
+
+### v5 stream — Phase 44f (QUERY fan-out skip-with-warning)
+
+Follow-up to Phase 44 that fixes a sub-bug surfaced by
+`scripts/demo_cluster.sh`: a `QUERY` with `R≥2` could return
+`-ERR verified query failed to fetch candidates from peer X: index not
+found: by_name` whenever the schema gossip hadn't yet propagated to
+peer X. The handler now skips such peers, retries once, and (if needed)
+appends a sentinel `_warning` entry to the result instead of failing
+the whole QUERY.
+
+- **Acceptor side** (`cluster::handshake::handle_peer_data_op_with_coord`):
+  when `QueryIndexExact` / `QueryIndexRange` triggers a `database not
+  found` / `collection not found` / `index not found` reply AND the
+  local `SchemaState` knows the target index, the message is rewritten
+  as `index_not_yet_materialized:<index_name>` (machine-readable
+  prefix exposed via `pub(crate) const INDEX_NOT_YET_MATERIALIZED_PREFIX`).
+- **Coordinator side** (`tcp::handler::collect_peer_candidates`):
+  peer errors with that prefix are skipped (debug-logged) instead of
+  bubbling up. Peer `node_id`s are collected for diagnostics.
+- **Bounded retry**: when at least one peer was skipped, the handler
+  sleeps `2 × gossip_probe_interval_ms` (capped at 5 s) and re-issues
+  the fan-out exactly once. Most schema diffs converge within one
+  probe period, so the retry hides the convergence window in the
+  common case while bounding latency.
+- **Result framing**: when peers remain skipped after retry, a
+  sentinel entry `_warning convergence: N peer(s) not yet
+  materialized: [nodeA,nodeB]` is appended to the trailing
+  `Response::Array`. The leading `_` makes it trivially distinguishable
+  from a real `<uuid> {json}` row.
+- New field `Coordinator.gossip_probe_interval_ms` + accessor (cached
+  from the `[cluster]` config so the retry path doesn't re-read it).
+- 6 new unit tests:
+  - `cluster::handshake` × 2 (acceptor refines / passes through)
+  - `tcp::handler` × 4 (helpers `collect_peer_candidates`,
+    `format_skip_warning`)
+- `scripts/demo_cluster.sh` no longer prints the
+  `verified query failed to fetch candidates ... index not found`
+  banner under normal convergence conditions.
+
+### v5 stream — Phase 44 (Schema Gossip + Lazy Index Materialization)
+[shipped in v5.1.0 — see below]
+
 ## [5.1.0] - 2026-05-10
 
 ### v5 stream — Phase 44 (Schema Gossip + Lazy Index Materialization)
