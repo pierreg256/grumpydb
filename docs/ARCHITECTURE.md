@@ -885,6 +885,11 @@ Relaxed JSON: unquoted keys, single/double quotes, trailing commas. Uses `rustyl
 
 ```
 <server_root>/
+  _cluster/                          ← engine-internal cluster state (v5+)
+    node.json                        ← per-node identity (UUID + cluster_id)
+    schema.log                       ← Phase 44: append-only schema log (JSONL)
+    hints/                           ← hinted handoff backlog
+  _auth/                             ← authentication store (users, JWT keys)
   <client_name>/                     ← one directory per client
     <database_name>/                 ← one directory per database
       wal.log
@@ -893,6 +898,14 @@ Relaxed JSON: unquoted keys, single/double quotes, trailing commas. Uses `rustyl
         primary.idx
         idx_*.idx
 ```
+
+> The `_cluster/schema.log` file is the source of truth for the
+> cluster-wide schema (currently only secondary index definitions).
+> Every node converges to the same set of entries through the schema
+> gossip mechanism; see [`CLUSTER.md`](./CLUSTER.md) and
+> [`SCHEMA_GOSSIP.md`](./SCHEMA_GOSSIP.md). Bootstrap is zero-touch:
+> on first start with a v5 binary, any pre-existing `idx_*.idx` files
+> are synthesized into log entries with HLC=0.
 
 ### 16.2 GrumpyServer
 

@@ -65,11 +65,22 @@ pub async fn listen(
         })
         .unwrap_or(config.server.bind.as_str());
 
-    let coordinator = Arc::new(Coordinator::from_config(
-        identity.as_ref(),
-        &config.cluster,
-        coordinator_local_addr,
-    ));
+    // Phase 44a/b/c: bootstrap the on-disk schema log from existing
+    // index files (no-op when the log already exists), then load it
+    // into the coordinator so gossip can advertise the local
+    // schema_version and serve PullSchemaSince RPCs. Spawn the
+    // background materializer that turns gossiped schema entries
+    // into on-disk index files.
+    use crate::cluster::schema::{bootstrap, log::SchemaLog, materializer};
+    bootstrap::bootstrap_from_data_dir(&config.server.data_dir)?;
+    let (schema_log, schema_state) = SchemaLog::open(&config.server.data_dir)?;
+    let materializer_handle = materializer::spawn(shared_server.clone());
+
+    let mut coordinator =
+        Coordinator::from_config(identity.as_ref(), &config.cluster, coordinator_local_addr);
+    coordinator.attach_schema(schema_state, schema_log);
+    coordinator.attach_materializer(materializer_handle);
+    let coordinator = Arc::new(coordinator);
     let hint_store = Arc::new(HintStore::open(&config.server.data_dir)?);
     let read_repair_store = Arc::new(ReadRepairStore::open(&config.server.data_dir)?);
 

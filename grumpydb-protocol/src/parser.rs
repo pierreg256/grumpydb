@@ -72,6 +72,7 @@ pub fn parse_command(line: &str) -> Result<Command, ProtocolError> {
         "LIST" => parse_list(rest),
         "ALTER" => parse_alter(rest),
         "SHOW" => parse_show(rest),
+        "SCHEMA" => parse_schema(rest),
         "GRANT" => parse_grant(rest),
         "REVOKE" => parse_revoke(rest),
         "ELECT-WRITER" | "ELECT_WRITER" => parse_elect_writer(rest),
@@ -442,6 +443,19 @@ fn parse_show(rest: &str) -> Result<Command, ProtocolError> {
     Ok(Command::ShowDatabaseConsistency {
         database: database.to_string(),
     })
+}
+
+/// Phase 44d: `SCHEMA VERSION` / `SCHEMA STATUS`.
+fn parse_schema(rest: &str) -> Result<Command, ProtocolError> {
+    let (sub, _rest) = split_first_word(rest);
+    match sub.to_ascii_uppercase().as_str() {
+        "VERSION" => Ok(Command::SchemaVersion),
+        "STATUS" => Ok(Command::SchemaStatus),
+        "" => Err(ProtocolError::MissingArgument(
+            "SCHEMA requires VERSION|STATUS".into(),
+        )),
+        _ => Err(ProtocolError::UnknownCommand(format!("SCHEMA {sub}"))),
+    }
 }
 
 fn parse_database_consistency_settings(
@@ -950,6 +964,34 @@ mod tests {
             parse_command("snapshot-hlc\r\n").unwrap(),
             Command::SnapshotHlc
         );
+    }
+
+    #[test]
+    fn test_parse_schema_version() {
+        assert_eq!(
+            parse_command("SCHEMA VERSION\r\n").unwrap(),
+            Command::SchemaVersion
+        );
+        assert_eq!(
+            parse_command("schema version\r\n").unwrap(),
+            Command::SchemaVersion
+        );
+    }
+
+    #[test]
+    fn test_parse_schema_status() {
+        assert_eq!(
+            parse_command("SCHEMA STATUS\r\n").unwrap(),
+            Command::SchemaStatus
+        );
+    }
+
+    #[test]
+    fn test_parse_schema_requires_subcommand() {
+        let err = parse_command("SCHEMA\r\n").unwrap_err();
+        assert!(matches!(err, ProtocolError::MissingArgument(_)));
+        let err = parse_command("SCHEMA WAT\r\n").unwrap_err();
+        assert!(matches!(err, ProtocolError::UnknownCommand(_)));
     }
 
     #[test]

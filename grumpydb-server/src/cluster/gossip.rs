@@ -8,7 +8,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::cluster::NodeIdentity;
-use crate::cluster::handshake::{GossipPayload, probe_peer_with_gossip};
+use crate::cluster::handshake::{
+    ClusterHelloResponse, GossipPayload, PeerRpcContext, probe_peer_with_gossip,
+    pull_schema_from_peer,
+};
 use crate::config::ClusterSection;
 use crate::coordinator::Coordinator;
 
@@ -64,11 +67,55 @@ async fn probe_one_peer(
     )
     .await
     {
-        Ok(()) => {
+        Ok(response) => {
             coordinator.update_peer_liveness(node_id, "up", Some(now));
+            // Phase 44b: opportunistically pull schema entries from
+            // any peer that advertises a higher schema_version. The
+            // gossip path is symmetric, so a peer that's behind us
+            // will pull from us on its own next tick — no action
+            // needed in that direction here.
+            maybe_pull_schema(addr, identity, server_version, &response, coordinator).await;
         }
         Err(e) => {
             on_probe_failure(node_id, dead_after_secs, now, coordinator, &e);
+        }
+    }
+}
+
+async fn maybe_pull_schema(
+    addr: &str,
+    identity: &NodeIdentity,
+    server_version: &str,
+    response: &ClusterHelloResponse,
+    coordinator: &Coordinator,
+) {
+    let local_version = coordinator.schema_version();
+    if response.schema_version <= local_version {
+        return;
+    }
+
+    let ctx = PeerRpcContext {
+        addr: addr.to_string(),
+        local_cluster_id: identity.cluster_id,
+        local_node_id: identity.node_id,
+        server_version: server_version.to_string(),
+    };
+
+    match pull_schema_from_peer(&ctx, local_version).await {
+        Ok(entries) => {
+            let n = entries.len();
+            let applied = coordinator.apply_remote_schema_entries(&entries);
+            tracing::debug!(
+                addr,
+                received = n,
+                applied,
+                local_version,
+                remote_version = response.schema_version,
+                "schema pull from peer"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(addr, error = %e, "schema pull from peer failed");
         }
     }
 }

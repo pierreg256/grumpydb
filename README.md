@@ -289,6 +289,32 @@ LIST USERS @acme
 | `users:mydb@acme` | Collection in database in tenant |
 | `@acme` | Tenant scope (for GRANT/REVOKE) |
 
+### Schema gossip (Phase 44)
+
+`CREATE INDEX` and `DROP INDEX` are recorded in a per-node append-only
+log at `<data_dir>/_cluster/schema.log`, advertised through the gossip
+probe loop via `GossipPayload.schema_version`, and pulled by lagging
+peers via the `PeerDataOp::PullSchemaSince` RPC. A background
+materializer task per node consumes incoming schema diffs and calls the
+engine's existing `Database::create_index` / `drop_index`. Bootstrap
+from a v4.x data dir is zero-touch: pre-existing `idx_*.idx` files are
+synthesized into log entries on first start with a Phase 44 binary.
+
+Two new admin commands expose the local view (no RBAC scope, mirrors
+`TOPOLOGY` / `SNAPSHOT_HLC`):
+
+```text
+SCHEMA VERSION                 # → :N (cluster-wide schema version, local view)
+SCHEMA STATUS                  # → JSON {node_id, schema_version, indexes:[...]}
+```
+
+`QUERY` / `QUERYRANGE` returning `index not found` distinguish two
+cases: when the schema knows the index but the local materializer
+hasn't caught up the error message is explicit — smart drivers should
+treat this as a transient retryable error.
+
+See [docs/SCHEMA_GOSSIP.md](docs/SCHEMA_GOSSIP.md) for the full design.
+
 ### Consistency and topology protocol (Phase 40f)
 
 The TCP protocol now exposes coordinator and consistency-locking primitives:
@@ -507,6 +533,10 @@ Under the hood, GrumpyDB is a page-based storage engine:
 ```
 <data_dir>/
   _auth/                        # JWT secret + user records
+  _cluster/                     # Cluster identity, hints, schema log (clustered builds)
+    node.json                   # Stable node_id + cluster_id
+    schema.log                  # Phase 44: append-only schema log (JSONL)
+    hints/                      # Hinted handoff backlog
   <tenant>/
     <database>/
       wal.log                   # Write-Ahead Log

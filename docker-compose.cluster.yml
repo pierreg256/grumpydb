@@ -1,4 +1,4 @@
-# 3-node GrumpyDB cluster demo (v5).
+# 5-node GrumpyDB cluster demo (v5).
 #
 # Start:
 #   GRUMPYDB_BOOTSTRAP_PASSWORD=admin docker compose -f docker-compose.cluster.yml up --build
@@ -6,6 +6,7 @@
 # Notes:
 # - Node identities are pre-seeded under docker/cluster/data/node*/_cluster/node.json.
 # - Writer assignment is pinned to node1 in docker/cluster/node*.toml.
+# - Replication factor N is auto-derived: min(3, cluster_size) → N=3 with 5 nodes.
 
 services:
   node1:
@@ -58,3 +59,37 @@ services:
       - "6383:6380"
       - "8083:6381"
       - "7393:7390"
+
+  node4:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: grumpydb-server:cluster-demo
+    container_name: grumpydb-node4
+    command: ["--config", "/etc/grumpydb/grumpydb.toml", "--data", "/data", "--no-tls", "--log-format", "json"]
+    environment:
+      GRUMPYDB_BOOTSTRAP_PASSWORD: "${GRUMPYDB_BOOTSTRAP_PASSWORD:-admin}"
+    volumes:
+      - ./docker/cluster/node4.toml:/etc/grumpydb/grumpydb.toml:ro
+      - ./docker/cluster/data/node4:/data
+    ports:
+      - "6384:6380"
+      - "8084:6381"
+      - "7394:7390"
+
+  node5:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: grumpydb-server:cluster-demo
+    container_name: grumpydb-node5
+    command: ["--config", "/etc/grumpydb/grumpydb.toml", "--data", "/data", "--no-tls", "--log-format", "json"]
+    environment:
+      GRUMPYDB_BOOTSTRAP_PASSWORD: "${GRUMPYDB_BOOTSTRAP_PASSWORD:-admin}"
+    volumes:
+      - ./docker/cluster/node5.toml:/etc/grumpydb/grumpydb.toml:ro
+      - ./docker/cluster/data/node5:/data
+    ports:
+      - "6385:6380"
+      - "8085:6381"
+      - "7395:7390"

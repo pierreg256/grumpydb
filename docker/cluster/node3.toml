@@ -26,6 +26,14 @@ addr = "node2:7390"
 node_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa3"
 addr = "node3:7390"
 
+[[cluster.peers]]
+node_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa4"
+addr = "node4:7390"
+
+[[cluster.peers]]
+node_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa5"
+addr = "node5:7390"
+
 [[cluster.writers]]
 collection = "*"
 node_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1"

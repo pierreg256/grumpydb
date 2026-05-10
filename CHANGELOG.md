@@ -7,6 +7,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.1.0] - 2026-05-10
+
+### v5 stream — Phase 44 (Schema Gossip + Lazy Index Materialization)
+
+- Phase 44 (schema gossip) is **complete** in `grumpydb-server`. It
+  replaces the broken DDL fan-out of Phases 40–43 (where `CREATE INDEX`
+  only reached the `N` write replicas of a synthetic routing key,
+  leaving the other `cluster_size - N` nodes without the index file
+  and causing intermittent `index not found` errors on `QUERY`).
+- See [`docs/SCHEMA_GOSSIP.md`](docs/SCHEMA_GOSSIP.md) for the design
+  rationale and [`docs/IMPLEMENTATION_PLAN_V5.md`](docs/IMPLEMENTATION_PLAN_V5.md)
+  for the per-tranche implementation log.
+
+#### 44a — `SchemaState` model + `_cluster/schema.log` + bootstrap
+- New module tree `grumpydb-server/src/cluster/schema/` with:
+  - `mod.rs` — `SchemaState`, `IndexKey`, `IndexEntry`, `SchemaOp`,
+    `SchemaLogEntry`, `apply()` with LWW + tombstone semantics.
+  - `log.rs` — `SchemaLog`: append-only JSONL writer at
+    `<data_dir>/_cluster/schema.log` (~200 bytes per entry, no
+    compaction in v5).
+  - `bootstrap.rs` — `bootstrap_from_data_dir()` synthesizes the
+    initial log from any pre-existing `idx_*.idx` files, with
+    `HLC = 0`, so existing v4.x/v5 data dirs upgrade without
+    operator intervention.
+  - `tests.rs` — 19 unit tests covering apply/LWW/tombstone/log
+    round-trips/bootstrap.
+
+#### 44b — `GossipPayload.schema_version` + `pull_schema_since` RPC
+- `GossipPayload`, `ClusterHello`, and `ClusterHelloResponse` gained
+  an optional `schema_version: u64` field
+  (`#[serde(default)]`, fully backwards compatible with pre-44b
+  binaries).
+- New peer RPC variants:
+  - `PeerDataOp::PullSchemaSince { since_version: u64 }`
+  - `PeerDataOpResponse::SchemaDiff { entries: Vec<SchemaLogEntry> }`
+- `gossip::probe_one_peer` now triggers an immediate schema pull when
+  the peer advertises `schema_version > local`. Pulled entries are
+  applied through the same `SchemaState::apply()` path as local DDL.
+- `cluster::handshake` exposes `read_frame`/`write_frame` as
+  `pub(crate)` and adds `pull_schema_from_peer`,
+  `run_acceptor_with_hello_and_schema`, and
+  `handle_peer_data_op_with_coord`.
+
+#### 44c — Background materializer + `record_local_index_ddl`
+- New `grumpydb-server/src/cluster/schema/materializer.rs`:
+  `MaterializeJob`, `MaterializerHandle`, and `spawn(SharedServer)`
+  worker (tokio task). The worker is **idempotent**: it skips jobs
+  whose target index already matches the desired schema state.
+  6 unit tests included.
+- The legacy DDL fan-out
+  (`Coordinator::create_index_on_peer` / `drop_index_on_peer`) is
+  **removed**. `tcp::handler` now calls a single
+  `record_local_index_ddl` helper that:
+  1. Writes the DDL to the local schema log.
+  2. Calls `coordinator.apply_local_create_index` /
+     `apply_local_drop_index` (which bumps `schema_version` and
+     enqueues a `MaterializeJob`).
+  3. Returns success immediately — peers converge through gossip.
+- `Coordinator` gains `schema: Option<RwLock<SchemaState>>`,
+  `schema_log: Option<SchemaLog>`, `materializer: Option<MaterializerHandle>`,
+  plus `attach_schema`, `attach_materializer`, `schema_version`,
+  `local_schema_diff_since`, `apply_remote_schema_entries`,
+  `apply_local_ddl`, `apply_local_create_index`, `apply_local_drop_index`,
+  `schema_status_json`, and `schema_has_index`.
+  `gossip_payload()` now injects `schema_version`. (4 new coordinator
+  unit tests.)
+- The TCP listener wires it up at startup:
+  `bootstrap_from_data_dir` → `SchemaLog::open` → `materializer::spawn`
+  → `coordinator.attach_schema` + `attach_materializer`.
+
+#### 44d — `SCHEMA VERSION` / `SCHEMA STATUS` + Prometheus + refined `IndexNotFound`
+- New protocol commands (`Action::Session`, `Resource::None`):
+  - `SCHEMA VERSION` → `:N` (cluster-wide schema version, local view).
+  - `SCHEMA STATUS` → JSON
+    `{node_id, schema_version, indexes:[{tenant, database, collection,
+    index_name, field_path, tombstone, last_modified_hlc}]}`.
+  Parser dispatches `SCHEMA <subcmd>` through a multi-word handler.
+- `QUERY` / `QUERYRANGE` now intercept `IndexNotFound` and call
+  `refine_index_not_found(coordinator, ...)` which distinguishes
+  "schema knows the index but local materializer hasn't caught up"
+  (transient, retryable) from "schema does not know the index"
+  (client error). Smart drivers should treat the first as transient.
+- Four new Prometheus series:
+  - `grumpydb_schema_version{node_id}` — gauge.
+  - `grumpydb_schema_pulls_total{result=applied}` — counter.
+  - `grumpydb_schema_materialize_jobs_total{kind=build|drop, result=ok|error}`
+    — counter.
+  - `grumpydb_schema_materialize_duration_seconds{kind}` — histogram.
+
+#### 44e — Integration tests + docs + demo + legacy cleanup
+- New `grumpydb-server/tests/schema_gossip.rs` with 4 end-to-end tests:
+  - `test_create_index_propagates_to_peer_and_materializes`
+  - `test_repeated_gossip_rounds_are_idempotent`
+  - `test_drop_then_late_create_does_not_resurrect_on_peer`
+  - `test_bootstrap_from_existing_idx_files_seeds_schema_state`
+- `scripts/demo_cluster.sh` rewritten to use `SCHEMA VERSION` for
+  convergence and to query every node, validating cross-node QUERY.
+- Legacy cleanup:
+  - `Coordinator::create_index_on_peer` / `drop_index_on_peer`
+    deleted (dead since 44c).
+  - `index_ddl_target` deleted from `tcp::handler`.
+  - `CreateIndex` / `DropIndex` branches removed from
+    `write_hint_operation` (unreachable since 44c). The
+    `HintOperation::CreateIndex` / `DropIndex` variants are kept on
+    purpose so that pre-44c persisted hints can still replay on a
+    rolling upgrade.
+
+#### Out of scope for Phase 44 (tracked for later)
+- Schema log compaction / GC.
+- Schema operations beyond `CREATE INDEX` / `DROP INDEX` (`CREATE
+  COLLECTION`, schema validation rules). The log format is
+  forward-compatible: `SchemaOp` is a `serde(tag = "kind")` enum.
+- Replacing the `now_unix_millis()` HLC proxy used by
+  `record_local_index_ddl` with the engine's real `HlcClock`. The
+  current value is monotonic per-node, which is sufficient for
+  per-node version allocation; concurrent DDLs across nodes are
+  tie-broken by HLC then `BTreeMap` ordering.
+
 ### v6 stream — Stream E (Phase 46 kickoff)
 
 - Added database-level consistency default protocol support:

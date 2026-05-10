@@ -36,6 +36,11 @@ pub enum Command {
     Topology,
     /// Return the current database snapshot HLC so clients can pin reads.
     SnapshotHlc,
+    /// Phase 44d: return the local cluster-wide schema version.
+    SchemaVersion,
+    /// Phase 44d: return a JSON snapshot of every locally-known
+    /// schema entry, including pending materialization.
+    SchemaStatus,
 
     // ── Session ─────────────────────────────────────────────────────
     /// Select the active database.
@@ -284,6 +289,8 @@ impl Command {
             | Command::WhoAmI
             | Command::Topology
             | Command::SnapshotHlc
+            | Command::SchemaVersion
+            | Command::SchemaStatus
             | Command::Use(_)
             | Command::Ping
             | Command::Quit => Action::Session,
@@ -360,6 +367,8 @@ impl Command {
             | Command::Refresh(_)
             | Command::WhoAmI
             | Command::Topology
+            | Command::SchemaVersion
+            | Command::SchemaStatus
             | Command::Use(_)
             | Command::Ping
             | Command::Quit => Resource::None,

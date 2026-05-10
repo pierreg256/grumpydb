@@ -226,15 +226,9 @@ where
         .await;
 
         if !matches!(&response, Response::Error(_))
-            && let Err(e) = replicate_index_ddl(
-                &command,
-                &session,
-                coordinator.as_ref(),
-                pipelines.hint_store.as_ref(),
-            )
-            .await
+            && let Err(e) = record_local_index_ddl(&command, &session, coordinator.as_ref()).await
         {
-            tracing::warn!(error = %e, "index ddl replication failed");
+            tracing::warn!(error = %e, "local index ddl record failed");
             response = Response::Error(e);
         }
 
@@ -332,17 +326,6 @@ fn write_hint_operation(command: &Command) -> Option<HintOperation> {
             })
         }
         Command::Delete { .. } => Some(HintOperation::Delete),
-        Command::CreateIndex {
-            index_name,
-            field_path,
-            ..
-        } => Some(HintOperation::CreateIndex {
-            index_name: index_name.clone(),
-            field_path: field_path.clone(),
-        }),
-        Command::DropIndex { index_name, .. } => Some(HintOperation::DropIndex {
-            index_name: index_name.clone(),
-        }),
         Command::PutWithVc {
             value,
             vector_clock,
@@ -351,97 +334,83 @@ fn write_hint_operation(command: &Command) -> Option<HintOperation> {
             value_json: serde_json::json!({"value": value, "vector_clock": vector_clock})
                 .to_string(),
         }),
+        // Phase 44c: CREATE INDEX / DROP INDEX never produce hints
+        // anymore — they propagate through the schema gossip path
+        // ([`crate::cluster::schema`]). Pre-44c hints persisted on
+        // disk are still replayable via [`HintRecord::resolved_operation`].
         _ => None,
     }
 }
 
-fn index_ddl_target(command: &Command) -> Option<(&str, &str, Option<&str>)> {
-    match base_command(command) {
+/// Phase 44c: record one DDL locally in the schema log. The cluster
+/// schema version is bumped, the entry is persisted to
+/// `_cluster/schema.log`, and a materialization job is enqueued on
+/// the local materializer (no-op on this node since the engine call
+/// already ran). Other peers learn about the change via the gossip
+/// pull loop in [`crate::cluster::gossip`].
+///
+/// Replaces the legacy `replicate_index_ddl` (pre-44c), which used
+/// preference-list routing and only reached N peers out of the
+/// cluster — see `docs/SCHEMA_GOSSIP.md` for the full rationale.
+async fn record_local_index_ddl(
+    command: &Command,
+    session: &SessionContext,
+    coordinator: &Coordinator,
+) -> Result<(), String> {
+    let (collection, index_name, field_path) = match base_command(command) {
         Command::CreateIndex {
             collection,
             index_name,
             field_path,
-        } => Some((
+        } => (
             collection.as_str(),
             index_name.as_str(),
             Some(field_path.as_str()),
-        )),
+        ),
         Command::DropIndex {
             collection,
             index_name,
-        } => Some((collection.as_str(), index_name.as_str(), None)),
-        _ => None,
-    }
-}
-
-async fn replicate_index_ddl(
-    command: &Command,
-    session: &SessionContext,
-    coordinator: &Coordinator,
-    hint_store: &HintStore,
-) -> Result<(), String> {
-    let Some((collection, index_name, field_path)) = index_ddl_target(command) else {
-        return Ok(());
+        } => (collection.as_str(), index_name.as_str(), None),
+        _ => return Ok(()),
     };
+
     let Some(db_name) = session.current_db() else {
         return Ok(());
     };
     let tenant = session.tenant().map_err(|e| e.to_string())?.to_string();
-    let route_key = match field_path {
-        Some(path) => format!("ddl:create-index:{collection}:{index_name}:{path}"),
-        None => format!("ddl:drop-index:{collection}:{index_name}"),
-    };
-    let operation = match write_hint_operation(command) {
-        Some(op) => op,
-        None => return Ok(()),
+
+    // Cheap monotonic HLC proxy: ms-since-epoch. The schema state's
+    // LWW resolution only requires a strictly-monotonic per-node
+    // value; concurrent CREATEs across the cluster get tie-broken
+    // deterministically by the BTreeMap insertion order downstream.
+    // 44d/45 may swap this for the real `HlcClock` plumbed through.
+    let hlc = now_unix_millis();
+
+    let entry = match field_path {
+        Some(path) => coordinator
+            .apply_local_create_index(&tenant, db_name, collection, index_name, path, hlc),
+        None => coordinator.apply_local_drop_index(&tenant, db_name, collection, index_name, hlc),
     };
 
-    let replicas =
-        coordinator.replica_peer_nodes_for_key(db_name, collection, route_key.as_bytes());
-    for node_id in replicas {
-        let result = match field_path {
-            Some(path) => {
-                coordinator
-                    .create_index_on_peer(&node_id, &tenant, db_name, collection, index_name, path)
-                    .await
-            }
-            None => {
-                coordinator
-                    .drop_index_on_peer(&node_id, &tenant, db_name, collection, index_name)
-                    .await
-            }
-        };
-
-        if let Err(e) = result {
-            tracing::warn!(
-                error = %e,
-                node_id = %node_id,
-                collection = %collection,
-                index_name = %index_name,
-                "index ddl replication failed, enqueueing hinted handoff"
-            );
-            let hint = HintRecord {
-                created_at_unix: now_unix(),
-                tenant: tenant.clone(),
-                database: db_name.to_string(),
-                collection: collection.to_string(),
-                key: route_key.clone(),
-                operation: Some(operation.clone()),
-                payload_json: None,
-            };
-            if let Err(store_err) = hint_store.append(&node_id, &hint) {
-                tracing::warn!(
-                    error = %store_err,
-                    node_id = %node_id,
-                    "failed to persist index ddl hinted handoff record"
-                );
-            } else {
-                metrics::counter!("grumpydb_hints_enqueued_total").increment(1);
-            }
-        }
+    if let Some(entry) = entry {
+        tracing::info!(
+            schema_version = entry.version,
+            tenant = %tenant,
+            database = %db_name,
+            collection = %collection,
+            index_name = %index_name,
+            "local schema DDL applied; gossip will propagate"
+        );
     }
 
     Ok(())
+}
+
+fn now_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 async fn maybe_converge_read_quorum(
@@ -891,6 +860,8 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::WhoAmI => "WHOAMI",
         Command::Topology => "TOPOLOGY",
         Command::SnapshotHlc => "SNAPSHOT_HLC",
+        Command::SchemaVersion => "SCHEMA_VERSION",
+        Command::SchemaStatus => "SCHEMA_STATUS",
         Command::Use(_) => "USE",
         Command::Ping => "PING",
         Command::Quit => "QUIT",
@@ -1340,6 +1311,8 @@ async fn execute_command(
                 .map_err(|_| format!("snapshot HLC {snapshot} does not fit in i64"))?;
             Ok(Response::Integer(value))
         }),
+        Command::SchemaVersion => Response::Integer(coordinator.schema_version() as i64),
+        Command::SchemaStatus => Response::Bulk(Some(coordinator.schema_status_json().to_string())),
 
         // ── Session ─────────────────────────────────────────────
         Command::Use(db_name) => {
@@ -1593,12 +1566,22 @@ async fn execute_command(
             value,
         } => with_db(session, shared_server, |db| {
             let val = parse_json_value(value)?;
-            let results = s(db.query(collection, index_name, &val))?;
-            let items: Vec<Response> = results
-                .into_iter()
-                .map(|(k, v)| Response::Bulk(Some(format!("{} {}", k, value_to_json(&v)))))
-                .collect();
-            Ok(Response::Array(items))
+            match db.query(collection, index_name, &val) {
+                Ok(results) => {
+                    let items: Vec<Response> = results
+                        .into_iter()
+                        .map(|(k, v)| Response::Bulk(Some(format!("{} {}", k, value_to_json(&v)))))
+                        .collect();
+                    Ok(Response::Array(items))
+                }
+                Err(grumpydb::error::GrumpyError::IndexNotFound(_)) => Err(refine_index_not_found(
+                    coordinator,
+                    session,
+                    collection,
+                    index_name,
+                )),
+                Err(e) => Err(e.to_string()),
+            }
         }),
         Command::QueryRange {
             collection,
@@ -1608,12 +1591,22 @@ async fn execute_command(
         } => with_db(session, shared_server, |db| {
             let sv = parse_json_value(start)?;
             let ev = parse_json_value(end)?;
-            let results = s(db.query_range(collection, index_name, &sv, &ev))?;
-            let items: Vec<Response> = results
-                .into_iter()
-                .map(|(k, v)| Response::Bulk(Some(format!("{} {}", k, value_to_json(&v)))))
-                .collect();
-            Ok(Response::Array(items))
+            match db.query_range(collection, index_name, &sv, &ev) {
+                Ok(results) => {
+                    let items: Vec<Response> = results
+                        .into_iter()
+                        .map(|(k, v)| Response::Bulk(Some(format!("{} {}", k, value_to_json(&v)))))
+                        .collect();
+                    Ok(Response::Array(items))
+                }
+                Err(grumpydb::error::GrumpyError::IndexNotFound(_)) => Err(refine_index_not_found(
+                    coordinator,
+                    session,
+                    collection,
+                    index_name,
+                )),
+                Err(e) => Err(e.to_string()),
+            }
         }),
 
         // ── Maintenance ─────────────────────────────────────────
@@ -1836,6 +1829,33 @@ async fn execute_command(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Phase 44d: refine the engine's `IndexNotFound` so callers can
+/// distinguish "this index does not exist anywhere in the cluster"
+/// from "the cluster schema knows about it but this node hasn't
+/// finished materializing it yet". The latter is transient (gossip
+/// converges in seconds) and should be retried.
+fn refine_index_not_found(
+    coordinator: &Coordinator,
+    session: &SessionContext,
+    collection: &str,
+    index_name: &str,
+) -> String {
+    let tenant = session.tenant().map(|t| t.to_string()).unwrap_or_default();
+    let db = session.current_db().unwrap_or("");
+
+    if !tenant.is_empty()
+        && !db.is_empty()
+        && coordinator.schema_has_index(&tenant, db, collection, index_name)
+    {
+        format!(
+            "index '{index_name}' is in cluster schema (version {}) but not yet materialized on this node; retry shortly",
+            coordinator.schema_version()
+        )
+    } else {
+        format!("index not found: {index_name}")
+    }
+}
 
 /// Execute a closure with a SharedDatabase handle from the current session.
 fn with_db<F>(session: &SessionContext, shared_server: &SharedServer, f: F) -> Response

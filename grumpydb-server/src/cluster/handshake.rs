@@ -41,6 +41,7 @@ use grumpydb::SharedServer;
 use grumpydb::document::value::{CrdtKind, Value};
 
 use crate::cluster::NodeIdentity;
+use crate::cluster::schema::SchemaLogEntry;
 use crate::config::ServerConfig;
 use crate::coordinator::Coordinator;
 
@@ -69,6 +70,13 @@ pub struct GossipPayload {
     pub vnode_assignments: Vec<u32>,
     #[serde(default)]
     pub membership: Vec<PeerGossipState>,
+    /// Per-cluster monotonic schema version known by the sender.
+    /// Receiver compares against its own version to decide whether
+    /// to issue a [`PeerDataOp::PullSchemaSince`] (Phase 44b).
+    /// `0` means "sender has no schema" and is the safe default for
+    /// pre-44b binaries.
+    #[serde(default)]
+    pub schema_version: u64,
 }
 
 /// Maximum size of a single handshake frame (including the JSON body
@@ -103,6 +111,10 @@ pub struct ClusterHello {
     /// Gossip membership snapshot known by initiator.
     #[serde(default)]
     pub membership: Vec<PeerGossipState>,
+    /// Per-cluster monotonic schema version known by the initiator
+    /// (Phase 44b). `0` for pre-44b clients.
+    #[serde(default)]
+    pub schema_version: u64,
 }
 
 /// Acceptor's reply.
@@ -120,6 +132,12 @@ pub struct ClusterHelloResponse {
     /// Machine-readable error tag when `accepted == false`. Known
     /// values: `cluster_id_mismatch`, `unknown_peer`, `protocol_error`.
     pub error: Option<String>,
+    /// Per-cluster monotonic schema version known by the acceptor
+    /// (Phase 44b). The initiator inspects this and triggers a
+    /// [`PeerDataOp::PullSchemaSince`] when the acceptor is ahead.
+    /// `0` for pre-44b acceptors.
+    #[serde(default)]
+    pub schema_version: u64,
 }
 
 /// Peer operation request over an authenticated cluster connection.
@@ -173,16 +191,32 @@ pub enum PeerDataOp {
         start_json: String,
         end_json: String,
     },
+    /// Phase 44b: ask the peer for every schema log entry strictly
+    /// newer than `since_version`. Issued by the gossip probe loop
+    /// when the acceptor advertises a higher `schema_version` than
+    /// the local node knows.
+    PullSchemaSince { since_version: u64 },
 }
 
 /// Peer operation response.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PeerDataOpResponse {
-    Value { value_json: Option<String> },
-    Keys { keys: Vec<String> },
+    Value {
+        value_json: Option<String>,
+    },
+    Keys {
+        keys: Vec<String>,
+    },
     Ack,
-    Error { message: String },
+    Error {
+        message: String,
+    },
+    /// Phase 44b: response to [`PeerDataOp::PullSchemaSince`].
+    /// `entries` are sorted by ascending `version`.
+    SchemaDiff {
+        entries: Vec<SchemaLogEntry>,
+    },
 }
 
 /// Common peer-RPC connection context.
@@ -238,7 +272,7 @@ pub enum HandshakeError {
 }
 
 /// Write a length-prefixed JSON frame to `stream`.
-async fn write_frame<W, T>(stream: &mut W, value: &T) -> Result<(), HandshakeError>
+pub(crate) async fn write_frame<W, T>(stream: &mut W, value: &T) -> Result<(), HandshakeError>
 where
     W: AsyncWrite + Unpin,
     T: Serialize,
@@ -257,7 +291,7 @@ where
 }
 
 /// Read a length-prefixed JSON frame from `stream`.
-async fn read_frame<R, T>(stream: &mut R) -> Result<T, HandshakeError>
+pub(crate) async fn read_frame<R, T>(stream: &mut R) -> Result<T, HandshakeError>
 where
     R: AsyncRead + Unpin,
     T: for<'de> Deserialize<'de>,
@@ -302,12 +336,41 @@ where
 }
 
 /// Same as [`run_acceptor`], but also returns the raw initiator hello.
+///
+/// Equivalent to [`run_acceptor_with_hello_and_schema`] with
+/// `local_schema_version = 0` (back-compat for tests and pre-44b
+/// callers).
 pub async fn run_acceptor_with_hello<S>(
     stream: &mut S,
     local_cluster_id: Uuid,
     local_node_id: Uuid,
     server_version: &str,
     known_peers: &HashSet<Uuid>,
+) -> Result<(HandshakeOutcome, ClusterHello), HandshakeError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    run_acceptor_with_hello_and_schema(
+        stream,
+        local_cluster_id,
+        local_node_id,
+        server_version,
+        known_peers,
+        0,
+    )
+    .await
+}
+
+/// Phase 44b acceptor: also advertises the local `schema_version` in
+/// the [`ClusterHelloResponse`] so the initiator can decide whether
+/// to issue a [`PeerDataOp::PullSchemaSince`] on the same connection.
+pub async fn run_acceptor_with_hello_and_schema<S>(
+    stream: &mut S,
+    local_cluster_id: Uuid,
+    local_node_id: Uuid,
+    server_version: &str,
+    known_peers: &HashSet<Uuid>,
+    local_schema_version: u64,
 ) -> Result<(HandshakeOutcome, ClusterHello), HandshakeError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -329,6 +392,7 @@ where
         server_version: server_version.to_string(),
         accepted,
         error: error.clone(),
+        schema_version: local_schema_version,
     };
     write_frame(stream, &response).await?;
 
@@ -373,6 +437,7 @@ where
         last_seen_at_unix: payload.last_seen_at_unix,
         vnode_assignments: payload.vnode_assignments,
         membership: payload.membership,
+        schema_version: payload.schema_version,
     };
     write_frame(stream, &hello).await?;
 
@@ -438,18 +503,22 @@ pub async fn probe_peer_acceptance(
 }
 
 /// Probe one peer and include local gossip state for membership convergence.
+///
+/// Returns the [`ClusterHelloResponse`] from the acceptor on success
+/// (Phase 44b), so callers can inspect the peer's `schema_version`
+/// and decide whether to issue a [`PeerDataOp::PullSchemaSince`].
 pub async fn probe_peer_with_gossip(
     addr: &str,
     local_cluster_id: Uuid,
     local_node_id: Uuid,
     server_version: &str,
     payload: GossipPayload,
-) -> Result<(), String> {
+) -> Result<ClusterHelloResponse, String> {
     let mut stream = TcpStream::connect(addr)
         .await
         .map_err(|e| format!("connect failed: {e}"))?;
 
-    let (_, outcome) = run_initiator_with_gossip(
+    let (response, outcome) = run_initiator_with_gossip(
         &mut stream,
         local_cluster_id,
         local_node_id,
@@ -460,8 +529,52 @@ pub async fn probe_peer_with_gossip(
     .map_err(|e| format!("handshake error: {e}"))?;
 
     match outcome {
-        HandshakeOutcome::Accepted { .. } => Ok(()),
+        HandshakeOutcome::Accepted { .. } => Ok(response),
         HandshakeOutcome::Rejected { error } => Err(format!("handshake rejected: {error}")),
+    }
+}
+
+/// Phase 44b: ask a peer for every schema log entry strictly newer
+/// than `since_version`. The handshake is performed first; the
+/// `PullSchemaSince` op is then sent on the same connection.
+pub async fn pull_schema_from_peer(
+    ctx: &PeerRpcContext,
+    since_version: u64,
+) -> Result<Vec<SchemaLogEntry>, String> {
+    let mut stream = TcpStream::connect(&ctx.addr)
+        .await
+        .map_err(|e| format!("connect failed: {e}"))?;
+
+    let (_, outcome) = run_initiator(
+        &mut stream,
+        ctx.local_cluster_id,
+        ctx.local_node_id,
+        &ctx.server_version,
+    )
+    .await
+    .map_err(|e| format!("handshake error: {e}"))?;
+
+    match outcome {
+        HandshakeOutcome::Accepted { .. } => {}
+        HandshakeOutcome::Rejected { error } => {
+            return Err(format!("handshake rejected: {error}"));
+        }
+    }
+
+    let req = PeerDataOp::PullSchemaSince { since_version };
+    write_frame(&mut stream, &req)
+        .await
+        .map_err(|e| format!("write op failed: {e}"))?;
+
+    let resp: PeerDataOpResponse = read_frame(&mut stream)
+        .await
+        .map_err(|e| format!("read op response failed: {e}"))?;
+    match resp {
+        PeerDataOpResponse::SchemaDiff { entries } => Ok(entries),
+        PeerDataOpResponse::Error { message } => Err(message),
+        other => Err(format!(
+            "unexpected response for pull_schema_since: {other:?}"
+        )),
     }
 }
 
@@ -508,6 +621,9 @@ pub async fn fetch_peer_value(
         PeerDataOpResponse::Keys { .. } => Err("unexpected keys response for get".to_string()),
         PeerDataOpResponse::Ack => Err("unexpected ack for get".to_string()),
         PeerDataOpResponse::Error { message } => Err(message),
+        PeerDataOpResponse::SchemaDiff { .. } => {
+            Err("unexpected schema_diff response for get".to_string())
+        }
     }
 }
 
@@ -556,6 +672,9 @@ pub async fn upsert_peer_value(
         PeerDataOpResponse::Value { .. } => Err("unexpected value response for upsert".into()),
         PeerDataOpResponse::Keys { .. } => Err("unexpected keys response for upsert".into()),
         PeerDataOpResponse::Error { message } => Err(message),
+        PeerDataOpResponse::SchemaDiff { .. } => {
+            Err("unexpected schema_diff response for upsert".into())
+        }
     }
 }
 
@@ -599,6 +718,9 @@ pub async fn delete_peer_value(ctx: &PeerRpcContext, key_path: &PeerKeyPath) -> 
         PeerDataOpResponse::Value { .. } => Err("unexpected value response for delete".into()),
         PeerDataOpResponse::Keys { .. } => Err("unexpected keys response for delete".into()),
         PeerDataOpResponse::Error { message } => Err(message),
+        PeerDataOpResponse::SchemaDiff { .. } => {
+            Err("unexpected schema_diff response for delete".into())
+        }
     }
 }
 
@@ -652,6 +774,9 @@ pub async fn create_peer_index(
         }
         PeerDataOpResponse::Keys { .. } => Err("unexpected keys response for create_index".into()),
         PeerDataOpResponse::Error { message } => Err(message),
+        PeerDataOpResponse::SchemaDiff { .. } => {
+            Err("unexpected schema_diff response for create_index".into())
+        }
     }
 }
 
@@ -701,6 +826,9 @@ pub async fn drop_peer_index(
         PeerDataOpResponse::Value { .. } => Err("unexpected value response for drop_index".into()),
         PeerDataOpResponse::Keys { .. } => Err("unexpected keys response for drop_index".into()),
         PeerDataOpResponse::Error { message } => Err(message),
+        PeerDataOpResponse::SchemaDiff { .. } => {
+            Err("unexpected schema_diff response for drop_index".into())
+        }
     }
 }
 
@@ -752,6 +880,9 @@ pub async fn query_peer_index_exact(
         PeerDataOpResponse::Value { .. } => Err("unexpected value response for query".into()),
         PeerDataOpResponse::Ack => Err("unexpected ack for query".into()),
         PeerDataOpResponse::Error { message } => Err(message),
+        PeerDataOpResponse::SchemaDiff { .. } => {
+            Err("unexpected schema_diff response for query".into())
+        }
     }
 }
 
@@ -805,6 +936,9 @@ pub async fn query_peer_index_range(
         PeerDataOpResponse::Value { .. } => Err("unexpected value response for query_range".into()),
         PeerDataOpResponse::Ack => Err("unexpected ack for query_range".into()),
         PeerDataOpResponse::Error { message } => Err(message),
+        PeerDataOpResponse::SchemaDiff { .. } => {
+            Err("unexpected schema_diff response for query_range".into())
+        }
     }
 }
 
@@ -880,12 +1014,14 @@ pub async fn serve(
                     let shared_server = shared_server.clone();
                     let server_version = server_version.clone();
                     tokio::spawn(async move {
-                        match run_acceptor_with_hello(
+                        let local_schema_version = coordinator.schema_version();
+                        match run_acceptor_with_hello_and_schema(
                             &mut stream,
                             identity.cluster_id,
                             identity.node_id,
                             &server_version,
                             &known,
+                            local_schema_version,
                         )
                         .await
                         {
@@ -910,7 +1046,11 @@ pub async fn serve(
 
                                 match op {
                                     Ok(Ok(op)) => {
-                                        let resp = handle_peer_data_op(op, &shared_server);
+                                        let resp = handle_peer_data_op_with_coord(
+                                            op,
+                                            &shared_server,
+                                            &coordinator,
+                                        );
                                         if let Err(e) = write_frame(&mut stream, &resp).await {
                                             tracing::warn!(peer = %peer, error = %e, "cluster peer op response write failed");
                                         }
@@ -1173,7 +1313,29 @@ fn handle_peer_data_op(op: PeerDataOp, shared_server: &SharedServer) -> PeerData
                 },
             }
         }
+        PeerDataOp::PullSchemaSince { .. } => PeerDataOpResponse::Error {
+            // Phase 44b: handled by [`handle_peer_data_op_with_coord`].
+            // The bare [`handle_peer_data_op`] has no coordinator
+            // handle, so it must explicitly refuse.
+            message: "PullSchemaSince not supported on this peer endpoint".to_string(),
+        },
     }
+}
+
+/// Phase 44b dispatcher used by the live peer listener: forwards
+/// every legacy op to [`handle_peer_data_op`] and handles
+/// [`PeerDataOp::PullSchemaSince`] locally by reading from the
+/// coordinator's [`SchemaState`].
+fn handle_peer_data_op_with_coord(
+    op: PeerDataOp,
+    shared_server: &SharedServer,
+    coordinator: &Coordinator,
+) -> PeerDataOpResponse {
+    if let PeerDataOp::PullSchemaSince { since_version } = op {
+        let entries = coordinator.local_schema_diff_since(since_version);
+        return PeerDataOpResponse::SchemaDiff { entries };
+    }
+    handle_peer_data_op(op, shared_server)
 }
 
 fn ensure_peer_write_target(
@@ -1428,6 +1590,7 @@ mod tests {
             last_seen_at_unix: None,
             vnode_assignments: Vec::new(),
             membership: Vec::new(),
+            schema_version: 0,
         };
         let err = write_frame(&mut a, &hello).await.unwrap_err();
         assert!(

@@ -8,6 +8,15 @@ Status note (v6 Stream E):
 - Phase 44 is complete. GrumpyDB now runs background peer probes,
   gossips runtime membership over handshake payloads, and converges peer
   liveness/vnode metadata in `TOPOLOGY` beyond the initial static seed list.
+- Phase 44 (Schema gossip) is complete. `CREATE INDEX` / `DROP INDEX` are
+  recorded in a per-node `_cluster/schema.log`, advertised through the
+  existing gossip probe loop via `GossipPayload.schema_version`, and
+  pulled by lagging peers via the new `PeerDataOp::PullSchemaSince` RPC.
+  A background materializer task per node consumes incoming schema diffs
+  and calls the engine's existing `Database::create_index` /
+  `drop_index`. Two new admin commands (`SCHEMA VERSION`, `SCHEMA STATUS`)
+  expose the local view. See [`SCHEMA_GOSSIP.md`](./SCHEMA_GOSSIP.md) and
+  [`IMPLEMENTATION_PLAN_V5.md`](./IMPLEMENTATION_PLAN_V5.md) for details.
 - Phase 45 is complete. Coordinator routing defaults to
   `N = min(3, cluster_size)`, write admission is allowed on any local write
   replica in the key's preference list, and bounded `WRITE_CONCERN W` in

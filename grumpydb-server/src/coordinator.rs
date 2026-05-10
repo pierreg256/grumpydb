@@ -21,7 +21,17 @@ use crate::cluster::handshake::{
     query_peer_index_exact, query_peer_index_range, upsert_peer_value,
 };
 use crate::cluster::hints::{HintOperation, HintRecord};
+use crate::cluster::schema::log::SchemaLog;
+use crate::cluster::schema::materializer::MaterializerHandle;
+use crate::cluster::schema::{ApplyOutcome, IndexKey, SchemaLogEntry, SchemaOp, SchemaState};
 use crate::config::{ClusterSection, PeerEntry, WriterEntry};
+
+// `create_peer_index` / `drop_peer_index` are still imported because the
+// hint-replay path in [`Coordinator::replay_hint_to_peer`] can replay
+// historical [`HintOperation::CreateIndex`] / [`HintOperation::DropIndex`]
+// records that may exist on disk from pre-44c installations. New schema
+// DDL no longer goes through hints — it propagates via the gossip path
+// in [`crate::cluster::schema`].
 
 /// Lightweight server-side coordinator.
 #[derive(Debug)]
@@ -37,6 +47,16 @@ pub struct Coordinator {
     peer_addrs: BTreeMap<String, String>,
     writers: Vec<WriterEntry>,
     peers: RwLock<BTreeMap<String, PeerRuntime>>,
+    /// Phase 44b: cluster-wide schema state, lazily updated by gossip
+    /// pulls. `None` when the binary runs in single-node mode without
+    /// a data dir (e.g. some unit tests). Always `Some` in production.
+    schema: Option<RwLock<SchemaState>>,
+    /// Append-only on-disk schema log. Pairs with `schema`.
+    schema_log: Option<SchemaLog>,
+    /// Phase 44c: optional handle to the background materializer.
+    /// `None` when running headless (most unit tests). Always `Some`
+    /// in production after [`Self::attach_materializer`].
+    materializer: Option<MaterializerHandle>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,7 +148,260 @@ impl Coordinator {
             peer_addrs,
             writers: cluster.writers.clone(),
             peers: RwLock::new(peers),
+            schema: None,
+            schema_log: None,
+            materializer: None,
         }
+    }
+
+    /// Attach a [`SchemaState`] + on-disk [`SchemaLog`] to this
+    /// coordinator (Phase 44b). The state must already reflect the
+    /// log (typically via [`SchemaLog::open`]).
+    pub fn attach_schema(&mut self, state: SchemaState, log: SchemaLog) {
+        self.schema = Some(RwLock::new(state));
+        self.schema_log = Some(log);
+    }
+
+    /// Attach the background materializer handle (Phase 44c).
+    /// Called once at startup after [`Self::attach_schema`].
+    pub fn attach_materializer(&mut self, handle: MaterializerHandle) {
+        self.materializer = Some(handle);
+    }
+
+    /// Per-cluster monotonic schema version known by this node
+    /// (Phase 44b). Returns `0` when no schema state is attached.
+    pub fn schema_version(&self) -> u64 {
+        self.schema
+            .as_ref()
+            .map(|s| s.read().version())
+            .unwrap_or(0)
+    }
+
+    /// Phase 44d: JSON snapshot of every locally-known schema entry.
+    /// The shape is:
+    ///
+    /// ```json
+    /// {
+    ///   "node_id": "...",
+    ///   "schema_version": 7,
+    ///   "indexes": [
+    ///     {"tenant":"_system","database":"demo","collection":"docs",
+    ///      "index_name":"by_name","field_path":"name",
+    ///      "tombstone":false,"last_modified_hlc":1700000123456}
+    ///   ]
+    /// }
+    /// ```
+    pub fn schema_status_json(&self) -> serde_json::Value {
+        let entries: Vec<serde_json::Value> = match self.schema.as_ref() {
+            None => Vec::new(),
+            Some(lock) => {
+                let s = lock.read();
+                s.all_entries()
+                    .map(|(k, e)| {
+                        json!({
+                            "tenant": k.tenant,
+                            "database": k.database,
+                            "collection": k.collection,
+                            "index_name": k.index_name,
+                            "field_path": e.field_path,
+                            "tombstone": e.tombstone,
+                            "last_modified_hlc": e.last_modified_hlc,
+                        })
+                    })
+                    .collect()
+            }
+        };
+        json!({
+            "node_id": self.local_node_id,
+            "schema_version": self.schema_version(),
+            "indexes": entries,
+        })
+    }
+
+    /// Phase 44d: returns `true` when a *live* (non-tombstoned)
+    /// definition for the given index exists in the local schema
+    /// state. Used by the QUERY error path to distinguish "this
+    /// index is not in the cluster schema at all" (real error) from
+    /// "the schema knows about it but the local materializer hasn't
+    /// finished yet" (transient).
+    pub fn schema_has_index(
+        &self,
+        tenant: &str,
+        database: &str,
+        collection: &str,
+        index_name: &str,
+    ) -> bool {
+        let Some(lock) = self.schema.as_ref() else {
+            return false;
+        };
+        let s = lock.read();
+        let key = IndexKey {
+            tenant: tenant.to_string(),
+            database: database.to_string(),
+            collection: collection.to_string(),
+            index_name: index_name.to_string(),
+        };
+        s.get(&key).is_some()
+    }
+
+    /// Return every locally-known schema log entry strictly newer than
+    /// `since`, in ascending version order. Used to serve
+    /// [`crate::cluster::handshake::PeerDataOp::PullSchemaSince`].
+    pub fn local_schema_diff_since(&self, since: u64) -> Vec<SchemaLogEntry> {
+        self.schema
+            .as_ref()
+            .map(|s| s.read().entries_since(since))
+            .unwrap_or_default()
+    }
+
+    /// Apply a batch of remote schema entries (typically the result
+    /// of a gossip pull). Each entry is appended to the on-disk log
+    /// before being applied to the in-memory state, so a crash
+    /// midway leaves the log as the source of truth.
+    ///
+    /// Returns the number of entries that produced an `Applied`
+    /// outcome (i.e. were not duplicates or LWW losers). For each
+    /// `Applied` entry, a [`crate::cluster::schema::materializer::MaterializeJob`]
+    /// is enqueued on the background materializer (when attached).
+    pub fn apply_remote_schema_entries(&self, entries: &[SchemaLogEntry]) -> usize {
+        let (Some(schema), Some(log)) = (self.schema.as_ref(), self.schema_log.as_ref()) else {
+            return 0;
+        };
+
+        let mut applied = 0usize;
+        let mut to_persist = Vec::with_capacity(entries.len());
+        let mut state = schema.write();
+        for entry in entries {
+            match state.apply(entry) {
+                ApplyOutcome::Applied => {
+                    applied += 1;
+                    to_persist.push(entry.clone());
+                }
+                ApplyOutcome::Stale | ApplyOutcome::Duplicate => {}
+            }
+        }
+        drop(state);
+
+        if !to_persist.is_empty()
+            && let Err(e) = log.append_batch(&to_persist)
+        {
+            tracing::warn!(error = %e, count = to_persist.len(), "schema log append failed");
+        }
+
+        if applied > 0 {
+            metrics::gauge!(
+                "grumpydb_schema_version",
+                "node_id" => self.local_node_id.clone()
+            )
+            .set(self.schema_version() as f64);
+            metrics::counter!(
+                "grumpydb_schema_pulls_total",
+                "result" => "applied"
+            )
+            .increment(applied as u64);
+        }
+
+        if let Some(mat) = &self.materializer {
+            for entry in &to_persist {
+                mat.enqueue_from_entry(entry);
+            }
+        }
+
+        applied
+    }
+
+    /// Apply one DDL operation originating on this node (Phase 44c).
+    ///
+    /// Steps:
+    /// 1. Allocate the next [`SchemaState::next_version`].
+    /// 2. Build a [`SchemaLogEntry`] stamped with the supplied HLC.
+    /// 3. Insert it into the in-memory state.
+    /// 4. Persist it to the on-disk schema log.
+    /// 5. Return the entry so the caller can advertise its `version`
+    ///    (and so tests can introspect).
+    ///
+    /// The local engine-level apply (`db.create_index` /
+    /// `db.drop_index`) is **not** performed here: it stays in the
+    /// DDL handler's `with_db` block so the client sees the result
+    /// synchronously. Peers learn about the change via the gossip
+    /// path, then materialize asynchronously through the background
+    /// worker.
+    ///
+    /// Returns `None` when no schema state is attached (e.g. in
+    /// some unit tests that build a `Coordinator` without a data dir).
+    pub fn apply_local_ddl(&self, op: SchemaOp, hlc: u64) -> Option<SchemaLogEntry> {
+        let (Some(schema), Some(log)) = (self.schema.as_ref(), self.schema_log.as_ref()) else {
+            return None;
+        };
+
+        let mut state = schema.write();
+        let version = state.next_version();
+        let entry = SchemaLogEntry { version, hlc, op };
+        // Apply unconditionally: a locally-issued DDL always advances
+        // our view (we just allocated the version).
+        let _ = state.apply(&entry);
+        drop(state);
+
+        if let Err(e) = log.append(&entry) {
+            tracing::warn!(error = %e, "local schema log append failed");
+        }
+
+        metrics::gauge!(
+            "grumpydb_schema_version",
+            "node_id" => self.local_node_id.clone()
+        )
+        .set(self.schema_version() as f64);
+
+        if let Some(mat) = &self.materializer {
+            mat.enqueue_from_entry(&entry);
+        }
+
+        Some(entry)
+    }
+
+    /// Convenience shorthand: build a `CreateIndex` op and apply it
+    /// locally. Returns the stamped log entry.
+    pub fn apply_local_create_index(
+        &self,
+        tenant: &str,
+        database: &str,
+        collection: &str,
+        index_name: &str,
+        field_path: &str,
+        hlc: u64,
+    ) -> Option<SchemaLogEntry> {
+        let key = IndexKey {
+            tenant: tenant.to_string(),
+            database: database.to_string(),
+            collection: collection.to_string(),
+            index_name: index_name.to_string(),
+        };
+        self.apply_local_ddl(
+            SchemaOp::CreateIndex {
+                key,
+                field_path: field_path.to_string(),
+            },
+            hlc,
+        )
+    }
+
+    /// Convenience shorthand: build a `DropIndex` op and apply it
+    /// locally. Returns the stamped log entry.
+    pub fn apply_local_drop_index(
+        &self,
+        tenant: &str,
+        database: &str,
+        collection: &str,
+        index_name: &str,
+        hlc: u64,
+    ) -> Option<SchemaLogEntry> {
+        let key = IndexKey {
+            tenant: tenant.to_string(),
+            database: database.to_string(),
+            collection: collection.to_string(),
+            index_name: index_name.to_string(),
+        };
+        self.apply_local_ddl(SchemaOp::DropIndex { key }, hlc)
     }
 
     /// Update peer liveness fields from the gossip runtime.
@@ -196,6 +469,7 @@ impl Coordinator {
             last_seen_at_unix,
             vnode_assignments,
             membership,
+            schema_version: self.schema_version(),
         }
     }
 
@@ -861,53 +1135,6 @@ impl Coordinator {
             key: key.to_string(),
         };
         upsert_peer_value(&ctx, &key_path, value_json).await
-    }
-
-    /// Create one secondary index on a remote replica.
-    pub async fn create_index_on_peer(
-        &self,
-        peer_node_id: &str,
-        tenant: &str,
-        database: &str,
-        collection: &str,
-        index_name: &str,
-        field_path: &str,
-    ) -> Result<(), String> {
-        let addr = self
-            .peer_addrs
-            .get(peer_node_id)
-            .ok_or_else(|| format!("unknown peer: {peer_node_id}"))?;
-        let server_version = format!("grumpydb-server/{}", env!("CARGO_PKG_VERSION"));
-        let ctx = PeerRpcContext {
-            addr: addr.clone(),
-            local_cluster_id: self.cluster_uuid,
-            local_node_id: self.local_node_uuid,
-            server_version,
-        };
-        create_peer_index(&ctx, tenant, database, collection, index_name, field_path).await
-    }
-
-    /// Drop one secondary index on a remote replica.
-    pub async fn drop_index_on_peer(
-        &self,
-        peer_node_id: &str,
-        tenant: &str,
-        database: &str,
-        collection: &str,
-        index_name: &str,
-    ) -> Result<(), String> {
-        let addr = self
-            .peer_addrs
-            .get(peer_node_id)
-            .ok_or_else(|| format!("unknown peer: {peer_node_id}"))?;
-        let server_version = format!("grumpydb-server/{}", env!("CARGO_PKG_VERSION"));
-        let ctx = PeerRpcContext {
-            addr: addr.clone(),
-            local_cluster_id: self.cluster_uuid,
-            local_node_id: self.local_node_uuid,
-            server_version,
-        };
-        drop_peer_index(&ctx, tenant, database, collection, index_name).await
     }
 
     /// Replay one hinted-handoff record to a peer.
@@ -1658,6 +1885,7 @@ mod tests {
                 last_seen_at_unix: Some(150),
                 vnode_assignments: vec![9, 10],
             }],
+            schema_version: 0,
         };
 
         c.merge_gossip_from_peer("11111111-1111-1111-1111-111111111111", &hello, Some(210));
@@ -1814,5 +2042,365 @@ mod tests {
     fn test_peer_is_live_returns_false_for_unknown_peer() {
         let c = Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
         assert!(!c.peer_is_live("unknown-peer"));
+    }
+
+    // ── Phase 44b: schema state + pull RPC ─────────────────────────
+
+    use crate::cluster::schema::{IndexKey, SchemaOp};
+
+    fn schema_create(version: u64, hlc: u64, name: &str, field: &str) -> SchemaLogEntry {
+        SchemaLogEntry {
+            version,
+            hlc,
+            op: SchemaOp::CreateIndex {
+                key: IndexKey {
+                    tenant: "_system".into(),
+                    database: "demo".into(),
+                    collection: "docs".into(),
+                    index_name: name.into(),
+                },
+                field_path: field.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn test_schema_version_zero_when_unattached() {
+        let c = Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        assert_eq!(c.schema_version(), 0);
+        assert!(c.local_schema_diff_since(0).is_empty());
+        // Apply on an unattached coordinator silently does nothing.
+        assert_eq!(
+            c.apply_remote_schema_entries(&[schema_create(1, 100, "by_x", "x")]),
+            0
+        );
+    }
+
+    #[test]
+    fn test_apply_remote_schema_entries_advances_version_and_persists() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let (log, state) = SchemaLog::open(dir.path()).expect("open schema log");
+        let mut c =
+            Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        c.attach_schema(state, log);
+
+        let applied = c.apply_remote_schema_entries(&[
+            schema_create(1, 100, "by_a", "a"),
+            schema_create(2, 200, "by_b", "b"),
+            // Replay of version 1 — must be a duplicate, not re-applied.
+            schema_create(1, 100, "by_a", "a"),
+        ]);
+        assert_eq!(applied, 2);
+        assert_eq!(c.schema_version(), 2);
+
+        // Re-open the log on disk and verify both Applied entries are persisted.
+        let (_log2, state2) = SchemaLog::open(dir.path()).expect("reopen");
+        assert_eq!(state2.version(), 2);
+    }
+
+    #[test]
+    fn test_local_schema_diff_since_returns_versions_above_threshold() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let (log, state) = SchemaLog::open(dir.path()).expect("open schema log");
+        let mut c =
+            Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        c.attach_schema(state, log);
+
+        c.apply_remote_schema_entries(&[
+            schema_create(1, 100, "by_a", "a"),
+            schema_create(2, 200, "by_b", "b"),
+            schema_create(3, 300, "by_c", "c"),
+        ]);
+
+        let diff = c.local_schema_diff_since(1);
+        assert_eq!(diff.len(), 2);
+        assert_eq!(diff[0].version, 2);
+        assert_eq!(diff[1].version, 3);
+    }
+
+    #[test]
+    fn test_gossip_payload_carries_local_schema_version() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let (log, state) = SchemaLog::open(dir.path()).expect("open schema log");
+        let mut c =
+            Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        c.attach_schema(state, log);
+        c.apply_remote_schema_entries(&[schema_create(7, 700, "by_a", "a")]);
+
+        assert_eq!(c.gossip_payload().schema_version, 7);
+    }
+
+    /// End-to-end smoke test of the Phase 44b pull RPC. We spin up a
+    /// minimal acceptor that runs the same `pull_schema_from_peer`
+    /// dispatch as the live peer listener, then issue the call from
+    /// a separate client task.
+    #[tokio::test]
+    async fn test_pull_schema_from_peer_round_trip() {
+        use crate::cluster::handshake::{
+            HandshakeOutcome, PeerDataOp, PeerDataOpResponse, pull_schema_from_peer, read_frame,
+            run_acceptor_with_hello_and_schema, write_frame,
+        };
+
+        let server_identity = identity();
+        let server_uuid = server_identity.node_id;
+        let cluster_uuid = server_identity.cluster_id;
+
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let (log, state) = SchemaLog::open(dir.path()).expect("open schema log");
+        let mut server_coord = Coordinator::from_config(
+            &server_identity,
+            &ClusterSection::default(),
+            "127.0.0.1:6380",
+        );
+        server_coord.attach_schema(state, log);
+        server_coord.apply_remote_schema_entries(&[
+            schema_create(1, 100, "by_a", "a"),
+            schema_create(2, 200, "by_b", "b"),
+            schema_create(3, 300, "by_c", "c"),
+        ]);
+        let server_coord = Arc::new(server_coord);
+        assert_eq!(server_coord.schema_version(), 3);
+
+        // Client identity (must be in known_peers so the handshake
+        // is accepted).
+        let client_uuid = Uuid::new_v4();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let server_addr = listener.local_addr().expect("local addr").to_string();
+
+        let server_task = {
+            let server_coord = server_coord.clone();
+            tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut known = HashSet::new();
+                known.insert(client_uuid);
+                let local_schema_version = server_coord.schema_version();
+                let (outcome, _hello) = run_acceptor_with_hello_and_schema(
+                    &mut stream,
+                    cluster_uuid,
+                    server_uuid,
+                    "grumpydb-test",
+                    &known,
+                    local_schema_version,
+                )
+                .await
+                .expect("acceptor handshake");
+                assert!(matches!(outcome, HandshakeOutcome::Accepted { .. }));
+
+                let op: PeerDataOp = read_frame(&mut stream).await.expect("read op");
+                let resp = match op {
+                    PeerDataOp::PullSchemaSince { since_version } => {
+                        PeerDataOpResponse::SchemaDiff {
+                            entries: server_coord.local_schema_diff_since(since_version),
+                        }
+                    }
+                    other => panic!("expected PullSchemaSince, got {other:?}"),
+                };
+                write_frame(&mut stream, &resp).await.expect("write resp");
+            })
+        };
+
+        let ctx = PeerRpcContext {
+            addr: server_addr,
+            local_cluster_id: cluster_uuid,
+            local_node_id: client_uuid,
+            server_version: "grumpydb-test-client".to_string(),
+        };
+        let entries = pull_schema_from_peer(&ctx, 1).await.expect("pull");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].version, 2);
+        assert_eq!(entries[1].version, 3);
+
+        let _ = server_task.await;
+    }
+
+    // ── Phase 44c: local DDL + materializer chain ────────────────────
+
+    use grumpydb::SharedServer;
+    use grumpydb::document::value::Value;
+    use std::collections::BTreeMap;
+
+    fn doc(name: &str, age: i64) -> Value {
+        let mut map = BTreeMap::new();
+        map.insert("name".into(), Value::String(name.into()));
+        map.insert("age".into(), Value::Integer(age));
+        Value::Object(map)
+    }
+
+    #[test]
+    fn test_apply_local_ddl_returns_none_without_attached_schema() {
+        let c = Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        assert!(
+            c.apply_local_create_index("t", "d", "c", "by_x", "x", 100)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_apply_local_ddl_advances_version_and_persists() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let (log, state) = SchemaLog::open(dir.path()).expect("open schema log");
+        let mut c =
+            Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        c.attach_schema(state, log);
+
+        let e1 = c
+            .apply_local_create_index("_system", "demo", "docs", "by_a", "a", 100)
+            .expect("entry");
+        assert_eq!(e1.version, 1);
+        assert_eq!(c.schema_version(), 1);
+
+        let e2 = c
+            .apply_local_create_index("_system", "demo", "docs", "by_b", "b", 200)
+            .expect("entry");
+        assert_eq!(e2.version, 2);
+
+        // Re-open the log and check both entries are persisted.
+        let (_log2, state2) = SchemaLog::open(dir.path()).expect("reopen");
+        assert_eq!(state2.version(), 2);
+    }
+
+    /// End-to-end: Coordinator with attached materializer, issue a
+    /// local DDL, observe the on-disk index file appearing on the
+    /// local SharedServer.
+    #[tokio::test]
+    async fn test_apply_local_ddl_materializes_index_on_disk() {
+        use crate::cluster::schema::materializer;
+
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let server = SharedServer::open(dir.path()).expect("open server");
+        server.create_client("_system").expect("client");
+        server.create_database("_system", "demo").expect("db");
+        let db = server.database("_system", "demo").expect("open db");
+        db.create_collection("docs").expect("collection");
+        db.insert("docs", Uuid::new_v4(), doc("alice", 30))
+            .expect("insert");
+
+        let (log, state) = SchemaLog::open(dir.path()).expect("open schema log");
+        let mut c =
+            Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        c.attach_schema(state, log);
+        c.attach_materializer(materializer::spawn(server.clone()));
+
+        let entry = c
+            .apply_local_create_index("_system", "demo", "docs", "by_name", "name", 100)
+            .expect("entry");
+        assert_eq!(entry.version, 1);
+
+        let idx_path = dir
+            .path()
+            .join("_system")
+            .join("demo")
+            .join("docs")
+            .join("idx_by_name.idx");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if idx_path.exists() {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("materializer did not create {idx_path:?} within 2s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// Apply a remote schema entry on a node whose data dir already
+    /// holds the underlying collection: the materializer must produce
+    /// the local index file.
+    #[tokio::test]
+    async fn test_apply_remote_schema_entries_triggers_materialization() {
+        use crate::cluster::schema::materializer;
+
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let server = SharedServer::open(dir.path()).expect("open server");
+        server.create_client("_system").expect("client");
+        server.create_database("_system", "demo").expect("db");
+        let db = server.database("_system", "demo").expect("open db");
+        db.create_collection("docs").expect("collection");
+        db.insert("docs", Uuid::new_v4(), doc("alice", 30))
+            .expect("insert");
+
+        let (log, state) = SchemaLog::open(dir.path()).expect("open schema log");
+        let mut c =
+            Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        c.attach_schema(state, log);
+        c.attach_materializer(materializer::spawn(server.clone()));
+
+        let applied = c.apply_remote_schema_entries(&[schema_create(7, 700, "by_name", "name")]);
+        assert_eq!(applied, 1);
+        assert_eq!(c.schema_version(), 7);
+
+        let idx_path = dir
+            .path()
+            .join("_system")
+            .join("demo")
+            .join("docs")
+            .join("idx_by_name.idx");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if idx_path.exists() {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("materializer did not create {idx_path:?} within 2s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    // ── Phase 44d: SCHEMA STATUS / SCHEMA VERSION introspection ──
+
+    #[test]
+    fn test_schema_status_json_when_unattached_is_empty() {
+        let c = Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        let snap = c.schema_status_json();
+        assert_eq!(snap["schema_version"], 0);
+        assert!(snap["indexes"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_schema_status_json_lists_live_and_tombstoned_entries() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let (log, state) = SchemaLog::open(dir.path()).expect("open schema log");
+        let mut c =
+            Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        c.attach_schema(state, log);
+        c.apply_remote_schema_entries(&[
+            schema_create(1, 100, "by_a", "a"),
+            schema_create(2, 200, "by_b", "b"),
+        ]);
+        c.apply_local_drop_index("_system", "demo", "docs", "by_a", 300);
+
+        let snap = c.schema_status_json();
+        assert_eq!(snap["schema_version"], 3);
+        let indexes = snap["indexes"].as_array().unwrap();
+        assert_eq!(indexes.len(), 2);
+        let by_a = indexes
+            .iter()
+            .find(|e| e["index_name"] == "by_a")
+            .expect("by_a entry");
+        assert_eq!(by_a["tombstone"], true);
+        let by_b = indexes
+            .iter()
+            .find(|e| e["index_name"] == "by_b")
+            .expect("by_b entry");
+        assert_eq!(by_b["tombstone"], false);
+    }
+
+    #[test]
+    fn test_schema_has_index_returns_false_for_missing_or_tombstoned() {
+        let dir = tempfile::TempDir::new().expect("tmp");
+        let (log, state) = SchemaLog::open(dir.path()).expect("open schema log");
+        let mut c =
+            Coordinator::from_config(&identity(), &ClusterSection::default(), "127.0.0.1:6380");
+        c.attach_schema(state, log);
+        c.apply_remote_schema_entries(&[schema_create(1, 100, "by_a", "a")]);
+
+        assert!(c.schema_has_index("_system", "demo", "docs", "by_a"));
+        assert!(!c.schema_has_index("_system", "demo", "docs", "by_missing"));
+
+        c.apply_local_drop_index("_system", "demo", "docs", "by_a", 200);
+        assert!(!c.schema_has_index("_system", "demo", "docs", "by_a"));
     }
 }
