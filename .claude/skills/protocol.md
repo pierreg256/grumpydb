@@ -104,6 +104,25 @@ pub const MAX_BULK_LENGTH: usize = 16_777_216;   // 16 MiB
 - Bulk strings MUST reject data longer than `MAX_BULK_LENGTH`
 - These limits prevent denial-of-service via memory exhaustion
 
+> **`PROTOCOL_VERSION` vs package version.** `PROTOCOL_VERSION` is the
+> **wire** version advertised in the connection banner
+> (`+GRUMPYDB <PROTOCOL_VERSION>\r\n`). It is **not** the workspace /
+> crate version (which evolves at every release — `5.1.x`, `5.2.x`, …).
+>
+> The wire version bumps **only** on breaking wire changes (incompatible
+> command grammar, removed verbs, response shape changes that would
+> break a permissive driver). Additive changes ship without a bump:
+> - New commands a v4 driver will simply never send (e.g. `SCHEMA
+>   VERSION`, `SCHEMA STATUS` shipped in v5 phase 44d).
+> - New rows with reserved prefixes inside an existing
+>   `Response::Array` (e.g. the `_warning convergence: …` sentinel
+>   shipped in v5 phase 44f). Drivers MUST ignore unrecognized rows
+>   whose first byte is `_`.
+>
+> When a sync agent flags a "version mismatch" between this skill and
+> the workspace `Cargo.toml` package version, it is almost always a
+> false positive — the two are intentionally decoupled.
+
 ### Command → Action + Resource mapping
 
 Every command maps to an `Action` (what it does) and a `Resource` (what it targets).
